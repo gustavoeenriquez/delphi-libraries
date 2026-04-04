@@ -1,0 +1,61 @@
+# Delphi Compiler Output
+*.dcu
+*.exe
+*.dll
+*.bpl
+*.so
+*.dylib
+
+# Build Output
+Win32/
+Win64/
+Linux64/
+Debug/
+Release/
+__pycache__/
+
+# IDE Files
+*.local
+*.identcache
+*.groupproj.local
+.idea/
+.vscode/
+*.sublime-project
+*.sublime-workspace
+
+# Temporary Files
+*.bak
+*.tmp
+*.temp
+*.~pas
+__history/
+__recovery/
+
+# OS-specific
+.DS_Store
+Thumbs.db
+*.swp
+*.swo
+*~
+
+# Git internals only
+.git/
+
+# Documentation Build
+docs/_build/
+site/
+
+# Logs and temp build scripts
+*.log
+build_temp.bat
+
+# Internal / session files
+.claude/
+STRUCTURE.txt
+
+# Root-level helper scripts (local dev, not part of the library)
+build_flac.bat
+build_flac_check.bat
+build_flacenc.bat
+run_tests.bat
+run_tests_rest.bat

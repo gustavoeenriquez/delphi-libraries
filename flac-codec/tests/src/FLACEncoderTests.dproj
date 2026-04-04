@@ -1,0 +1,69 @@
+<Project xmlns="http://schemas.microsoft.com/developer/msbuild/2003">
+  <PropertyGroup>
+    <ProjectGuid>{E5F6A7B8-C9D0-1234-EF01-345678901234}</ProjectGuid>
+    <ProjectVersion>19.2</ProjectVersion>
+    <FrameworkType>None</FrameworkType>
+    <MainSource>FLACEncoderTests.dpr</MainSource>
+    <Base>True</Base>
+    <Config Condition="'$(Config)'==''">Debug</Config>
+    <Platform Condition="'$(Platform)'==''">Win64</Platform>
+    <TargetedPlatforms>1</TargetedPlatforms>
+    <AppType>Console</AppType>
+  </PropertyGroup>
+  <PropertyGroup Condition="'$(Config)'=='Base' or '$(Base)'=='True'">
+    <DCC_DcuOutput>.\$(Platform)\$(Config)</DCC_DcuOutput>
+    <DCC_ExeOutput>.\$(Platform)\$(Config)</DCC_ExeOutput>
+    <DCC_E>False</DCC_E>
+    <DCC_N>False</DCC_N>
+    <DCC_S>False</DCC_S>
+    <DCC_F>False</DCC_F>
+    <DCC_K>False</DCC_K>
+    <DCC_Namespace>System;Xml;Data;Datasnap;Web;Soap;Vcl;$(DCC_Namespace)</DCC_Namespace>
+    <Icon_MainIcon>$(BDS)\bin\delphi_PROJECTICON.ico</Icon_MainIcon>
+  </PropertyGroup>
+  <PropertyGroup Condition="'$(Config)'=='Debug' and '$(Platform)'=='Win64'">
+    <DCC_Define>DEBUG</DCC_Define>
+    <DCC_Optimize>False</DCC_Optimize>
+    <DCC_DebugInfoInExe>True</DCC_DebugInfoInExe>
+    <DCC_RemoteDebug>False</DCC_RemoteDebug>
+  </PropertyGroup>
+  <PropertyGroup Condition="'$(Config)'=='Release' and '$(Platform)'=='Win64'">
+    <DCC_Define>RELEASE</DCC_Define>
+    <DCC_Optimize>True</DCC_Optimize>
+    <DCC_DebugInfoInExe>False</DCC_DebugInfoInExe>
+    <DCC_RemoteDebug>False</DCC_RemoteDebug>
+  </PropertyGroup>
+  <ItemGroup>
+    <DelphiCompile Include="$(MainSource)">
+      <MainSource>MainSource</MainSource>
+    </DelphiCompile>
+    <DCCReference Include="..\..\..\audio-common\src\AudioTypes.pas"/>
+    <DCCReference Include="..\..\..\audio-common\src\AudioBitReader.pas"/>
+    <DCCReference Include="..\..\..\audio-common\src\AudioSampleConv.pas"/>
+    <DCCReference Include="..\..\..\audio-common\src\AudioCRC.pas"/>
+    <DCCReference Include="..\..\src\FLACTypes.pas"/>
+    <DCCReference Include="..\..\src\FLACBitWriter.pas"/>
+    <DCCReference Include="..\..\src\FLACBitReader.pas"/>
+    <DCCReference Include="..\..\src\FLACRiceCoder.pas"/>
+    <DCCReference Include="..\..\src\FLACRiceEncoder.pas"/>
+    <DCCReference Include="..\..\src\FLACPredictor.pas"/>
+    <DCCReference Include="..\..\src\FLACLPCAnalyzer.pas"/>
+    <DCCReference Include="..\..\src\FLACFrameDecoder.pas"/>
+    <DCCReference Include="..\..\src\FLACFrameEncoder.pas"/>
+    <DCCReference Include="..\..\src\FLACStreamDecoder.pas"/>
+    <DCCReference Include="..\..\src\FLACStreamEncoder.pas"/>
+  </ItemGroup>
+  <ProjectExtensions>
+    <Borland.Personality>Delphi.Personality.12</Borland.Personality>
+    <Borland.ProjectType>Application</Borland.ProjectType>
+    <BorlandProject>
+      <Delphi.Personality>
+        <VersionInfo>
+          <VersionInfo Name="IncludeVerInfo">False</VersionInfo>
+        </VersionInfo>
+      </Delphi.Personality>
+    </BorlandProject>
+  </ProjectExtensions>
+  <Import Project="$(BDS)\Bin\CodeGear.Delphi.Targets" Condition="Exists('$(BDS)\Bin\CodeGear.Delphi.Targets')"/>
+  <Import Project="$(APPDATA)\Embarcadero\BDS\$(BDSVersion)\EnvOptions.proj" Condition="Exists('$(APPDATA)\Embarcadero\BDS\$(BDSVersion)\EnvOptions.proj')"/>
+</Project>

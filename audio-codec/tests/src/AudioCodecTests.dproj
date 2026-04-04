@@ -1,0 +1,97 @@
+<Project xmlns="http://schemas.microsoft.com/developer/msbuild/2003">
+  <PropertyGroup>
+    <ProjectGuid>{C3D4E5F6-A7B8-9012-CD34-EF5678901234}</ProjectGuid>
+    <ProjectVersion>19.2</ProjectVersion>
+    <FrameworkType>None</FrameworkType>
+    <MainSource>AudioCodecTests.dpr</MainSource>
+    <Base>True</Base>
+    <Config Condition="'$(Config)'==''">Debug</Config>
+    <Platform Condition="'$(Platform)'==''">Win64</Platform>
+    <TargetedPlatforms>1</TargetedPlatforms>
+    <AppType>Console</AppType>
+  </PropertyGroup>
+  <PropertyGroup Condition="'$(Config)'=='Base' or '$(Base)'=='True'">
+    <DCC_DcuOutput>.\$(Platform)\$(Config)</DCC_DcuOutput>
+    <DCC_ExeOutput>.\$(Platform)\$(Config)</DCC_ExeOutput>
+    <DCC_E>False</DCC_E>
+    <DCC_N>False</DCC_N>
+    <DCC_S>False</DCC_S>
+    <DCC_F>False</DCC_F>
+    <DCC_K>False</DCC_K>
+    <DCC_Namespace>System;Xml;Data;Datasnap;Web;Soap;Vcl;$(DCC_Namespace)</DCC_Namespace>
+    <Icon_MainIcon>$(BDS)\bin\delphi_PROJECTICON.ico</Icon_MainIcon>
+    <DCC_UnitSearchPath>E:\Copilot\delphi-libraries\audio-common\src;E:\Copilot\delphi-libraries\ogg-container\src;E:\Copilot\delphi-libraries\wav-codec\src;E:\Copilot\delphi-libraries\flac-codec\src;E:\Copilot\delphi-libraries\vorbis-decoder\src;E:\Copilot\delphi-libraries\opus-decoder\src;E:\Copilot\delphi-libraries\audio-codec\src;$(DCC_UnitSearchPath)</DCC_UnitSearchPath>
+  </PropertyGroup>
+  <PropertyGroup Condition="'$(Config)'=='Debug' and '$(Platform)'=='Win64'">
+    <DCC_Define>DEBUG</DCC_Define>
+    <DCC_Optimize>False</DCC_Optimize>
+    <DCC_DebugInfoInExe>True</DCC_DebugInfoInExe>
+    <DCC_RemoteDebug>False</DCC_RemoteDebug>
+  </PropertyGroup>
+  <PropertyGroup Condition="'$(Config)'=='Release' and '$(Platform)'=='Win64'">
+    <DCC_Define>RELEASE</DCC_Define>
+    <DCC_Optimize>True</DCC_Optimize>
+    <DCC_DebugInfoInExe>False</DCC_DebugInfoInExe>
+    <DCC_RemoteDebug>False</DCC_RemoteDebug>
+  </PropertyGroup>
+  <ItemGroup>
+    <DelphiCompile Include="$(MainSource)">
+      <MainSource>MainSource</MainSource>
+    </DelphiCompile>
+    <!-- audio-common -->
+    <DCCReference Include="..\..\..\audio-common\src\AudioTypes.pas"/>
+    <DCCReference Include="..\..\..\audio-common\src\AudioBitReader.pas"/>
+    <DCCReference Include="..\..\..\audio-common\src\AudioSampleConv.pas"/>
+    <DCCReference Include="..\..\..\audio-common\src\AudioCRC.pas"/>
+    <!-- ogg-container -->
+    <DCCReference Include="..\..\..\ogg-container\src\OggTypes.pas"/>
+    <DCCReference Include="..\..\..\ogg-container\src\OggPageReader.pas"/>
+    <DCCReference Include="..\..\..\ogg-container\src\OggPageWriter.pas"/>
+    <!-- wav-codec -->
+    <DCCReference Include="..\..\..\wav-codec\src\WAVTypes.pas"/>
+    <DCCReference Include="..\..\..\wav-codec\src\WAVReader.pas"/>
+    <DCCReference Include="..\..\..\wav-codec\src\WAVWriter.pas"/>
+    <!-- flac-codec -->
+    <DCCReference Include="..\..\..\flac-codec\src\FLACTypes.pas"/>
+    <DCCReference Include="..\..\..\flac-codec\src\FLACBitReader.pas"/>
+    <DCCReference Include="..\..\..\flac-codec\src\FLACBitWriter.pas"/>
+    <DCCReference Include="..\..\..\flac-codec\src\FLACRiceCoder.pas"/>
+    <DCCReference Include="..\..\..\flac-codec\src\FLACRiceEncoder.pas"/>
+    <DCCReference Include="..\..\..\flac-codec\src\FLACPredictor.pas"/>
+    <DCCReference Include="..\..\..\flac-codec\src\FLACLPCAnalyzer.pas"/>
+    <DCCReference Include="..\..\..\flac-codec\src\FLACFrameDecoder.pas"/>
+    <DCCReference Include="..\..\..\flac-codec\src\FLACFrameEncoder.pas"/>
+    <DCCReference Include="..\..\..\flac-codec\src\FLACStreamDecoder.pas"/>
+    <DCCReference Include="..\..\..\flac-codec\src\FLACStreamEncoder.pas"/>
+    <!-- vorbis-decoder -->
+    <DCCReference Include="..\..\..\vorbis-decoder\src\VorbisTypes.pas"/>
+    <DCCReference Include="..\..\..\vorbis-decoder\src\VorbisCodebook.pas"/>
+    <DCCReference Include="..\..\..\vorbis-decoder\src\VorbisFloor.pas"/>
+    <DCCReference Include="..\..\..\vorbis-decoder\src\VorbisResidue.pas"/>
+    <DCCReference Include="..\..\..\vorbis-decoder\src\VorbisSetup.pas"/>
+    <DCCReference Include="..\..\..\vorbis-decoder\src\VorbisDecoder.pas"/>
+    <!-- opus-decoder -->
+    <DCCReference Include="..\..\..\opus-decoder\src\OpusTypes.pas"/>
+    <DCCReference Include="..\..\..\opus-decoder\src\OpusRangeDecoder.pas"/>
+    <DCCReference Include="..\..\..\opus-decoder\src\OpusSilk.pas"/>
+    <DCCReference Include="..\..\..\opus-decoder\src\OpusCelt.pas"/>
+    <DCCReference Include="..\..\..\opus-decoder\src\OpusFrameDecoder.pas"/>
+    <DCCReference Include="..\..\..\opus-decoder\src\OpusDecoder.pas"/>
+    <!-- audio-codec -->
+    <DCCReference Include="..\..\src\AudioFormatDetect.pas"/>
+    <DCCReference Include="..\..\src\AudioCodec.pas"/>
+  </ItemGroup>
+  <ProjectExtensions>
+    <Borland.Personality>Delphi.Personality.12</Borland.Personality>
+    <Borland.ProjectType>Application</Borland.ProjectType>
+    <BorlandProject>
+      <Delphi.Personality>
+        <VersionInfo>
+          <VersionInfo Name="IncludeVerInfo">False</VersionInfo>
+        </VersionInfo>
+      </Delphi.Personality>
+    </BorlandProject>
+  </ProjectExtensions>
+  <Import Project="$(BDS)\Bin\CodeGear.Delphi.Targets" Condition="Exists('$(BDS)\Bin\CodeGear.Delphi.Targets')"/>
+  <Import Project="$(APPDATA)\Embarcadero\BDS\$(BDSVersion)\EnvOptions.proj" Condition="Exists('$(APPDATA)\Embarcadero\BDS\$(BDSVersion)\EnvOptions.proj')"/>
+</Project>

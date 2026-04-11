@@ -1,0 +1,50 @@
+<?xml version="1.0" encoding="utf-8"?>
+<Project xmlns="http://schemas.microsoft.com/developer/msbuild/2003">
+  <PropertyGroup>
+    <ProjectGuid>{B1F4A2C3-7E5D-4A8B-9C2F-D3E6F1A07B4E}</ProjectGuid>
+    <MainSource>PDFLib.dpr</MainSource>
+    <Base>True</Base>
+    <Config Condition="'$(Config)'==''">Debug</Config>
+    <Platform Condition="'$(Platform)'==''">Win64</Platform>
+    <FrameworkType>None</FrameworkType>
+    <ProjectType>Library</ProjectType>
+    <AppType>Library</AppType>
+  </PropertyGroup>
+  <PropertyGroup Condition="'$(Config)'=='Base' or '$(Base)'!=''">
+    <DCC_DcuOutput>.\dcu\$(Platform)\$(Config)</DCC_DcuOutput>
+    <DCC_ExeOutput>.\bin\$(Platform)\$(Config)</DCC_ExeOutput>
+    <DCC_UnitSearchPath>Src\Core;Src\Render;Src\FMX</DCC_UnitSearchPath>
+    <DCC_Optimize>True</DCC_Optimize>
+    <DCC_ScopedEnums>True</DCC_ScopedEnums>
+    <DCC_Warnings>True</DCC_Warnings>
+    <Defines>RELEASE</Defines>
+  </PropertyGroup>
+  <PropertyGroup Condition="'$(Config)'=='Debug'">
+    <Base>True</Base>
+    <DCC_Optimize>False</DCC_Optimize>
+    <DCC_DebugInformation>2</DCC_DebugInformation>
+    <DCC_LocalSymbols>True</DCC_LocalSymbols>
+    <DCC_Define>DEBUG</DCC_Define>
+  </PropertyGroup>
+  <PropertyGroup Condition="'$(Config)'=='Release'">
+    <Base>True</Base>
+    <DCC_Optimize>True</DCC_Optimize>
+    <DCC_DebugInformation>0</DCC_DebugInformation>
+    <DCC_Define>RELEASE</DCC_Define>
+  </PropertyGroup>
+  <ItemGroup>
+    <DelphiCompile Include="PDFLib.dpr">
+      <MainSource>MainSource</MainSource>
+    </DelphiCompile>
+    <DCCReference Include="Src\Core\uPDF.Types.pas"/>
+    <DCCReference Include="Src\Core\uPDF.Errors.pas"/>
+    <DCCReference Include="Src\Core\uPDF.Objects.pas"/>
+    <DCCReference Include="Src\Core\uPDF.Lexer.pas"/>
+    <DCCReference Include="Src\Core\uPDF.Filters.pas"/>
+    <DCCReference Include="Src\Core\uPDF.XRef.pas"/>
+    <DCCReference Include="Src\Core\uPDF.Parser.pas"/>
+    <DCCReference Include="Src\Core\uPDF.Document.pas"/>
+  </ItemGroup>
+  <Import Project="$(BDS)\Bin\CodeGear.Delphi.Targets" Condition="Exists('$(BDS)\Bin\CodeGear.Delphi.Targets')"/>
+  <Import Project="$(APPDATA)\Embarcadero\$(BDSAPPDATABASEDIR)\$(PRODUCTVERSION)\UserTools.proj" Condition="Exists('$(APPDATA)\Embarcadero\$(BDSAPPDATABASEDIR)\$(PRODUCTVERSION)\UserTools.proj')"/>
+</Project>

@@ -1,7 +1,7 @@
 # Delphi Libraries Collection
 
 A growing collection of pure-Delphi libraries covering audio codecs,
-compression, cryptography, image formats, and data serialization.
+PDF documents, compression, cryptography, image formats, and data serialization.
 
 No DLLs. No C bindings. No external dependencies.
 Everything compiles with stock Delphi on Windows, Linux, and any RTL-supported platform.
@@ -15,6 +15,7 @@ Everything compiles with stock Delphi on Windows, Linux, and any RTL-supported p
 | Category | Status | Description |
 |---|:---:|---|
 | [audio/](./audio/) | ✅ Active | WAV, FLAC, Vorbis, Opus, MP3 decoders + WAV & FLAC encoders |
+| [pdf/](./pdf/) | ✅ Active | PDF reader, writer, text/image extractor, encryption, AcroForms, FMX viewer |
 | [compression/](./compression/) | 🚧 Planned | LZ4, Zstd, LZMA, Brotli |
 | [crypto/](./crypto/) | 🚧 Planned | ChaCha20-Poly1305, Argon2id, X25519 |
 | [imaging/](./imaging/) | 🚧 Planned | QOI, TGA, WebP lossless |
@@ -63,6 +64,56 @@ Everything compiles with stock Delphi on Windows, Linux, and any RTL-supported p
 
 ---
 
+## PDF — what is implemented
+
+### Core layer — `pdf/Src/Core`
+
+| Unit | Responsibility |
+|---|---|
+| `uPDF.Types` | Primitive types, `TPDFVersion`, `TPDFRect`, save-mode enum, A4/Letter constants |
+| `uPDF.Objects` | Full PDF object model: Null, Boolean, Integer, Real, String, Name, Array, Dictionary, Stream, Reference |
+| `uPDF.Lexer` | Low-level tokenizer (handles all PDF token types, hex strings, inline images) |
+| `uPDF.XRef` | Cross-reference table + XRef stream parser; supports linearized and repaired PDFs |
+| `uPDF.Parser` | High-level parser: resolves indirect objects, rebuilds xref on corruption |
+| `uPDF.Document` | `TPDFDocument` — open/create/save PDFs; `TPDFPage` — geometry, resources, content |
+| `uPDF.Crypto` | MD5, RC4, AES-128/256 primitives used by the encryption layer |
+| `uPDF.Encryption` | `TPDFDecryptor` — Standard handler Rev 2/3/4/6; RC4 + AES, password auth |
+| `uPDF.Filters` | FlateDecode, ASCIIHexDecode, ASCII85Decode, DCTDecode (JPEG passthrough) |
+| `uPDF.ContentStream` | Content-stream interpreter (all path/text/color/transform operators) + `TPDFContentBuilder` |
+| `uPDF.GraphicsState` | Full graphics-state stack: CTM, colors, fonts, line params, clip path |
+| `uPDF.ColorSpace` | DeviceGray/RGB/CMYK, CalGray/RGB, ICCBased, Indexed, Pattern, Separation |
+| `uPDF.Font` | Type0/1/3/TrueType + CIDFont: glyph widths, ToUnicode CMap, encoding maps |
+| `uPDF.FontCMap` | CMaps: predefined identities, embedded, Adobe-CNS1/GB1/Japan1/Korea1 |
+| `uPDF.Image` | `TPDFImage` — inline and XObject images; raw bytes + JPEG/Flate decode |
+| `uPDF.TextExtractor` | `TPDFTextExtractor` — fragments, line grouping, plain-text export |
+| `uPDF.ImageExtractor` | `TPDFImageExtractor` — enumerate and export embedded images |
+| `uPDF.Writer` | `TPDFWriter` — serialize any PDF to stream; FlateDecode, XRef streams, object streams |
+| `uPDF.Metadata` | `TPDFInfoRecord` — Info dict + XMP metadata, date parsing |
+| `uPDF.Outline` | Bookmark tree (`TPDFOutlineNode`), named destinations |
+| `uPDF.Annotations` | Link, text, highlight and other annotation types |
+| `uPDF.AcroForms` | AcroForm field enumeration (text, checkbox, radio, listbox, signature) |
+
+### Viewer layer — `pdf/Src/FMX` + `pdf/Src/Render`
+
+| Unit | Responsibility |
+|---|---|
+| `uPDF.Render.Types` | Render primitives: `TPDFRenderTarget`, tile size, resolution |
+| `uPDF.Render.FontCache` | Platform font resolver + glyph-metric cache for rendering |
+| `uPDF.Render.Skia` | Page rasterizer backed by **Skia4Delphi** — path fill/stroke, text, images |
+| `uPDF.Viewer.Cache` | Tile + page-bitmap LRU cache |
+| `uPDF.Viewer.Control` | `TPDFViewerControl` — scrollable FMX control, zoom, page navigation |
+
+### Test coverage
+
+| Suite | Tests |
+|---|:---:|
+| TestParser | 67 ✅ |
+| TestWriter | 96 ✅ |
+| TestTextExtractor | 17 ✅ |
+| **Total** | **180+ ✅** |
+
+---
+
 ## How to use — native Delphi
 
 ### Requirements
@@ -84,9 +135,13 @@ you use (per platform):
 ...\delphi-libraries\audio\opus-decoder\src
 ...\delphi-libraries\audio\mp3-decoder\src
 ...\delphi-libraries\audio\audio-codec\src
+
+...\delphi-libraries\pdf\Src\Core
+...\delphi-libraries\pdf\Src\FMX       (only for the FMX viewer)
+...\delphi-libraries\pdf\Src\Render    (only for the Skia renderer)
 ```
 
-`audio-common` is always required. Add only the libraries you actually `uses`.
+`audio-common` is always required for audio. For PDF, add only `Src/Core` unless you also need the visual viewer. Add only the libraries you actually `uses`.
 
 ### Decode any audio file (unified API)
 
@@ -222,6 +277,13 @@ delphi-libraries/
 │   ├── mp3-decoder/       #   MP3 Layer III decoder (MPEG 1/2/2.5)
 │   ├── mp3-encoder/       #   MP3 encoder (work in progress)
 │   └── audio-codec/       #   Unified IAudioDecoder API + factory
+├── pdf/                   # PDF library
+│   ├── Src/Core/          #   Parser, writer, text/image extractor, encryption, forms
+│   ├── Src/FMX/           #   FMX viewer control
+│   ├── Src/Render/        #   Skia-backed page rasterizer
+│   ├── Tests/             #   Test projects (TestParser, TestWriter, TestTextExtractor, TestAdvanced)
+│   ├── Demo/              #   Demo console apps (report generation, special chars)
+│   └── FMXViewer/         #   Demo FMX viewer app
 ├── compression/           # Compression codecs (planned)
 ├── crypto/                # Cryptographic primitives (planned)
 ├── imaging/               # Image codecs (planned)

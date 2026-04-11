@@ -1,0 +1,48 @@
+﻿<Project xmlns="http://schemas.microsoft.com/developer/msbuild/2003">
+    <PropertyGroup>
+        <ProjectGuid>{C6D5A7C8-5169-426A-8CBF-24E5EE5D9DF0}</ProjectGuid>
+    </PropertyGroup>
+    <ItemGroup>
+        <Projects Include="AiPdf.dproj">
+            <Dependencies/>
+        </Projects>
+        <Projects Include="FMXViewer\PDFViewerApp.dproj">
+            <Dependencies/>
+        </Projects>
+    </ItemGroup>
+    <ProjectExtensions>
+        <Borland.Personality>Default.Personality.12</Borland.Personality>
+        <Borland.ProjectType/>
+        <BorlandProject>
+            <Default.Personality/>
+        </BorlandProject>
+    </ProjectExtensions>
+    <Target Name="AiPdf">
+        <MSBuild Projects="AiPdf.dproj"/>
+    </Target>
+    <Target Name="AiPdf:Clean">
+        <MSBuild Projects="AiPdf.dproj" Targets="Clean"/>
+    </Target>
+    <Target Name="AiPdf:Make">
+        <MSBuild Projects="AiPdf.dproj" Targets="Make"/>
+    </Target>
+    <Target Name="PDFViewerApp">
+        <MSBuild Projects="FMXViewer\PDFViewerApp.dproj"/>
+    </Target>
+    <Target Name="PDFViewerApp:Clean">
+        <MSBuild Projects="FMXViewer\PDFViewerApp.dproj" Targets="Clean"/>
+    </Target>
+    <Target Name="PDFViewerApp:Make">
+        <MSBuild Projects="FMXViewer\PDFViewerApp.dproj" Targets="Make"/>
+    </Target>
+    <Target Name="Build">
+        <CallTarget Targets="AiPdf;PDFViewerApp"/>
+    </Target>
+    <Target Name="Clean">
+        <CallTarget Targets="AiPdf:Clean;PDFViewerApp:Clean"/>
+    </Target>
+    <Target Name="Make">
+        <CallTarget Targets="AiPdf:Make;PDFViewerApp:Make"/>
+    </Target>
+    <Import Project="$(BDS)\Bin\CodeGear.Group.Targets" Condition="Exists('$(BDS)\Bin\CodeGear.Group.Targets')"/>
+</Project>

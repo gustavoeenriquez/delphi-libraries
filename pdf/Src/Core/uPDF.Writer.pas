@@ -7,7 +7,8 @@ interface
 uses
   System.SysUtils, System.StrUtils, System.Classes, System.Generics.Collections,
   System.Math,
-  uPDF.Types, uPDF.Errors, uPDF.Objects, uPDF.Filters;
+  uPDF.Types, uPDF.Errors, uPDF.Objects, uPDF.Filters, uPDF.TOC,
+  uPDF.TTFParser, uPDF.TTFSubset, uPDF.EmbeddedFont;
 
 type
   // -------------------------------------------------------------------------
@@ -102,21 +103,68 @@ type
   // High-level PDF document builder
   // Provides a fluent API for creating PDFs from scratch.
   // -------------------------------------------------------------------------
+  // -------------------------------------------------------------------------
+  // TPDFBuilderImage — one pending image XObject registered by AddJPEGImage /
+  // AddRawImage.  Owned by TPDFBuilder.FImageList.
+  // -------------------------------------------------------------------------
+  TPDFBuilderImage = class
+    PageDict: TPDFDictionary;   // weak ref into FPages
+    Name:     string;           // resource name, e.g. 'Im1'
+    Stream:   TPDFStream;       // owned — the Image XObject stream
+    constructor Create(APageDict: TPDFDictionary; const AName: string;
+                       AStream: TPDFStream);
+    destructor Destroy; override;
+  end;
+
+  // -------------------------------------------------------------------------
+  // TPDFBuilderFont — one pending embedded font registered by AddEmbeddedFont.
+  // Owned by TPDFBuilder.FFontList.
+  // -------------------------------------------------------------------------
+  TPDFBuilderFont = class
+    PageDict: TPDFDictionary;   // weak ref into FPages
+    ResName:  string;           // font resource name, e.g. 'EF1'
+    Font:     TTTFEmbeddedFont; // owned
+    constructor Create(APageDict: TPDFDictionary; const AResName: string;
+                       AFont: TTTFEmbeddedFont);
+    destructor Destroy; override;
+  end;
+
   TPDFBuilder = class
   private
-    FVersion:    TPDFVersion;
-    FPages:      TObjectList<TPDFDictionary>;  // page dicts (owns)
-    FInfo:       TPDFDictionary;
-    FPool:       TPDFObjectPool;
+    FVersion:      TPDFVersion;
+    FPages:        TObjectList<TPDFDictionary>;  // page dicts (owns)
+    FInfo:         TPDFDictionary;
+    FPool:         TPDFObjectPool;
+    FTOC:          TPDFTOCBuilder;  // weak ref — caller owns it
+    FImageList:    TObjectList<TPDFBuilderImage>;  // owns image XObjects
+    FImageCounter: Integer;
+    FFontList:     TObjectList<TPDFBuilderFont>;   // owns embedded font entries
+    FFontCounter:  Integer;
 
     // Object numbering
     FNextObjNum: Integer;
     function  AllocObjNum: Integer; inline;
     function  MakeRef(AObjNum: Integer): TPDFReference; inline;
 
+    // Get (or create) the /Resources/XObject sub-dict of a page dict.
+    function  EnsureXObjectDict(APageDict: TPDFDictionary): TPDFDictionary;
+    // Get (or create) the /Annots array of a page dict.
+    function  EnsureAnnotsArray(APageDict: TPDFDictionary): TPDFArray;
+    // Next image resource name ('Im1', 'Im2', …)
+    function  NextImageName: string;
+
+    // Build and store one image XObject; return its resource name.
+    function  RegisterImageStream(APageDict: TPDFDictionary;
+                AStream: TPDFStream): string;
+
   public
     constructor Create;
     destructor  Destroy; override;
+
+    // ---- Table of contents / bookmarks ----
+    // Assign a TPDFTOCBuilder before calling SaveToStream/SaveToFile.
+    // The builder is NOT owned by TPDFBuilder — caller must free it.
+    property TOCBuilder: TPDFTOCBuilder read FTOC write FTOC;
 
     // ---- Metadata ----
     procedure SetTitle(const AValue: string);
@@ -131,6 +179,59 @@ type
     function  AddPage(AWidth: Single = PDF_A4_WIDTH;
                       AHeight: Single = PDF_A4_HEIGHT): TPDFDictionary;
     function  PageCount: Integer;
+
+    // ---- Image resources ----
+    //
+    // Register a JPEG (DCT-encoded) image on APageDict.
+    // AImageWidth / AImageHeight: pixel dimensions of the JPEG.
+    // AColorSpace: 'DeviceRGB' (default), 'DeviceGray', or 'DeviceCMYK'.
+    // Returns the XObject resource name (e.g. 'Im1') for use with
+    // TPDFContentBuilder.DrawXObject / InvokeXObject.
+    function  AddJPEGImage(APageDict: TPDFDictionary;
+                const AJPEGBytes: TBytes;
+                AImageWidth, AImageHeight: Integer;
+                const AColorSpace: string = 'DeviceRGB'): string;
+
+    // Register an uncompressed raw-bitmap image (8 bpc per channel).
+    // APixels: row-major, top-to-bottom, no padding.
+    // AColorSpace: 'DeviceRGB' (3 bytes/px), 'DeviceGray' (1 byte/px).
+    function  AddRawImage(APageDict: TPDFDictionary;
+                const APixels: TBytes;
+                AImageWidth, AImageHeight: Integer;
+                const AColorSpace: string = 'DeviceRGB'): string;
+
+    // ---- Annotations ----
+    //
+    // Add a URI hyperlink annotation (invisible rectangle, no border).
+    // Coordinates are in page user-space points, origin = bottom-left.
+    // X, Y = lower-left corner of the clickable area.
+    procedure AddLinkURI(APageDict: TPDFDictionary;
+                X, Y, W, H: Single; const AURI: string);
+
+    // ---- Embedded TTF fonts ----
+    //
+    // Register a TTF/OTF glyph subset as an embedded Type0 (CIDFont) font.
+    // AResName:     resource key used in SetFont calls (e.g. 'EF1').
+    // AParser:      parsed font — must already have called Parse.
+    // ASubsetter:   subsetter built from AParser with the required glyph IDs.
+    // Returns the TTTFEmbeddedFont (owned by TPDFBuilder — do NOT free it).
+    // Use the returned object for EncodeTextHex / MeasureText before Save.
+    function  AddEmbeddedFont(APageDict: TPDFDictionary;
+                const AResName: string;
+                AParser: TTTFParser; ASubsetter: TTTFSubsetter): TTTFEmbeddedFont;
+
+    // ---- Standard fonts ----
+    //
+    // Register a standard PDF Type1 font in a page's /Resources/Font dict.
+    // AResName:      key used in SetFont calls (e.g. 'F1').
+    // ABaseFontName: one of the 14 standard PDF Type1 font names:
+    //   Helvetica, Helvetica-Bold, Helvetica-Oblique, Helvetica-BoldOblique,
+    //   Times-Roman, Times-Bold, Times-Italic, Times-BoldItalic,
+    //   Courier, Courier-Bold, Courier-Oblique, Courier-BoldOblique,
+    //   Symbol, ZapfDingbats.
+    // Encoding is always WinAnsiEncoding.
+    procedure AddStandardFont(APageDict: TPDFDictionary;
+                const AResName, ABaseFontName: string);
 
     // ---- Save ----
     procedure SaveToStream(AStream: TStream;
@@ -221,12 +322,53 @@ type
     procedure NextLine;
     procedure ShowText(const AText: string);
     procedure ShowTextKerned(const AItems: array of const);  // mix strings + numbers
+    // Emit a pre-encoded hex glyph-ID string from TTTFEmbeddedFont.EncodeTextHex.
+    // Call after SetFont with the embedded font resource name.
+    procedure ShowTextHex(const AHexStr: string);
+    // Convenience: begin text, position at (X, Y), ShowTextHex, end text.
+    procedure DrawTextEmbedded(X, Y: Single; const AHexStr: string);
     // Convenience: draw text at absolute position
     procedure DrawText(X, Y: Single; const AText: string);
     procedure DrawTextCentered(X, Y, AWidth: Single; const AText: string);
 
     // ---- XObject ----
     procedure InvokeXObject(const AName: string);
+
+    // Place a named XObject (typically an image) at (X, Y) with the given
+    // width and height in user-space points.
+    // Equivalent to:  q  W 0 0 H X Y cm  /Name Do  Q
+    procedure DrawXObject(const AName: string; X, Y, AWidth, AHeight: Single);
+
+    // Draw word-wrapped text inside a bounding rectangle.
+    // AX, AY    = top-left origin (PDF Y-axis points upward; Y decreases per line).
+    // AWidth    = maximum line width in points.
+    // ALineH    = distance between baselines in points.
+    // AFont     = resource name for SetFont (e.g. 'F1').
+    // AFontBase = base font name for width estimation (e.g. 'Helvetica').
+    // AFontSize = font size in points.
+    // AAlign    = 0 left, 1 center, 2 right.
+    // Returns the baseline Y of the last line rendered.
+    function DrawTextWrapped(AX, AY, AWidth, ALineH: Single;
+      const AText, AFont, AFontBase: string;
+      AFontSize: Single; AAlign: Integer = 0): Single;
+
+    // Draw a ruled grid table.
+    // AX, AY      = top-left corner in page user space (Y-axis up).
+    // AColWidths  = column widths in points.
+    // ARowHeights = row heights in points.
+    // AData       = cell text in row-major order (Cols × Rows strings).
+    // AFont / AFontBase = resource name and base name for cell text.
+    // ACellPadX/Y = horizontal / vertical cell padding in points.
+    // AHeaderRows = leading rows rendered with a light-gray background.
+    // Returns the Y coordinate of the bottom border.
+    function DrawTableGrid(AX, AY: Single;
+      const AColWidths: array of Single;
+      const ARowHeights: array of Single;
+      const AData: array of string;
+      const AFont, AFontBase: string;
+      AFontSize: Single;
+      ACellPadX: Single = 4; ACellPadY: Single = 3;
+      AHeaderRows: Integer = 0): Single;
 
     // ---- Produce bytes ----
     function  Build: TBytes;
@@ -239,11 +381,92 @@ type
   // -------------------------------------------------------------------------
   function PDFEscapeString(const S: string): string;
   function PDFRealToStr(V: Single): string;
+  // Estimate text width in points for a standard PDF Type1 font.
+  // ABaseFontName: 'Helvetica', 'Helvetica-Bold', 'Times-Roman', 'Courier', etc.
+  // Unknown font names fall back to Helvetica metrics.
+  function PDFMeasureText(const AText: string; const ABaseFontName: string;
+    AFontSize: Single): Single;
 
 implementation
 
 uses
   System.Character;
+
+// =========================================================================
+// Standard Type1 font metrics (WinAnsiEncoding, advance widths / 1000 em)
+// Source: Adobe Core14 AFM data (public domain)
+// =========================================================================
+
+const
+  HELVETICA_WIDTHS: array[0..255] of Word = (
+    // 0-31 (control)
+    278,278,278,278,278,278,278,278,278,278,278,278,278,278,278,278,
+    278,278,278,278,278,278,278,278,278,278,278,278,278,278,278,278,
+    // 32-47  !"#$%&'()*+,-./
+    278,278,355,556,556,889,667,222,333,333,389,584,278,333,278,278,
+    // 48-63  0123456789:;<=>?
+    556,556,556,556,556,556,556,556,556,556,278,278,584,584,584,556,
+    // 64-79  @A-O
+    1015,667,667,722,722,667,611,778,722,278,500,667,556,833,722,778,
+    // 80-95  P-Z[\]^_
+    667,778,722,667,611,722,667,944,667,667,611,278,278,278,469,556,
+    // 96-111  `a-o
+    222,556,611,556,611,556,333,611,611,278,278,556,278,889,611,611,
+    // 112-127  p-z{|}~DEL
+    611,611,389,556,333,611,556,778,556,556,500,389,280,389,584,278,
+    // 128-143 (Windows-1252 ext)
+    556,278,556,556,556,556,280,556,278,278,333,278,889,278,278,278,
+    // 144-159
+    278,278,278,278,278,278,278,278,278,278,333,278,889,278,333,278,
+    // 160-175  NBSP ¡¢£¤¥¦§¨©ª«¬-®¯
+    278,333,556,556,556,556,280,556,333,737,370,556,584,333,737,333,
+    // 176-191  °±²³´µ¶·¸¹º»¼½¾¿
+    400,584,333,333,333,611,556,278,333,333,365,556,834,834,834,611,
+    // 192-207  À-Ï
+    667,667,667,667,667,667,1000,722,667,667,667,667,278,278,278,278,
+    // 208-223  Ð-×ØÙ-Û×Ý-ß
+    722,722,778,778,778,778,778,584,778,722,722,722,722,667,667,611,
+    // 224-239  à-ï
+    556,556,556,556,556,556,889,556,556,556,556,556,278,278,278,278,
+    // 240-255  ð-ÿ
+    611,611,611,611,611,611,611,584,611,611,611,611,611,556,611,556
+  );
+
+  TIMES_ROMAN_WIDTHS: array[0..255] of Word = (
+    // 0-31
+    250,250,250,250,250,250,250,250,250,250,250,250,250,250,250,250,
+    250,250,250,250,250,250,250,250,250,250,250,250,250,250,250,250,
+    // 32-47
+    250,333,408,500,500,833,778,333,333,333,500,564,250,333,250,278,
+    // 48-63
+    500,500,500,500,500,500,500,500,500,500,278,278,564,564,564,444,
+    // 64-79
+    921,722,667,667,722,611,556,722,722,333,389,722,611,889,722,722,
+    // 80-95
+    556,722,667,556,611,722,722,944,722,722,611,333,278,333,469,500,
+    // 96-111
+    333,444,500,444,500,444,333,500,500,278,278,500,278,778,500,500,
+    // 112-127
+    500,500,333,389,278,500,500,722,500,500,444,480,200,480,541,250,
+    // 128-143
+    500,250,500,500,500,500,200,500,250,250,333,250,889,250,250,250,
+    // 144-159
+    250,250,250,250,250,250,250,250,250,250,333,250,889,250,333,250,
+    // 160-175
+    250,333,500,500,500,500,200,500,333,760,276,500,564,333,760,333,
+    // 176-191
+    400,564,300,300,333,500,453,250,333,300,310,500,750,750,750,444,
+    // 192-207
+    722,722,722,722,722,722,889,667,611,611,611,611,333,333,333,333,
+    // 208-223
+    722,722,722,722,722,722,722,564,722,722,722,722,722,722,556,500,
+    // 224-239
+    444,444,444,444,444,444,667,444,444,444,444,444,278,278,278,278,
+    // 240-255
+    500,500,500,500,500,500,500,564,500,500,500,500,500,500,500,500
+  );
+
+  COURIER_CHAR_WIDTH = 600;  // All Courier variants: fixed-pitch 600/1000 em
 
 // =========================================================================
 // TPDFWriteOptions
@@ -279,6 +502,32 @@ begin
         Delete(Result, Length(Result), 1);
     end;
   end;
+end;
+
+function PDFMeasureText(const AText: string; const ABaseFontName: string;
+  AFontSize: Single): Single;
+var
+  Bytes:  TBytes;
+  Total:  Integer;
+  B:      Byte;
+  FLower: string;
+begin
+  if (AText = '') or (AFontSize <= 0) then Exit(0);
+  Bytes  := TEncoding.GetEncoding(1252).GetBytes(AText);
+  FLower := LowerCase(ABaseFontName);
+  Total  := 0;
+  if FLower.StartsWith('courier') then
+    Total := Length(Bytes) * COURIER_CHAR_WIDTH
+  else if FLower.StartsWith('times') then
+  begin
+    for B in Bytes do Inc(Total, TIMES_ROMAN_WIDTHS[B]);
+  end
+  else
+  begin
+    // Default: Helvetica metrics (covers Helvetica, Helvetica-Bold, and unknowns)
+    for B in Bytes do Inc(Total, HELVETICA_WIDTHS[B]);
+  end;
+  Result := Total * AFontSize / 1000;
 end;
 
 // Return a zero-padded 3-digit octal string for a byte value (0..255)
@@ -893,22 +1142,66 @@ begin
 end;
 
 // =========================================================================
+// TPDFBuilderImage
+// =========================================================================
+
+constructor TPDFBuilderImage.Create(APageDict: TPDFDictionary;
+  const AName: string; AStream: TPDFStream);
+begin
+  inherited Create;
+  PageDict := APageDict;
+  Name     := AName;
+  Stream   := AStream;
+end;
+
+destructor TPDFBuilderImage.Destroy;
+begin
+  Stream.Free;
+  inherited;
+end;
+
+// =========================================================================
+// TPDFBuilderFont
+// =========================================================================
+
+constructor TPDFBuilderFont.Create(APageDict: TPDFDictionary;
+  const AResName: string; AFont: TTTFEmbeddedFont);
+begin
+  inherited Create;
+  PageDict := APageDict;
+  ResName  := AResName;
+  Font     := AFont;
+end;
+
+destructor TPDFBuilderFont.Destroy;
+begin
+  Font.Free;
+  inherited;
+end;
+
+// =========================================================================
 // TPDFBuilder
 // =========================================================================
 
 constructor TPDFBuilder.Create;
 begin
   inherited;
-  FPages      := TObjectList<TPDFDictionary>.Create(True);
-  FPool       := TPDFObjectPool.Create;
-  FInfo       := TPDFDictionary.Create;
-  FNextObjNum := 1;
-  FVersion    := TPDFVersion.Make(1, 7);
+  FPages        := TObjectList<TPDFDictionary>.Create(True);
+  FPool         := TPDFObjectPool.Create;
+  FInfo         := TPDFDictionary.Create;
+  FImageList    := TObjectList<TPDFBuilderImage>.Create(True);
+  FImageCounter := 0;
+  FFontList     := TObjectList<TPDFBuilderFont>.Create(True);
+  FFontCounter  := 0;
+  FNextObjNum   := 1;
+  FVersion      := TPDFVersion.Make(1, 7);
   FInfo.SetValue('Producer', TPDFString.Create('PDFLib Delphi'));
 end;
 
 destructor TPDFBuilder.Destroy;
 begin
+  FFontList.Free;
+  FImageList.Free;
   FInfo.Free;
   FPool.Free;
   FPages.Free;
@@ -924,6 +1217,182 @@ end;
 function TPDFBuilder.MakeRef(AObjNum: Integer): TPDFReference;
 begin
   Result := TPDFReference.CreateNum(AObjNum, 0);
+end;
+
+function TPDFBuilder.EnsureXObjectDict(APageDict: TPDFDictionary): TPDFDictionary;
+var
+  ResDict: TPDFDictionary;
+begin
+  ResDict := APageDict.GetAsDictionary('Resources');
+  if ResDict = nil then
+  begin
+    ResDict := TPDFDictionary.Create;
+    APageDict.SetValue('Resources', ResDict);
+  end;
+  Result := ResDict.GetAsDictionary('XObject');
+  if Result = nil then
+  begin
+    Result := TPDFDictionary.Create;
+    ResDict.SetValue('XObject', Result);
+  end;
+end;
+
+function TPDFBuilder.EnsureAnnotsArray(APageDict: TPDFDictionary): TPDFArray;
+begin
+  Result := APageDict.GetAsArray('Annots');
+  if Result = nil then
+  begin
+    Result := TPDFArray.Create;
+    APageDict.SetValue('Annots', Result);
+  end;
+end;
+
+function TPDFBuilder.NextImageName: string;
+begin
+  Inc(FImageCounter);
+  Result := 'Im' + IntToStr(FImageCounter);
+end;
+
+function TPDFBuilder.RegisterImageStream(APageDict: TPDFDictionary;
+  AStream: TPDFStream): string;
+begin
+  Result := NextImageName;
+  // Store the image entry (stream ownership transferred to FImageList).
+  FImageList.Add(TPDFBuilderImage.Create(APageDict, Result, AStream));
+  // Insert a placeholder name in the page's XObject resource dict so
+  // SaveToStream can look it up.  The actual reference (obj#) is set there.
+  EnsureXObjectDict(APageDict).SetValue(Result, TPDFNull.Instance.Clone);
+end;
+
+function TPDFBuilder.AddJPEGImage(APageDict: TPDFDictionary;
+  const AJPEGBytes: TBytes;
+  AImageWidth, AImageHeight: Integer;
+  const AColorSpace: string): string;
+var
+  Stm: TPDFStream;
+begin
+  Stm := TPDFStream.Create;
+  Stm.Dict.SetValue('Type',             TPDFName.Create('XObject'));
+  Stm.Dict.SetValue('Subtype',          TPDFName.Create('Image'));
+  Stm.Dict.SetValue('Width',            TPDFInteger.Create(AImageWidth));
+  Stm.Dict.SetValue('Height',           TPDFInteger.Create(AImageHeight));
+  Stm.Dict.SetValue('ColorSpace',       TPDFName.Create(AColorSpace));
+  Stm.Dict.SetValue('BitsPerComponent', TPDFInteger.Create(8));
+  Stm.Dict.SetValue('Filter',           TPDFName.Create('DCTDecode'));
+  Stm.SetRawData(AJPEGBytes);
+  Stm.Dict.SetValue('Length', TPDFInteger.Create(Length(AJPEGBytes)));
+  Result := RegisterImageStream(APageDict, Stm);
+end;
+
+function TPDFBuilder.AddRawImage(APageDict: TPDFDictionary;
+  const APixels: TBytes;
+  AImageWidth, AImageHeight: Integer;
+  const AColorSpace: string): string;
+var
+  Stm: TPDFStream;
+begin
+  Stm := TPDFStream.Create;
+  Stm.Dict.SetValue('Type',             TPDFName.Create('XObject'));
+  Stm.Dict.SetValue('Subtype',          TPDFName.Create('Image'));
+  Stm.Dict.SetValue('Width',            TPDFInteger.Create(AImageWidth));
+  Stm.Dict.SetValue('Height',           TPDFInteger.Create(AImageHeight));
+  Stm.Dict.SetValue('ColorSpace',       TPDFName.Create(AColorSpace));
+  Stm.Dict.SetValue('BitsPerComponent', TPDFInteger.Create(8));
+  Stm.SetRawData(APixels);
+  Stm.Dict.SetValue('Length', TPDFInteger.Create(Length(APixels)));
+  Result := RegisterImageStream(APageDict, Stm);
+end;
+
+procedure TPDFBuilder.AddLinkURI(APageDict: TPDFDictionary;
+  X, Y, W, H: Single; const AURI: string);
+var
+  Annot:  TPDFDictionary;
+  Action: TPDFDictionary;
+  Rect:   TPDFArray;
+  Border: TPDFArray;
+begin
+  Action := TPDFDictionary.Create;
+  Action.SetValue('Type', TPDFName.Create('Action'));
+  Action.SetValue('S',    TPDFName.Create('URI'));
+  Action.SetValue('URI',  TPDFString.Create(RawByteString(AnsiString(AURI))));
+
+  Rect := TPDFArray.Create;
+  Rect.Add(TPDFReal.Create(X));
+  Rect.Add(TPDFReal.Create(Y));
+  Rect.Add(TPDFReal.Create(X + W));
+  Rect.Add(TPDFReal.Create(Y + H));
+
+  Border := TPDFArray.Create;
+  Border.Add(TPDFInteger.Create(0));
+  Border.Add(TPDFInteger.Create(0));
+  Border.Add(TPDFInteger.Create(0));
+
+  Annot := TPDFDictionary.Create;
+  Annot.SetValue('Type',    TPDFName.Create('Annot'));
+  Annot.SetValue('Subtype', TPDFName.Create('Link'));
+  Annot.SetValue('Rect',    Rect);
+  Annot.SetValue('Border',  Border);
+  Annot.SetValue('A',       Action);
+
+  EnsureAnnotsArray(APageDict).Add(Annot);
+end;
+
+procedure TPDFBuilder.AddStandardFont(APageDict: TPDFDictionary;
+  const AResName, ABaseFontName: string);
+var
+  ResDict:  TPDFDictionary;
+  FontDict: TPDFDictionary;
+  FD:       TPDFDictionary;
+begin
+  ResDict := APageDict.GetAsDictionary('Resources');
+  if ResDict = nil then
+  begin
+    ResDict := TPDFDictionary.Create;
+    APageDict.SetValue('Resources', ResDict);
+  end;
+  FontDict := ResDict.GetAsDictionary('Font');
+  if FontDict = nil then
+  begin
+    FontDict := TPDFDictionary.Create;
+    ResDict.SetValue('Font', FontDict);
+  end;
+  FD := TPDFDictionary.Create;
+  FD.SetValue('Type',     TPDFName.Create('Font'));
+  FD.SetValue('Subtype',  TPDFName.Create('Type1'));
+  FD.SetValue('BaseFont', TPDFName.Create(ABaseFontName));
+  FD.SetValue('Encoding', TPDFName.Create('WinAnsiEncoding'));
+  FontDict.SetValue(AResName, FD);
+end;
+
+function TPDFBuilder.AddEmbeddedFont(APageDict: TPDFDictionary;
+  const AResName: string;
+  AParser: TTTFParser; ASubsetter: TTTFSubsetter): TTTFEmbeddedFont;
+var
+  ResDict : TPDFDictionary;
+  FontDict: TPDFDictionary;
+begin
+  if not AParser.EmbeddingPermitted then
+    raise EPDFError.CreateFmt(
+      'Font "%s" has restricted embedding (fsType)', [AParser.PSName]);
+
+  Result := TTTFEmbeddedFont.Create(AParser, ASubsetter);
+  FFontList.Add(TPDFBuilderFont.Create(APageDict, AResName, Result));
+
+  // Register a null placeholder in the page's /Resources/Font.
+  // SaveToStream will replace it with a proper indirect reference.
+  ResDict := APageDict.GetAsDictionary('Resources');
+  if ResDict = nil then
+  begin
+    ResDict := TPDFDictionary.Create;
+    APageDict.SetValue('Resources', ResDict);
+  end;
+  FontDict := ResDict.GetAsDictionary('Font');
+  if FontDict = nil then
+  begin
+    FontDict := TPDFDictionary.Create;
+    ResDict.SetValue('Font', FontDict);
+  end;
+  FontDict.SetValue(AResName, TPDFNull.Instance.Clone);
 end;
 
 // Encode a Unicode string as a PDF info string.
@@ -1078,11 +1547,153 @@ begin
       Objects.Add(PageNums[I], PageDict);
     end;
 
+    // --- Image XObjects ---
+    // For each registered image: allocate an object number, store a clone of
+    // the image stream, then replace the placeholder in the cloned page dict's
+    // /Resources/XObject with a real reference.
+    for var Img in FImageList do
+    begin
+      // Find the page index for this image's source page dict
+      var PageIdx := FPages.IndexOf(Img.PageDict);
+      if PageIdx < 0 then Continue;
+
+      var ImgNum := AllocObjNum;
+      Objects.Add(ImgNum, TPDFStream(Img.Stream.Clone));
+
+      // Patch the cloned page dict that was already placed in Objects
+      var ClonedPage := TPDFDictionary(Objects[PageNums[PageIdx]]);
+      var ResDict    := ClonedPage.GetAsDictionary('Resources');
+      if ResDict = nil then Continue;
+      var XObjDict   := ResDict.GetAsDictionary('XObject');
+      if XObjDict = nil then Continue;
+      // Replace the placeholder null with the real reference
+      XObjDict.SetValue(Img.Name, MakeRef(ImgNum));
+    end;
+
+    // --- Embedded fonts (5 objects each: Type0, CIDFont, FontDesc, FontFile2, ToUnicode) ---
+    var EmbFontIdx := 0;
+    for var Fnt in FFontList do
+    begin
+      var PageIdx := FPages.IndexOf(Fnt.PageDict);
+      if PageIdx < 0 then begin Inc(EmbFontIdx); Continue; end;
+
+      var N0 := AllocObjNum;  // Type0 font dict
+      var N1 := AllocObjNum;  // CIDFont dict
+      var N2 := AllocObjNum;  // FontDescriptor dict
+      var N3 := AllocObjNum;  // FontFile2 stream
+      var N4 := AllocObjNum;  // ToUnicode CMap stream
+
+      var F  := Fnt.Font;
+      var M  := F.Metrics;
+      var UP := Integer(M.UnitsPerEm);
+      if UP = 0 then UP := 1;
+
+      // Subset tag: 6 uppercase letters + '+' + PSName  (ISO 32000 §9.9.2)
+      // e.g.  AAAAAA+ArialMT,  AAAAAB+CourierNewPSMT
+      var SubsetTag: string;
+      SetLength(SubsetTag, 6);
+      var TagIdx := EmbFontIdx;
+      for var Ti := 6 downto 1 do
+      begin
+        SubsetTag[Ti] := Chr(Ord('A') + (TagIdx mod 26));
+        TagIdx := TagIdx div 26;
+      end;
+      var TaggedName := SubsetTag + '+' + F.PSName;
+      Inc(EmbFontIdx);
+
+      // Type0 font dict
+      var D0 := TPDFDictionary.Create;
+      D0.SetValue('Type',            TPDFName.Create('Font'));
+      D0.SetValue('Subtype',         TPDFName.Create('Type0'));
+      D0.SetValue('BaseFont',        TPDFName.Create(TaggedName));
+      D0.SetValue('Encoding',        TPDFName.Create('Identity-H'));
+      var DFArr := TPDFArray.Create;
+      DFArr.Add(MakeRef(N1));
+      D0.SetValue('DescendantFonts', DFArr);
+      D0.SetValue('ToUnicode',       MakeRef(N4));
+      Objects.Add(N0, D0);
+
+      // CIDFont dict
+      var D1 := TPDFDictionary.Create;
+      D1.SetValue('Type',    TPDFName.Create('Font'));
+      D1.SetValue('Subtype', TPDFName.Create('CIDFontType2'));
+      D1.SetValue('BaseFont', TPDFName.Create(TaggedName));
+      var CIDSys := TPDFDictionary.Create;
+      CIDSys.SetValue('Registry',   TPDFString.Create(RawByteString('Adobe')));
+      CIDSys.SetValue('Ordering',   TPDFString.Create(RawByteString('Identity')));
+      CIDSys.SetValue('Supplement', TPDFInteger.Create(0));
+      D1.SetValue('CIDSystemInfo', CIDSys);
+      D1.SetValue('DW', TPDFInteger.Create(F.GlyphWidthPDF(0)));
+      var WInner := TPDFArray.Create;
+      for var K := 0 to F.GlyphCount - 1 do
+        WInner.Add(TPDFInteger.Create(F.GlyphWidthPDF(K)));
+      var WOuter := TPDFArray.Create;
+      WOuter.Add(TPDFInteger.Create(0));
+      WOuter.Add(WInner);
+      D1.SetValue('W', WOuter);
+      D1.SetValue('FontDescriptor', MakeRef(N2));
+      D1.SetValue('CIDToGIDMap',    TPDFName.Create('Identity'));
+      Objects.Add(N1, D1);
+
+      // FontDescriptor dict
+      var D2 := TPDFDictionary.Create;
+      D2.SetValue('Type',        TPDFName.Create('FontDescriptor'));
+      D2.SetValue('FontName',    TPDFName.Create(TaggedName));
+      D2.SetValue('Flags',       TPDFInteger.Create(F.Flags));
+      var BBArr := TPDFArray.Create;
+      BBArr.Add(TPDFInteger.Create(Round(M.XMin * 1000.0 / UP)));
+      BBArr.Add(TPDFInteger.Create(Round(M.YMin * 1000.0 / UP)));
+      BBArr.Add(TPDFInteger.Create(Round(M.XMax * 1000.0 / UP)));
+      BBArr.Add(TPDFInteger.Create(Round(M.YMax * 1000.0 / UP)));
+      D2.SetValue('FontBBox',    BBArr);
+      D2.SetValue('ItalicAngle', TPDFReal.Create(M.ItalicAngle));
+      D2.SetValue('Ascent',      TPDFInteger.Create(Round(M.Ascender  * 1000.0 / UP)));
+      D2.SetValue('Descent',     TPDFInteger.Create(Round(M.Descender * 1000.0 / UP)));
+      D2.SetValue('CapHeight',   TPDFInteger.Create(Round(M.CapHeight * 1000.0 / UP)));
+      D2.SetValue('StemV',       TPDFInteger.Create(F.StemV));
+      D2.SetValue('FontFile2',   MakeRef(N3));
+      Objects.Add(N2, D2);
+
+      // FontFile2 stream — /Length1 = uncompressed TTF size (ISO 32000 §9.9)
+      var TTFBytes := F.SubsetTTFBytes;
+      var S3 := TPDFStream.Create;
+      S3.SetRawData(TTFBytes);
+      S3.Dict.SetValue('Length1', TPDFInteger.Create(Length(TTFBytes)));
+      Objects.Add(N3, S3);
+
+      // ToUnicode CMap stream
+      var S4 := TPDFStream.Create;
+      S4.SetRawData(TEncoding.ASCII.GetBytes(F.BuildToUnicodeCMapText));
+      Objects.Add(N4, S4);
+
+      // Patch the cloned page dict: replace the null placeholder with
+      // a real reference to the Type0 font object.
+      var ClonedPage := TPDFDictionary(Objects[PageNums[PageIdx]]);
+      var ResD := ClonedPage.GetAsDictionary('Resources');
+      if ResD <> nil then
+      begin
+        var FontD := ResD.GetAsDictionary('Font');
+        if FontD <> nil then
+          FontD.SetValue(Fnt.ResName, MakeRef(N0));
+      end;
+    end;
+
     // --- Catalog ---
     var CatalogDict := TPDFDictionary.Create;
     CatalogDict.SetValue('Type',  TPDFName.Create('Catalog'));
     CatalogDict.SetValue('Pages', MakeRef(PagesNum));
     Objects.Add(CatNum, CatalogDict);
+
+    // --- TOC / Outline (if caller provided a TPDFTOCBuilder) ---
+    if (FTOC <> nil) and not FTOC.IsEmpty then
+    begin
+      var OutlineNum := FTOC.SerializeTo(Objects, FNextObjNum, PageNums);
+      if OutlineNum > 0 then
+      begin
+        CatalogDict.SetValue('Outlines',  MakeRef(OutlineNum));
+        CatalogDict.SetValue('PageMode',  TPDFName.Create('UseOutlines'));
+      end;
+    end;
 
     // --- Info ---
     Objects.Add(InfoNum, TPDFDictionary(FInfo.Clone));
@@ -1393,6 +2004,21 @@ begin
   Op('TJ');
 end;
 
+procedure TPDFContentBuilder.ShowTextHex(const AHexStr: string);
+begin
+  FStream.Append(AHexStr);
+  FStream.Append(' ');
+  Op('Tj');
+end;
+
+procedure TPDFContentBuilder.DrawTextEmbedded(X, Y: Single; const AHexStr: string);
+begin
+  BeginText;
+  SetTextMatrix(1, 0, 0, 1, X, Y);
+  ShowTextHex(AHexStr);
+  EndText;
+end;
+
 procedure TPDFContentBuilder.DrawText(X, Y: Single; const AText: string);
 begin
   BeginText;
@@ -1419,6 +2045,209 @@ begin
   FStream.Append(AName);
   FStream.Append(' ');
   Op('Do');
+end;
+
+procedure TPDFContentBuilder.DrawXObject(const AName: string;
+  X, Y, AWidth, AHeight: Single);
+begin
+  // Place the XObject (image) in a local graphics state.
+  // The cm matrix [W 0 0 H X Y] maps the unit square [0..1]² to the
+  // rectangle [X..X+W] × [Y..Y+H] in page coordinates (bottom-left origin).
+  SaveState;
+  ConcatMatrix(AWidth, 0, 0, AHeight, X, Y);
+  InvokeXObject(AName);
+  RestoreState;
+end;
+
+function TPDFContentBuilder.DrawTextWrapped(AX, AY, AWidth, ALineH: Single;
+  const AText, AFont, AFontBase: string;
+  AFontSize: Single; AAlign: Integer): Single;
+var
+  Paras: TArray<string>;
+  Words: TArray<string>;
+  Line:  string;
+  Test:  string;
+  CurY:  Single;
+  LX:    Single;
+
+  procedure RenderLine(const S: string);
+  var LW: Single;
+  begin
+    case AAlign of
+      1: begin
+           LW := PDFMeasureText(S, AFontBase, AFontSize);
+           LX := AX + (AWidth - LW) / 2;
+         end;
+      2: begin
+           LW := PDFMeasureText(S, AFontBase, AFontSize);
+           LX := AX + AWidth - LW;
+         end;
+    else
+      LX := AX;
+    end;
+    SetTextMatrix(1, 0, 0, 1, LX, CurY);
+    ShowText(S);
+    CurY := CurY - ALineH;
+  end;
+
+begin
+  CurY := AY;
+  BeginText;
+  SetFont(AFont, AFontSize);
+
+  Paras := AText.Split([#13#10, #10, #13], TStringSplitOptions.None);
+  for var Para in Paras do
+  begin
+    if Para.Trim = '' then
+    begin
+      CurY := CurY - ALineH;
+      Continue;
+    end;
+    Words := Para.Split([' '], TStringSplitOptions.None);
+    Line  := '';
+    for var I := 0 to High(Words) do
+    begin
+      if Words[I] = '' then Continue;
+      Test := IfThen(Line = '', Words[I], Line + ' ' + Words[I]);
+      if (PDFMeasureText(Test, AFontBase, AFontSize) > AWidth) and (Line <> '') then
+      begin
+        RenderLine(Line);
+        Line := Words[I];
+      end else
+        Line := Test;
+    end;
+    if Line <> '' then RenderLine(Line);
+  end;
+
+  EndText;
+  Result := CurY + ALineH;
+end;
+
+// Returns S truncated with '...' if it exceeds AMaxW at the given font/size.
+// Uses the same width tables as PDFMeasureText — O(n) single pass.
+function TruncFitCell(const S, AFontBase: string;
+  AMaxW, AFontSize: Single): string;
+const
+  ELLIPSIS = '...';
+var
+  EW:    Single;
+  Enc:   TEncoding;
+  Bytes: TBytes;
+  FLow:  string;
+  Used:  Single;
+  CW:    Single;
+  I:     Integer;
+begin
+  if (S = '') or (AMaxW <= 0) or (AFontSize <= 0) then Exit(S);
+  if PDFMeasureText(S, AFontBase, AFontSize) <= AMaxW then Exit(S);
+  EW := PDFMeasureText(ELLIPSIS, AFontBase, AFontSize);
+  if EW >= AMaxW then Exit('');
+  Enc   := TEncoding.GetEncoding(1252);
+  Bytes := Enc.GetBytes(S);
+  FLow  := LowerCase(AFontBase);
+  Used  := 0;
+  for I := 0 to High(Bytes) do
+  begin
+    if FLow.StartsWith('courier') then
+      CW := COURIER_CHAR_WIDTH * AFontSize / 1000
+    else if FLow.StartsWith('times') then
+      CW := TIMES_ROMAN_WIDTHS[Bytes[I]] * AFontSize / 1000
+    else
+      CW := HELVETICA_WIDTHS[Bytes[I]] * AFontSize / 1000;
+    if Used + CW + EW > AMaxW then
+    begin
+      Result := Enc.GetString(Bytes, 0, I) + ELLIPSIS;
+      Exit;
+    end;
+    Used := Used + CW;
+  end;
+  Result := S;
+end;
+
+function TPDFContentBuilder.DrawTableGrid(AX, AY: Single;
+  const AColWidths: array of Single;
+  const ARowHeights: array of Single;
+  const AData: array of string;
+  const AFont, AFontBase: string;
+  AFontSize: Single;
+  ACellPadX, ACellPadY: Single;
+  AHeaderRows: Integer): Single;
+var
+  Cols, Rows: Integer;
+  ColX: TArray<Single>;
+  RowY: TArray<Single>;
+  TotalW: Single;
+  C, R: Integer;
+begin
+  Cols := Length(AColWidths);
+  Rows := Length(ARowHeights);
+  if (Cols = 0) or (Rows = 0) then Exit(AY);
+
+  // Cumulative column X positions (left edges)
+  SetLength(ColX, Cols + 1);
+  ColX[0] := AX;
+  for C := 0 to Cols - 1 do
+    ColX[C + 1] := ColX[C] + AColWidths[C];
+  TotalW := ColX[Cols] - AX;
+
+  // Cumulative row Y positions (top edges; Y decreases downward in PDF)
+  SetLength(RowY, Rows + 1);
+  RowY[0] := AY;
+  for R := 0 to Rows - 1 do
+    RowY[R + 1] := RowY[R] - ARowHeights[R];
+
+  // --- Header background fills ---
+  if AHeaderRows > 0 then
+  begin
+    SaveState;
+    SetFillGray(0.85);
+    for R := 0 to Min(AHeaderRows, Rows) - 1 do
+    begin
+      Rectangle(AX, RowY[R + 1], TotalW, ARowHeights[R]);
+      Fill;
+    end;
+    RestoreState;
+  end;
+
+  // --- Grid borders ---
+  SaveState;
+  SetLineWidth(0.5);
+  for R := 0 to Rows do
+  begin
+    MoveTo(AX, RowY[R]);
+    LineTo(AX + TotalW, RowY[R]);
+    Stroke;
+  end;
+  for C := 0 to Cols do
+  begin
+    MoveTo(ColX[C], AY);
+    LineTo(ColX[C], RowY[Rows]);
+    Stroke;
+  end;
+  RestoreState;
+
+  // --- Cell text (all cells in one BT/ET block) ---
+  BeginText;
+  SetFont(AFont, AFontSize);
+  for R := 0 to Rows - 1 do
+  begin
+    for C := 0 to Cols - 1 do
+    begin
+      var Idx := R * Cols + C;
+      if (Idx >= Length(AData)) or (AData[Idx] = '') then Continue;
+      var CellText := TruncFitCell(AData[Idx], AFontBase,
+        AColWidths[C] - 2 * ACellPadX, AFontSize);
+      if CellText = '' then Continue;
+      // Baseline = row top  −  vertical padding  −  ascender estimate
+      SetTextMatrix(1, 0, 0, 1,
+        ColX[C] + ACellPadX,
+        RowY[R]  - ACellPadY - AFontSize * 0.75);
+      ShowText(CellText);
+    end;
+  end;
+  EndText;
+
+  Result := RowY[Rows];
 end;
 
 end.

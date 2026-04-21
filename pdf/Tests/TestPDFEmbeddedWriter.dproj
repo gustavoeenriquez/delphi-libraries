@@ -1,8 +1,8 @@
 <?xml version="1.0" encoding="utf-8"?>
 <Project xmlns="http://schemas.microsoft.com/developer/msbuild/2003">
   <PropertyGroup>
-    <ProjectGuid>{C4D5E6F7-A8B9-0123-CDEF-012345678003}</ProjectGuid>
-    <MainSource>TestAdvanced.dpr</MainSource>
+    <ProjectGuid>{D2E3F4A5-B6C7-8901-DEF0-234567890007}</ProjectGuid>
+    <MainSource>TestPDFEmbeddedWriter.dpr</MainSource>
     <Base>True</Base>
     <Config Condition="'$(Config)'==''">Debug</Config>
     <Platform Condition="'$(Platform)'==''">Win64</Platform>
@@ -13,7 +13,7 @@
   <PropertyGroup Condition="'$(Config)'=='Base' or '$(Base)'!=''">
     <DCC_DcuOutput>.\dcu\$(Platform)\$(Config)</DCC_DcuOutput>
     <DCC_ExeOutput>.\bin\$(Platform)\$(Config)</DCC_ExeOutput>
-    <DCC_UnitSearchPath>..\Src\Core;..\Src\Render;..\Src\FMX</DCC_UnitSearchPath>
+    <DCC_UnitSearchPath>..\Src\Core;..\Src\Render</DCC_UnitSearchPath>
     <DCC_ScopedEnums>True</DCC_ScopedEnums>
     <DCC_Warnings>True</DCC_Warnings>
   </PropertyGroup>
@@ -31,34 +31,18 @@
     <DCC_Define>RELEASE</DCC_Define>
   </PropertyGroup>
   <ItemGroup>
-    <DelphiCompile Include="TestAdvanced.dpr">
+    <DelphiCompile Include="TestPDFEmbeddedWriter.dpr">
       <MainSource>MainSource</MainSource>
     </DelphiCompile>
-    <DCCReference Include="..\Src\Core\uPDF.Types.pas"/>
     <DCCReference Include="..\Src\Core\uPDF.Errors.pas"/>
+    <DCCReference Include="..\Src\Core\uPDF.Types.pas"/>
     <DCCReference Include="..\Src\Core\uPDF.Objects.pas"/>
-    <DCCReference Include="..\Src\Core\uPDF.Lexer.pas"/>
     <DCCReference Include="..\Src\Core\uPDF.Filters.pas"/>
-    <DCCReference Include="..\Src\Core\uPDF.XRef.pas"/>
-    <DCCReference Include="..\Src\Core\uPDF.Crypto.pas"/>
-    <DCCReference Include="..\Src\Core\uPDF.Encryption.pas"/>
-    <DCCReference Include="..\Src\Core\uPDF.Parser.pas"/>
-    <DCCReference Include="..\Src\Core\uPDF.Document.pas"/>
-    <DCCReference Include="..\Src\Core\uPDF.GraphicsState.pas"/>
-    <DCCReference Include="..\Src\Core\uPDF.ColorSpace.pas"/>
-    <DCCReference Include="..\Src\Core\uPDF.FontCMap.pas"/>
-    <DCCReference Include="..\Src\Core\uPDF.Font.pas"/>
-    <DCCReference Include="..\Src\Core\uPDF.ContentStream.pas"/>
-    <DCCReference Include="..\Src\Core\uPDF.Image.pas"/>
-    <DCCReference Include="..\Src\Core\uPDF.TextExtractor.pas"/>
-    <DCCReference Include="..\Src\Core\uPDF.ImageExtractor.pas"/>
+    <DCCReference Include="..\Src\Core\uPDF.TOC.pas"/>
+    <DCCReference Include="..\Src\Core\uPDF.TTFParser.pas"/>
+    <DCCReference Include="..\Src\Core\uPDF.TTFSubset.pas"/>
+    <DCCReference Include="..\Src\Core\uPDF.EmbeddedFont.pas"/>
     <DCCReference Include="..\Src\Core\uPDF.Writer.pas"/>
-    <DCCReference Include="..\Src\Core\uPDF.Outline.pas"/>
-    <DCCReference Include="..\Src\Core\uPDF.Annotations.pas"/>
-    <DCCReference Include="..\Src\Core\uPDF.Metadata.pas"/>
-    <DCCReference Include="..\Src\Core\uPDF.AcroForms.pas"/>
-    <DCCReference Include="..\Src\Core\uPDF.Writer.pas"/>
-    <DCCReference Include="..\Src\Core\uPDF.IncrementalUpdate.pas"/>
   </ItemGroup>
   <Import Project="$(BDS)\Bin\CodeGear.Delphi.Targets" Condition="Exists('$(BDS)\Bin\CodeGear.Delphi.Targets')"/>
   <Import Project="$(APPDATA)\Embarcadero\$(BDSAPPDATABASEDIR)\$(PRODUCTVERSION)\UserTools.proj" Condition="Exists('$(APPDATA)\Embarcadero\$(BDSAPPDATABASEDIR)\$(PRODUCTVERSION)\UserTools.proj')"/>

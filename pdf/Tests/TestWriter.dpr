@@ -31,7 +31,8 @@ uses
   uPDF.Outline       in '..\Src\Core\uPDF.Outline.pas',
   uPDF.Annotations   in '..\Src\Core\uPDF.Annotations.pas',
   uPDF.Metadata      in '..\Src\Core\uPDF.Metadata.pas',
-  uPDF.AcroForms     in '..\Src\Core\uPDF.AcroForms.pas';
+  uPDF.AcroForms     in '..\Src\Core\uPDF.AcroForms.pas',
+  uPDF.TOC           in '..\Src\Core\uPDF.TOC.pas';
 
 // =========================================================================
 // Helpers
@@ -943,6 +944,99 @@ end;
 // =========================================================================
 
 procedure TestWriteOptions;
+
+// =========================================================================
+// T11 — AddJPEGImage / AddRawImage / AddLinkURI / DrawXObject
+// =========================================================================
+
+procedure TestImageEmbedding;
+var
+  Builder : TPDFBuilder;
+  Content : TPDFContentBuilder;
+  Page    : TPDFDictionary;
+  Doc     : TPDFDocument;
+  MS      : TMemoryStream;
+  // Minimal valid 1×1 gray JPEG (JFIF, 1 byte, monotone)
+  MinJPEG : TBytes;
+  // Minimal 2×2 RGB raw bitmap (12 bytes)
+  MinRaw  : TBytes;
+  ImgName : string;
+  RawName : string;
+begin
+  Section('T11 — Image embedding + link annotation');
+  Builder := TPDFBuilder.Create;
+  Content := TPDFContentBuilder.Create;
+  MS      := TMemoryStream.Create;
+  try
+    try
+      Page := Builder.AddPage(PDF_A4_WIDTH, PDF_A4_HEIGHT);
+      AddStdFont(Page, 'F1', 'Helvetica');
+
+      // Build a minimal 1×1 JPEG (SOI + EOI = 4 bytes — degenerate but parseable
+      // as a stream by most viewers, and enough to test the plumbing).
+      MinJPEG := [$FF, $D8, $FF, $D9];  // SOI + EOI
+      ImgName := Builder.AddJPEGImage(Page, MinJPEG, 1, 1, 'DeviceGray');
+
+      // Raw 2×2 gray image (4 bytes)
+      MinRaw  := [$80, $C0, $40, $FF];
+      RawName := Builder.AddRawImage(Page, MinRaw, 2, 2, 'DeviceGray');
+
+      // Add a link annotation
+      Builder.AddLinkURI(Page, 50, 700, 100, 20, 'https://example.com');
+
+      // Build content using DrawXObject for JPEG, InvokeXObject for raw
+      Content.BeginText;
+      Content.SetFont('F1', 12);
+      Content.DrawText(50, 760, 'Image embedding test');
+      Content.EndText;
+
+      Content.DrawXObject(ImgName, 50, 600, 100, 100);
+      Content.DrawXObject(RawName, 200, 600, 50, 50);
+
+      Page.SetBytes('Contents', Content.Build);
+      Builder.SaveToStream(MS);
+
+      Check(MS.Size > 0, Format('SaveToStream produced bytes  (%d bytes)', [MS.Size]));
+
+      // Reload and verify page count + resources
+      MS.Seek(0, soBeginning);
+      Doc := TPDFDocument.Create;
+      try
+        Doc.LoadFromStream(MS);
+        Check(Doc.PageCount = 1, Format('Reloaded: 1 page  (got %d)', [Doc.PageCount]));
+
+        var Res := Doc.Pages[0].Resources;
+        Check(Res <> nil, 'Page has /Resources');
+        if Res <> nil then
+        begin
+          var XObjDict := Res.GetAsDictionary('XObject');
+          Check(XObjDict <> nil, '/Resources/XObject dict present');
+          if XObjDict <> nil then
+          begin
+            Check(XObjDict.Contains(ImgName),
+              Format('/XObject contains "%s" (JPEG)', [ImgName]));
+            Check(XObjDict.Contains(RawName),
+              Format('/XObject contains "%s" (raw)', [RawName]));
+          end;
+        end;
+      finally
+        Doc.Free;
+      end;
+
+      // Also save to file for manual inspection
+      Builder.SaveToFile(OutDir + 'test_writer_images.pdf');
+      Pass('SaveToFile test_writer_images.pdf');
+
+    except
+      on E: Exception do
+        Fail('Image embedding raised ' + E.ClassName, E.Message);
+    end;
+  finally
+    MS.Free;
+    Content.Free;
+    Builder.Free;
+  end;
+end;
 begin
   Section('T10 — TPDFWriteOptions.Default');
   try
@@ -957,6 +1051,295 @@ begin
   except
     on E: Exception do
       Fail('TPDFWriteOptions.Default raised ' + E.ClassName, E.Message);
+  end;
+end;
+
+// =========================================================================
+// T12 — AddStandardFont (built-in method, no external helper)
+// =========================================================================
+
+procedure TestAddStandardFont;
+var
+  Builder : TPDFBuilder;
+  Content : TPDFContentBuilder;
+  Page    : TPDFDictionary;
+  MS      : TMemoryStream;
+  Doc     : TPDFDocument;
+  Ext     : TPDFTextExtractor;
+begin
+  Section('T12 — AddStandardFont');
+  Builder := TPDFBuilder.Create;
+  Content := TPDFContentBuilder.Create;
+  MS      := TMemoryStream.Create;
+  try
+    try
+      Page := Builder.AddPage(PDF_A4_WIDTH, PDF_A4_HEIGHT);
+
+      // Use the built-in method — no external helper needed
+      Builder.AddStandardFont(Page, 'F1', 'Helvetica');
+      Builder.AddStandardFont(Page, 'F2', 'Helvetica-Bold');
+      Builder.AddStandardFont(Page, 'F3', 'Courier');
+
+      // Verify Resources/Font dict was created with correct entries
+      var ResDict := Page.GetAsDictionary('Resources');
+      Check(ResDict <> nil, 'Resources dict created');
+      if ResDict <> nil then
+      begin
+        var FontDict := ResDict.GetAsDictionary('Font');
+        Check(FontDict <> nil, 'Resources/Font dict created');
+        if FontDict <> nil then
+        begin
+          var FD := FontDict.GetAsDictionary('F1');
+          Check(FD <> nil, 'F1 font dict created');
+          if FD <> nil then
+          begin
+            Check(FD.GetAsName('Subtype')  = 'Type1',     'F1/Subtype = Type1');
+            Check(FD.GetAsName('BaseFont') = 'Helvetica', 'F1/BaseFont = Helvetica');
+            Check(FD.GetAsName('Encoding') = 'WinAnsiEncoding', 'F1/Encoding = WinAnsiEncoding');
+          end;
+          Check(FontDict.Contains('F2'), 'F2 (Helvetica-Bold) registered');
+          Check(FontDict.Contains('F3'), 'F3 (Courier) registered');
+        end;
+      end;
+
+      // Build a page using the fonts and round-trip through save/reload
+      Content.BeginText;
+      Content.SetFont('F1', 14);
+      Content.SetTextMatrix(1, 0, 0, 1, 50, 780);
+      Content.ShowText('Standard Fonts Test — Helvetica');
+      Content.SetFont('F2', 14);
+      Content.SetTextMatrix(1, 0, 0, 1, 50, 760);
+      Content.ShowText('Helvetica-Bold via AddStandardFont');
+      Content.SetFont('F3', 12);
+      Content.SetTextMatrix(1, 0, 0, 1, 50, 740);
+      Content.ShowText('Courier: fixed-pitch 0123456789');
+      Content.EndText;
+      Page.SetBytes('Contents', Content.Build);
+
+      Builder.SaveToStream(MS);
+      Check(MS.Size > 0, 'Stream produced');
+
+      MS.Seek(0, soBeginning);
+      Doc := TPDFDocument.Create;
+      try
+        Doc.LoadFromStream(MS);
+        Check(Doc.PageCount = 1, 'Reload: 1 page');
+        Ext := TPDFTextExtractor.Create(Doc);
+        try
+          var PT := Ext.ExtractPage(0);
+          Check(ContainsText(PT.PlainText, 'Helvetica'),
+            'PlainText contains "Helvetica"');
+          Check(ContainsText(PT.PlainText, 'Courier'),
+            'PlainText contains "Courier"');
+        finally
+          Ext.Free;
+        end;
+      finally
+        Doc.Free;
+      end;
+
+      Builder.SaveToFile(OutDir + 'test_writer_stdfont.pdf');
+      Pass('SaveToFile test_writer_stdfont.pdf');
+    except
+      on E: Exception do
+        Fail('AddStandardFont raised ' + E.ClassName, E.Message);
+    end;
+  finally
+    MS.Free;
+    Content.Free;
+    Builder.Free;
+  end;
+end;
+
+// =========================================================================
+// T13 — DrawTextWrapped + PDFMeasureText
+// =========================================================================
+
+procedure TestDrawTextWrapped;
+const
+  BodyText =
+    'This is a demonstration of the DrawTextWrapped method. ' +
+    'It automatically breaks long lines at word boundaries so that ' +
+    'each line fits within the specified width. The method supports ' +
+    'left, center, and right alignment and returns the baseline Y ' +
+    'of the last rendered line so the caller can continue below.';
+  ColumnW = 495.0;  // A4 width minus 50pt margins on each side
+var
+  Builder : TPDFBuilder;
+  Content : TPDFContentBuilder;
+  Page    : TPDFDictionary;
+  S       : string;
+begin
+  Section('T13 — DrawTextWrapped + PDFMeasureText');
+
+  // --- Unit tests for PDFMeasureText ---
+  try
+    var W0 := PDFMeasureText('', 'Helvetica', 12);
+    Check(W0 = 0, 'PDFMeasureText("") = 0');
+
+    // 'A' in Helvetica = 667/1000 em.  At 1000pt → 667pt.
+    var WA := PDFMeasureText('A', 'Helvetica', 1000);
+    Check(Abs(WA - 667) < 1, Format('PDFMeasureText("A", Helvetica, 1000) ≈ 667  (got %.1f)', [WA]));
+
+    // Courier is fixed-pitch 600/1000 em.
+    var WC := PDFMeasureText('X', 'Courier', 1000);
+    Check(Abs(WC - 600) < 1, Format('PDFMeasureText("X", Courier, 1000) ≈ 600  (got %.1f)', [WC]));
+
+    // Three-char string 'ABC' in Helvetica: 667+667+722 = 2056 at 1000pt
+    var WABC := PDFMeasureText('ABC', 'Helvetica', 1000);
+    Check(Abs(WABC - 2056) < 1, Format('PDFMeasureText("ABC", Helvetica, 1000) ≈ 2056  (got %.1f)', [WABC]));
+
+    // Times-Roman 'A' = 722/1000 em
+    var WT := PDFMeasureText('A', 'Times-Roman', 1000);
+    Check(Abs(WT - 722) < 1, Format('PDFMeasureText("A", Times-Roman, 1000) ≈ 722  (got %.1f)', [WT]));
+  except
+    on E: Exception do
+      Fail('PDFMeasureText raised ' + E.ClassName, E.Message);
+  end;
+
+  // --- DrawTextWrapped visual PDF test ---
+  Builder := TPDFBuilder.Create;
+  Content := TPDFContentBuilder.Create;
+  try
+    try
+      Page := Builder.AddPage(PDF_A4_WIDTH, PDF_A4_HEIGHT);
+      Builder.AddStandardFont(Page, 'F1', 'Helvetica');
+      Builder.AddStandardFont(Page, 'F2', 'Helvetica-Bold');
+
+      // Title
+      Content.BeginText;
+      Content.SetFont('F2', 16);
+      Content.SetTextMatrix(1, 0, 0, 1, 50, 800);
+      Content.ShowText('T13 — DrawTextWrapped Demo');
+      Content.EndText;
+
+      // Left-aligned body (default)
+      var NextY := Content.DrawTextWrapped(50, 770, ColumnW, 16,
+        BodyText, 'F1', 'Helvetica', 12, 0);
+
+      // Centered short note
+      Content.DrawTextWrapped(50, NextY - 10, ColumnW, 14,
+        'Centered: Lorem ipsum dolor sit amet, consectetur adipiscing elit.', 'F1', 'Helvetica', 11, 1);
+
+      // Right-aligned note
+      Content.DrawTextWrapped(50, NextY - 50, ColumnW, 14,
+        'Right-aligned text in the same column width.', 'F1', 'Helvetica', 11, 2);
+
+      // Hard newline test
+      Content.DrawTextWrapped(50, NextY - 90, ColumnW, 14,
+        'Line one.'#10'Line two.'#10'Line three.', 'F1', 'Helvetica', 11, 0);
+
+      Page.SetBytes('Contents', Content.Build);
+
+      // Verify the content stream contains multiple Tm operators (one per wrapped line)
+      S := TEncoding.ASCII.GetString(Content.Build);
+      var TmCount := 0;
+      var P2 := 1;
+      repeat
+        P2 := PosEx(' Tm', S, P2);
+        if P2 > 0 then
+        begin
+          Inc(TmCount);
+          Inc(P2, 3);
+        end;
+      until P2 = 0;
+      Check(TmCount >= 5, Format('Content has ≥5 Tm operators (wrapped lines)  (got %d)', [TmCount]));
+
+      Builder.SaveToFile(OutDir + 'test_writer_wrap.pdf');
+      Pass('SaveToFile test_writer_wrap.pdf');
+    except
+      on E: Exception do
+        Fail('DrawTextWrapped raised ' + E.ClassName, E.Message);
+    end;
+  finally
+    Content.Free;
+    Builder.Free;
+  end;
+end;
+
+// =========================================================================
+// T14 — DrawTableGrid
+// =========================================================================
+
+procedure TestDrawTableGrid;
+const
+  ColW:     array[0..3]  of Single = (120, 100, 130, 145);
+  RowH:     array[0..4]  of Single = (22, 18, 18, 18, 18);
+  CellData: array[0..19] of string = (
+    'Product', 'Qty', 'Unit Price', 'Total',
+    'Widget A', '10',  '$5.00',    '$50.00',
+    'Widget B', '3',   '$12.50',   '$37.50',
+    'Gadget X', '7',   '$8.00',    '$56.00',
+    'Gizmo Z',  '1',   '$199.99',  '$199.99'
+  );
+var
+  Builder : TPDFBuilder;
+  Content : TPDFContentBuilder;
+  Page    : TPDFDictionary;
+  S       : string;
+  BotY    : Single;
+begin
+  Section('T14 — DrawTableGrid');
+  Builder := TPDFBuilder.Create;
+  Content := TPDFContentBuilder.Create;
+  try
+    try
+      Page := Builder.AddPage(PDF_A4_WIDTH, PDF_A4_HEIGHT);
+      Builder.AddStandardFont(Page, 'F1', 'Helvetica');
+      Builder.AddStandardFont(Page, 'FB', 'Helvetica-Bold');
+
+      // Title
+      Content.BeginText;
+      Content.SetFont('FB', 14);
+      Content.SetTextMatrix(1, 0, 0, 1, 50, 800);
+      Content.ShowText('T14 — DrawTableGrid Demo');
+      Content.EndText;
+
+      BotY := Content.DrawTableGrid(50, 760,
+        ColW, RowH, CellData,
+        'F1', 'Helvetica', 10,
+        4, 3,
+        1);
+
+      Check(BotY < 760, Format('Table bottom Y < top Y  (%.1f < 760)', [BotY]));
+      var ExpectedH: Single := 22 + 18 + 18 + 18 + 18;
+      Check(Abs((760 - BotY) - ExpectedH) < 1,
+        Format('Table height = %.0f  (got %.1f)', [ExpectedH, 760 - BotY]));
+
+      // Verify grid lines and text operators in the content stream
+      S := TEncoding.ASCII.GetString(Content.Build);
+      Check(Pos(' m'#10, S) > 0, 'Content has moveto (m) for grid lines');
+      Check(Pos(' l'#10, S) > 0, 'Content has lineto (l) for grid lines');
+      Check(Pos(' S'#10, S) > 0, 'Content has Stroke (S) for grid lines');
+      Check(Pos('BT'#10, S) > 0, 'Content has BT block for cell text');
+      Check(ContainsStr(S, '(Product)'), 'Header cell "Product" in stream');
+      Check(ContainsStr(S, '(Widget A)'), 'Data cell "Widget A" in stream');
+
+      // Truncation: a string wider than a narrow column must get '...' appended
+      var TruncCB := TPDFContentBuilder.Create;
+      try
+        TruncCB.DrawTableGrid(50, 400,
+          [50.0], [20.0],
+          ['This long text definitely overflows the fifty point column'],
+          'F1', 'Helvetica', 10, 4, 3, 0);
+        var TS := TEncoding.ASCII.GetString(TruncCB.Build);
+        Check(ContainsStr(TS, '...'), 'Long text in narrow column gets "..." truncation');
+        Check(not ContainsStr(TS, 'definitely overflows'),
+          'Overflow portion is clipped from stream');
+      finally
+        TruncCB.Free;
+      end;
+
+      Page.SetBytes('Contents', Content.Build);
+      Builder.SaveToFile(OutDir + 'test_writer_table.pdf');
+      Pass('SaveToFile test_writer_table.pdf');
+    except
+      on E: Exception do
+        Fail('DrawTableGrid raised ' + E.ClassName, E.Message);
+    end;
+  finally
+    Content.Free;
+    Builder.Free;
   end;
 end;
 
@@ -982,6 +1365,10 @@ begin
   TestObjectSerializer;
   TestComplexPage;
   TestWriteOptions;
+  TestImageEmbedding;
+  TestAddStandardFont;
+  TestDrawTextWrapped;
+  TestDrawTableGrid;
 
   WriteLn;
   WriteLn('======================================================');
@@ -998,7 +1385,11 @@ begin
     'test_writer_text.pdf',
     'test_writer_uncomp.pdf',
     'test_writer_comp.pdf',
-    'test_writer_complex.pdf'
+    'test_writer_complex.pdf',
+    'test_writer_images.pdf',
+    'test_writer_stdfont.pdf',
+    'test_writer_wrap.pdf',
+    'test_writer_table.pdf'
   ];
   for var F in PDFFiles do
   begin

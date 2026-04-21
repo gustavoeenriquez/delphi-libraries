@@ -29,6 +29,7 @@ type
     FVersion:            TPDFVersion;
     FEncrypted:          Boolean;
     FDecryptionContext:  IDecryptionContext;
+    FStartXRefOffset:    Int64;   // byte offset of the most-recent startxref
 
     procedure DetectVersion;
     function  FindStartXRef: Int64;
@@ -75,6 +76,8 @@ type
     function  Trailer: TPDFDictionary;
     function  Version: TPDFVersion;
     function  IsEncrypted: Boolean;
+    // Byte offset of the last startxref entry (needed for incremental saves)
+    function  StartXRefOffset: Int64;
 
     // The object pool (owns all loaded objects)
     function  Pool: TPDFObjectPool;
@@ -154,11 +157,12 @@ end;
 // Accessors
 // =========================================================================
 
-function TPDFParser.XRef: TPDFXRef;       begin Result := FXRef;            end;
-function TPDFParser.Trailer: TPDFDictionary; begin Result := FXRef.Trailer; end;
-function TPDFParser.Version: TPDFVersion; begin Result := FVersion;          end;
-function TPDFParser.IsEncrypted: Boolean; begin Result := FEncrypted;        end;
-function TPDFParser.Pool: TPDFObjectPool; begin Result := FPool;             end;
+function TPDFParser.XRef: TPDFXRef;           begin Result := FXRef;             end;
+function TPDFParser.Trailer: TPDFDictionary;  begin Result := FXRef.Trailer;    end;
+function TPDFParser.Version: TPDFVersion;     begin Result := FVersion;          end;
+function TPDFParser.IsEncrypted: Boolean;     begin Result := FEncrypted;        end;
+function TPDFParser.StartXRefOffset: Int64;   begin Result := FStartXRefOffset;  end;
+function TPDFParser.Pool: TPDFObjectPool;     begin Result := FPool;             end;
 
 // =========================================================================
 // Open
@@ -239,6 +243,7 @@ end;
 procedure TPDFParser.ParseXRef;
 begin
   var StartXRef := FindStartXRef;
+  FStartXRefOffset := StartXRef;
   FXRef.Parse(FLexer, StartXRef);
   // Trailer references were created by XRef's mini-parser without resolvers;
   // propagate the resolver now so Trailer.Get('Root') etc. can dereference.

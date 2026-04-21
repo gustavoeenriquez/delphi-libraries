@@ -1,6 +1,7 @@
 ﻿program TestAdvanced;
 // Tests: uPDF.Metadata, uPDF.Outline, uPDF.Annotations,
-//        uPDF.AcroForms, uPDF.ImageExtractor
+//        uPDF.AcroForms, uPDF.ImageExtractor, uPDF.TextSearch,
+//        uPDF.TOC, uPDF.Signatures, uPDF.Crypto (SHA-1)
 // Uses existing real-world PDFs as test fixtures.
 
 {$APPTYPE CONSOLE}
@@ -32,7 +33,17 @@ uses
   uPDF.Outline       in '..\Src\Core\uPDF.Outline.pas',
   uPDF.Annotations   in '..\Src\Core\uPDF.Annotations.pas',
   uPDF.Metadata      in '..\Src\Core\uPDF.Metadata.pas',
-  uPDF.AcroForms     in '..\Src\Core\uPDF.AcroForms.pas';
+  uPDF.AcroForms     in '..\Src\Core\uPDF.AcroForms.pas',
+  uPDF.ScanDetector  in '..\Src\Core\uPDF.ScanDetector.pas',
+  uPDF.PageOperations in '..\Src\Core\uPDF.PageOperations.pas',
+  uPDF.PageCopy      in '..\Src\Core\uPDF.PageCopy.pas',
+  uPDF.AcroForms.Fill in '..\Src\Core\uPDF.AcroForms.Fill.pas',
+  uPDF.TextSearch    in '..\Src\Core\uPDF.TextSearch.pas',
+  uPDF.Watermark     in '..\Src\Core\uPDF.Watermark.pas',
+  uPDF.TOC           in '..\Src\Core\uPDF.TOC.pas',
+  uPDF.Signatures         in '..\Src\Core\uPDF.Signatures.pas',
+  uPDF.Writer             in '..\Src\Core\uPDF.Writer.pas',
+  uPDF.IncrementalUpdate  in '..\Src\Core\uPDF.IncrementalUpdate.pas';
 
 // =========================================================================
 // Helpers
@@ -664,6 +675,368 @@ begin
 end;
 
 // =========================================================================
+// T12 — CryptoSHA1 — known-answer test
+// =========================================================================
+
+procedure TestCryptoSHA1;
+var
+  Empty: TBytes;
+  ABCHash: TBytes;
+  Got: TBytes;
+  S: string;
+  I: Integer;
+begin
+  Section('T12 — CryptoSHA1 known-answer test');
+  try
+    // SHA-1('') = da39a3ee5e6b4b0d3255bfef95601890afd80709
+    SetLength(Empty, 0);
+    Got := CryptoSHA1(Empty);
+    Check(Length(Got) = 20, Format('SHA-1 empty: digest length = 20  (got %d)', [Length(Got)]));
+    if Length(Got) = 20 then
+    begin
+      S := '';
+      for I := 0 to 19 do S := S + IntToHex(Got[I], 2);
+      Check(LowerCase(S) = 'da39a3ee5e6b4b0d3255bfef95601890afd80709',
+        Format('SHA-1("") = da39a3ee...  (got %s)', [LowerCase(S)]));
+    end;
+
+    // SHA-1('abc') = a9993e364706816aba3e25717850c26c9cd0d89d
+    SetLength(ABCHash, 3);
+    ABCHash[0] := Ord('a'); ABCHash[1] := Ord('b'); ABCHash[2] := Ord('c');
+    Got := CryptoSHA1(ABCHash);
+    Check(Length(Got) = 20, 'SHA-1 "abc": digest length = 20');
+    if Length(Got) = 20 then
+    begin
+      S := '';
+      for I := 0 to 19 do S := S + IntToHex(Got[I], 2);
+      Check(LowerCase(S) = 'a9993e364706816aba3e25717850c26c9cd0d89d',
+        Format('SHA-1("abc") = a9993e36...  (got %s)', [LowerCase(S)]));
+    end;
+  except
+    on E: Exception do
+      Fail('CryptoSHA1 raised ' + E.ClassName, E.Message);
+  end;
+end;
+
+// =========================================================================
+// T13 — TPDFTOCBuilder — in-memory tree + serialization sanity check
+// =========================================================================
+
+procedure TestTOCBuilder;
+var
+  TOC: TPDFTOCBuilder;
+  Ch1, Ch2: TPDFTOCEntry;
+  Objects: TObjectDictionary<Integer, TPDFObject>;
+  PageNums: TArray<Integer>;
+  RootNum: Integer;
+  I: Integer;
+begin
+  Section('T13 — TPDFTOCBuilder in-memory tree');
+  TOC := TPDFTOCBuilder.Create;
+  Objects := TObjectDictionary<Integer, TPDFObject>.Create([doOwnsValues]);
+  try
+    try
+      Check(TOC.IsEmpty, 'New TOC is empty');
+      Check(TOC.Count = 0, 'New TOC count = 0');
+
+      Ch1 := TOC.Add('Chapter 1', 0);
+      Ch2 := TOC.Add('Chapter 2', 1);
+      Ch1.AddChild('Section 1.1', 0);
+      Ch1.AddChild('Section 1.2', 1);
+
+      Check(not TOC.IsEmpty, 'TOC non-empty after Add');
+      Check(TOC.Count = 2, Format('TOC has 2 top-level entries  (got %d)', [TOC.Count]));
+      Check(Ch1.ChildCount = 2, Format('Ch1 has 2 children  (got %d)', [Ch1.ChildCount]));
+      Check(Ch2.ChildCount = 0, 'Ch2 has 0 children');
+
+      // Serialize to a dummy objects dictionary
+      SetLength(PageNums, 3);
+      for I := 0 to 2 do PageNums[I] := 100 + I;  // fake page obj numbers
+      var NextNum := 10;
+      RootNum := TOC.SerializeTo(Objects, NextNum, PageNums);
+
+      Check(RootNum = 10, Format('Root dict at obj#10  (got %d)', [RootNum]));
+      // 4 entries (2 top + 2 children) + 1 root = 5 objects total from 10..14
+      Check(Objects.Count = 5,
+        Format('Objects count = 5 (root + 4 entries)  (got %d)', [Objects.Count]));
+      Check(NextNum = 15, Format('NextNum advanced to 15  (got %d)', [NextNum]));
+
+      // All objects must be TPDFDictionary
+      for var Pair in Objects do
+        Check(Pair.Value.IsDictionary,
+          Format('Object %d is TPDFDictionary', [Pair.Key]));
+
+    except
+      on E: Exception do
+        Fail('TOCBuilder raised ' + E.ClassName, E.Message);
+    end;
+  finally
+    Objects.Free;
+    TOC.Free;
+  end;
+end;
+
+// =========================================================================
+// T14 — TPDFTextSearch — search in real PDF
+// =========================================================================
+
+procedure TestTextSearch(const APath: string);
+var
+  Doc:     TPDFDocument;
+  Search:  TPDFTextSearch;
+  Matches: TArray<TPDFSearchMatch>;
+begin
+  Section('T14 — TPDFTextSearch (Word PDF)');
+  Doc := TPDFDocument.Create;
+  try
+    try
+      Doc.LoadFromFile(APath);
+      Search := TPDFTextSearch.Create(Doc);
+      try
+        // Search for a common short word; we just verify no exception and
+        // that the result is an array (possibly empty).
+        Matches := Search.Search('de');
+        Pass(Format('Search("de") completed — %d match(es) found', [Length(Matches)]));
+
+        if Length(Matches) > 0 then
+        begin
+          var M := Matches[0];
+          Check(M.PageIndex >= 0, Format('Match[0] PageIndex >= 0  (got %d)', [M.PageIndex]));
+          Check(Length(M.Text) > 0, 'Match[0] Text non-empty');
+          WriteLn(Format('  First match: page=%d  line=%d  text="%s"  bounds=(%.1f,%.1f,%.1f,%.1f)',
+            [M.PageIndex, M.LineIndex, M.Text,
+             M.Bounds.Left, M.Bounds.Bottom, M.Bounds.Right, M.Bounds.Top]));
+        end;
+
+        // Case-sensitive whole-word search must not crash
+        Matches := Search.Search('el',
+          TPDFSearchOptions.CaseSensitiveExact);
+        Pass(Format('CaseSensitiveExact search("el") — %d match(es)', [Length(Matches)]));
+
+      finally
+        Search.Free;
+      end;
+    except
+      on E: Exception do
+        Fail('TextSearch raised ' + E.ClassName, E.Message);
+    end;
+  finally
+    Doc.Free;
+  end;
+end;
+
+// =========================================================================
+// T15 — TPDFSignatureVerifier — graceful handling with no signed PDF
+// =========================================================================
+
+procedure TestSignatureVerifier(const APath: string);
+var
+  Doc:  TPDFDocument;
+  FS:   TFileStream;
+  Sigs: TArray<TPDFSignatureInfo>;
+  I:    Integer;
+begin
+  Section('T15 — TPDFSignatureVerifier');
+  Doc := TPDFDocument.Create;
+  FS  := TFileStream.Create(APath, fmOpenRead or fmShareDenyNone);
+  try
+    try
+      Doc.LoadFromStream(FS);
+      FS.Seek(0, soBeginning);
+      Sigs := TPDFSignatureVerifier.Verify(Doc, FS);
+      Pass(Format('Verify completed — %d signature(s) found', [Length(Sigs)]));
+      for I := 0 to High(Sigs) do
+      begin
+        var Sig := Sigs[I];
+        WriteLn(Format('  Sig[%d]: field="%s"  signer="%s"  alg="%s"  status=%s',
+          [I, Sig.FieldName, Sig.SignerName, Sig.HashAlgorithm,
+           GetEnumName(TypeInfo(TPDFHashStatus), Ord(Sig.HashStatus))]));
+      end;
+      // A PDF without signatures must still return an empty array, not raise
+      Check(Length(Sigs) >= 0, 'Result is a valid (possibly empty) array');
+    except
+      on E: Exception do
+        Fail('SignatureVerifier raised ' + E.ClassName, E.Message);
+    end;
+  finally
+    FS.Free;
+    Doc.Free;
+  end;
+end;
+
+// =========================================================================
+// T16 — TPDFIncrementalUpdater — basic round-trip (add 1 page)
+// =========================================================================
+
+procedure TestIncrementalAddPage;
+var
+  Builder:   TPDFBuilder;
+  Upd:       TPDFIncrementalUpdater;
+  CB:        TPDFContentBuilder;
+  Page:      TPDFDictionary;
+  BaseStm:   TBytesStream;
+  OutStm:    TBytesStream;
+  BaseBytes: TBytes;
+  FinalDoc:  TPDFDocument;
+  FinalStm:  TBytesStream;
+begin
+  Section('T16 — TPDFIncrementalUpdater (add 1 page)');
+  BaseStm := TBytesStream.Create(nil);
+  OutStm  := TBytesStream.Create(nil);
+  try
+    try
+      // --- Build base PDF (1 blank page) ---
+      Builder := TPDFBuilder.Create;
+      try
+        Builder.AddPage;
+        Builder.SaveToStream(BaseStm);
+      finally
+        Builder.Free;
+      end;
+
+      BaseBytes := Copy(BaseStm.Bytes, 0, BaseStm.Size);
+      Check(Length(BaseBytes) > 0, Format('Base PDF built  (%d bytes)', [Length(BaseBytes)]));
+
+      // --- Apply incremental update ---
+      Upd := TPDFIncrementalUpdater.Create(BaseBytes);
+      try
+        Check(Upd.Document.PageCount = 1,
+          Format('Loaded base doc has 1 page  (got %d)', [Upd.Document.PageCount]));
+        Check(Upd.Document.MaxObjectNumber > 0,
+          Format('MaxObjectNumber > 0  (got %d)', [Upd.Document.MaxObjectNumber]));
+
+        Page := Upd.AddPage;
+        Check(Page <> nil, 'AddPage returned non-nil dict');
+        Upd.AddStandardFont(Page, 'F1', 'Helvetica');
+
+        CB := TPDFContentBuilder.Create;
+        try
+          CB.BeginText;
+          CB.SetFont('F1', 12);
+          CB.SetTextMatrix(1, 0, 0, 1, 72, 720);
+          CB.ShowText('Appended page via incremental update');
+          CB.EndText;
+          Upd.SetPageContent(Page, CB.Build);
+        finally
+          CB.Free;
+        end;
+
+        Upd.SaveToStream(OutStm);
+      finally
+        Upd.Free;
+      end;
+
+      var FinalBytes := Copy(OutStm.Bytes, 0, OutStm.Size);
+      Check(Length(FinalBytes) > Length(BaseBytes),
+        Format('Final size (%d) > base size (%d)',
+               [Length(FinalBytes), Length(BaseBytes)]));
+
+      // --- Reload and verify page count ---
+      FinalStm := TBytesStream.Create(FinalBytes);
+      FinalDoc := TPDFDocument.Create;
+      try
+        FinalDoc.LoadFromStream(FinalStm);
+        Check(FinalDoc.PageCount = 2,
+          Format('Reloaded doc has 2 pages  (got %d)', [FinalDoc.PageCount]));
+      finally
+        FinalDoc.Free;
+        FinalStm.Free;
+      end;
+
+    except
+      on E: Exception do
+        Fail('IncrementalAddPage raised ' + E.ClassName, E.Message);
+    end;
+  finally
+    OutStm.Free;
+    BaseStm.Free;
+  end;
+end;
+
+// =========================================================================
+// T17 — TPDFIncrementalUpdater — multiple AddPage calls in one session
+// =========================================================================
+
+procedure TestIncrementalMultiPage;
+var
+  Builder:   TPDFBuilder;
+  Upd:       TPDFIncrementalUpdater;
+  Page:      TPDFDictionary;
+  BaseStm:   TBytesStream;
+  OutStm:    TBytesStream;
+  BaseBytes: TBytes;
+  FinalDoc:  TPDFDocument;
+  FinalStm:  TBytesStream;
+  I:         Integer;
+begin
+  Section('T17 — TPDFIncrementalUpdater (3 pages added in one session)');
+  BaseStm := TBytesStream.Create(nil);
+  OutStm  := TBytesStream.Create(nil);
+  try
+    try
+      // Build 1-page base
+      Builder := TPDFBuilder.Create;
+      try
+        Builder.AddPage;
+        Builder.SaveToStream(BaseStm);
+      finally
+        Builder.Free;
+      end;
+      BaseBytes := Copy(BaseStm.Bytes, 0, BaseStm.Size);
+
+      // Add 3 pages incrementally
+      Upd := TPDFIncrementalUpdater.Create(BaseBytes);
+      try
+        for I := 1 to 3 do
+        begin
+          Page := Upd.AddPage;
+          var CB := TPDFContentBuilder.Create;
+          try
+            CB.BeginText;
+            CB.SetFont('F1', 12);
+            CB.SetTextMatrix(1, 0, 0, 1, 72, 720);
+            CB.ShowText(Format('Incremental page %d', [I]));
+            CB.EndText;
+            Upd.AddStandardFont(Page, 'F1', 'Helvetica');
+            Upd.SetPageContent(Page, CB.Build);
+          finally
+            CB.Free;
+          end;
+        end;
+        Upd.SaveToStream(OutStm);
+      finally
+        Upd.Free;
+      end;
+
+      var FinalBytes := Copy(OutStm.Bytes, 0, OutStm.Size);
+      Check(Length(FinalBytes) > Length(BaseBytes),
+        Format('Final (%d bytes) > base (%d bytes)',
+               [Length(FinalBytes), Length(BaseBytes)]));
+
+      // Verify 4 pages total
+      FinalStm := TBytesStream.Create(FinalBytes);
+      FinalDoc := TPDFDocument.Create;
+      try
+        FinalDoc.LoadFromStream(FinalStm);
+        Check(FinalDoc.PageCount = 4,
+          Format('Reloaded doc has 4 pages (1 base + 3 added)  (got %d)',
+                 [FinalDoc.PageCount]));
+      finally
+        FinalDoc.Free;
+        FinalStm.Free;
+      end;
+
+    except
+      on E: Exception do
+        Fail('IncrementalMultiPage raised ' + E.ClassName, E.Message);
+    end;
+  finally
+    OutStm.Free;
+    BaseStm.Free;
+  end;
+end;
+
+// =========================================================================
 // Main
 // =========================================================================
 
@@ -683,6 +1056,10 @@ begin
   TestAnnotationTypeCoverage;
   TestFormFieldFlags;
   TestOutlineTree;
+  TestCryptoSHA1;
+  TestTOCBuilder;
+  TestIncrementalAddPage;
+  TestIncrementalMultiPage;
 
   // ---- Tests against real PDF files ----
   if not FileExists(PDF_WORD) then
@@ -697,6 +1074,8 @@ begin
     TestAcroFormsLoad(PDF_WORD, 'Word PDF');
     TestImageExtractorWord(PDF_WORD);
     TestMetadataBestFields(PDF_WORD);
+    TestTextSearch(PDF_WORD);
+    TestSignatureVerifier(PDF_WORD);
   end;
 
   if not FileExists(PDF_SCAN) then

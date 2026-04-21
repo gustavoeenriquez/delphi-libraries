@@ -114,6 +114,23 @@ type
     function  RenderPageToImage(APage: TPDFPage;
                                 ARenderWidth, ARenderHeight: Integer): ISkImage;
 
+    // Headless helpers — no UI required, safe to call from services/APIs.
+
+    // Render to PNG bytes (suitable for HTTP responses, file storage, etc.)
+    function  RenderPageToPng(APage: TPDFPage;
+                              ARenderWidth, ARenderHeight: Integer): TBytes;
+
+    // Render to JPEG bytes.  AQuality: 0–100 (default 90).
+    function  RenderPageToJpeg(APage: TPDFPage;
+                               ARenderWidth, ARenderHeight: Integer;
+                               AQuality: Integer = 90): TBytes;
+
+    // Render and save directly to a file.
+    // Format is inferred from the extension: .png → PNG, anything else → JPEG.
+    procedure RenderPageToFile(APage: TPDFPage;
+                               ARenderWidth, ARenderHeight: Integer;
+                               const AFilePath: string);
+
     property  Options:   TPDFRenderOptions read FOptions;
     property  FontCache: TPDFFontCache     read FFontCache;
   end;
@@ -812,6 +829,60 @@ begin
 
   RenderPage(APage, Surface.Canvas, ARenderWidth, ARenderHeight);
   Result := Surface.MakeImageSnapshot;
+end;
+
+// =========================================================================
+// RenderPageToPng
+// =========================================================================
+
+function TPDFSkiaRenderer.RenderPageToPng(APage: TPDFPage;
+  ARenderWidth, ARenderHeight: Integer): TBytes;
+var
+  Img: ISkImage;
+begin
+  Img    := RenderPageToImage(APage, ARenderWidth, ARenderHeight);
+  Result := Img.Encode(TSkEncodedImageFormat.PNG, 100);
+end;
+
+// =========================================================================
+// RenderPageToJpeg
+// =========================================================================
+
+function TPDFSkiaRenderer.RenderPageToJpeg(APage: TPDFPage;
+  ARenderWidth, ARenderHeight: Integer; AQuality: Integer): TBytes;
+var
+  Img: ISkImage;
+begin
+  Img    := RenderPageToImage(APage, ARenderWidth, ARenderHeight);
+  Result := Img.Encode(TSkEncodedImageFormat.JPEG,
+              EnsureRange(AQuality, 0, 100));
+end;
+
+// =========================================================================
+// RenderPageToFile
+// =========================================================================
+
+procedure TPDFSkiaRenderer.RenderPageToFile(APage: TPDFPage;
+  ARenderWidth, ARenderHeight: Integer; const AFilePath: string);
+var
+  Img:  ISkImage;
+  Ext:  string;
+  Fmt:  TSkEncodedImageFormat;
+  Qual: Integer;
+begin
+  Img := RenderPageToImage(APage, ARenderWidth, ARenderHeight);
+  Ext := LowerCase(ExtractFileExt(AFilePath));
+  if Ext = '.png' then
+  begin
+    Fmt  := TSkEncodedImageFormat.PNG;
+    Qual := 100;
+  end
+  else
+  begin
+    Fmt  := TSkEncodedImageFormat.JPEG;
+    Qual := 90;
+  end;
+  Img.EncodeToFile(AFilePath, Fmt, Qual);
 end;
 
 end.

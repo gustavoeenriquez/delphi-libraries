@@ -28,7 +28,19 @@ uses
   uPDF.Outline         in 'Src\Core\uPDF.Outline.pas',
   uPDF.Annotations     in 'Src\Core\uPDF.Annotations.pas',
   uPDF.Metadata        in 'Src\Core\uPDF.Metadata.pas',
-  uPDF.AcroForms       in 'Src\Core\uPDF.AcroForms.pas';
+  uPDF.AcroForms       in 'Src\Core\uPDF.AcroForms.pas',
+  uPDF.AcroForms.Fill  in 'Src\Core\uPDF.AcroForms.Fill.pas',
+  uPDF.ScanDetector    in 'Src\Core\uPDF.ScanDetector.pas',
+  uPDF.PageOperations  in 'Src\Core\uPDF.PageOperations.pas',
+  uPDF.PageCopy        in 'Src\Core\uPDF.PageCopy.pas',
+  uPDF.TextSearch      in 'Src\Core\uPDF.TextSearch.pas',
+  uPDF.Watermark       in 'Src\Core\uPDF.Watermark.pas',
+  uPDF.TOC             in 'Src\Core\uPDF.TOC.pas',
+  uPDF.Signatures         in 'Src\Core\uPDF.Signatures.pas',
+  uPDF.IncrementalUpdate  in 'Src\Core\uPDF.IncrementalUpdate.pas',
+  uPDF.TTFParser          in 'Src\Core\uPDF.TTFParser.pas',
+  uPDF.TTFSubset          in 'Src\Core\uPDF.TTFSubset.pas',
+  uPDF.EmbeddedFont       in 'Src\Core\uPDF.EmbeddedFont.pas';
 
 begin
 end.

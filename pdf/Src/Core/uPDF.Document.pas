@@ -80,6 +80,12 @@ type
     function  Resolver: IObjectResolver;
     function  Catalog: TPDFDictionary;
     function  Trailer: TPDFDictionary;
+
+    // ---- Incremental-update helpers ----
+    // Highest object number present in the XRef (0 if not loaded from file).
+    function  MaxObjectNumber: Integer;
+    // Byte offset of the last startxref entry (−1 if not loaded from file).
+    function  StartXRefOffset: Int64;
   end;
 
   // -------------------------------------------------------------------------
@@ -181,6 +187,22 @@ begin
     Result := FParser.Trailer
   else
     Result := nil;
+end;
+
+function TPDFDocument.MaxObjectNumber: Integer;
+begin
+  if FParser <> nil then
+    Result := FParser.XRef.HighestObjectNumber
+  else
+    Result := FNextObjNum - 1;
+end;
+
+function TPDFDocument.StartXRefOffset: Int64;
+begin
+  if FParser <> nil then
+    Result := FParser.StartXRefOffset
+  else
+    Result := -1;
 end;
 
 // =========================================================================

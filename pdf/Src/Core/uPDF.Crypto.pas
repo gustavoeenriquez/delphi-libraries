@@ -13,6 +13,11 @@ uses
 function CryptoMD5(const AData: TBytes): TBytes;
 
 // -----------------------------------------------------------------------
+// SHA-1 — 20-byte digest
+// -----------------------------------------------------------------------
+function CryptoSHA1(const AData: TBytes): TBytes;
+
+// -----------------------------------------------------------------------
 // SHA-256 / SHA-384 / SHA-512
 // -----------------------------------------------------------------------
 function CryptoSHA256(const AData: TBytes): TBytes;
@@ -49,6 +54,16 @@ var
   H: THashMD5;
 begin
   H := THashMD5.Create;
+  if Length(AData) > 0 then
+    H.Update(AData[0], Length(AData));
+  Result := H.HashAsBytes;
+end;
+
+function CryptoSHA1(const AData: TBytes): TBytes;
+var
+  H: THashSHA1;
+begin
+  H := THashSHA1.Create;
   if Length(AData) > 0 then
     H.Update(AData[0], Length(AData));
   Result := H.HashAsBytes;

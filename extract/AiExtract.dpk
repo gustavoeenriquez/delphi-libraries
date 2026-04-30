@@ -1,4 +1,4 @@
-package AiExtract;
+﻿package AiExtract;
 
 {$R *.res}
 {$IFDEF IMPLICITBUILDING This IFDEF should not be used by users}
@@ -43,6 +43,10 @@ contains
   uExtract.Conv.XML    in 'Src\Converters\uExtract.Conv.XML.pas',
   uExtract.Conv.INI    in 'Src\Converters\uExtract.Conv.INI.pas',
   uExtract.Conv.RTF    in 'Src\Converters\uExtract.Conv.RTF.pas',
-  uExtract.Conv.HTML   in 'Src\Converters\uExtract.Conv.HTML.pas';
+  uExtract.Conv.HTML   in 'Src\Converters\uExtract.Conv.HTML.pas',
+  uExtract.OpenXML     in 'Src\uExtract.OpenXML.pas',
+  uExtract.Conv.DOCX   in 'Src\Converters\uExtract.Conv.DOCX.pas',
+  uExtract.Conv.XLSX   in 'Src\Converters\uExtract.Conv.XLSX.pas',
+  uExtract.Conv.PPTX   in 'Src\Converters\uExtract.Conv.PPTX.pas';
 
 end.

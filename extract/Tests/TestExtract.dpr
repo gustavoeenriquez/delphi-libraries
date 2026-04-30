@@ -1,7 +1,7 @@
 ﻿program TestExtract;
 
 {
-  Test suite for the extract/ library (Fase 1: core + 5 converters).
+  Test suite for the extract/ library (Fase 1 + Fase 2 + Fase 3).
   Uses the same lightweight Pass/Fail/Check pattern as the PDF test suite.
 }
 
@@ -10,7 +10,7 @@
 {$R *.res}
 
 uses
-  System.SysUtils, System.Classes, System.IOUtils,
+  System.SysUtils, System.Classes, System.IOUtils, System.Zip,
   uExtract.Result        in '..\Src\uExtract.Result.pas',
   uExtract.StreamInfo    in '..\Src\uExtract.StreamInfo.pas',
   uExtract.Converter     in '..\Src\uExtract.Converter.pas',
@@ -22,7 +22,11 @@ uses
   uExtract.Conv.XML      in '..\Src\Converters\uExtract.Conv.XML.pas',
   uExtract.Conv.INI      in '..\Src\Converters\uExtract.Conv.INI.pas',
   uExtract.Conv.RTF      in '..\Src\Converters\uExtract.Conv.RTF.pas',
-  uExtract.Conv.HTML     in '..\Src\Converters\uExtract.Conv.HTML.pas';
+  uExtract.Conv.HTML     in '..\Src\Converters\uExtract.Conv.HTML.pas',
+  uExtract.OpenXML       in '..\Src\uExtract.OpenXML.pas',
+  uExtract.Conv.DOCX     in '..\Src\Converters\uExtract.Conv.DOCX.pas',
+  uExtract.Conv.XLSX     in '..\Src\Converters\uExtract.Conv.XLSX.pas',
+  uExtract.Conv.PPTX     in '..\Src\Converters\uExtract.Conv.PPTX.pas';
 
 // ==========================================================================
 // Helpers
@@ -632,6 +636,337 @@ begin
 end;
 
 // ==========================================================================
+// ==========================================================================
+// Fixture builders for Open XML formats (created at test time)
+// ==========================================================================
+
+procedure AddZipEntry(AZip: TZipFile; const AName, AContent: string);
+var
+  MS: TMemoryStream;
+  B : TBytes;
+begin
+  B  := TEncoding.UTF8.GetBytes(AContent);
+  MS := TMemoryStream.Create;
+  try
+    MS.WriteBuffer(B[0], Length(B));
+    MS.Position := 0;
+    AZip.Add(MS, AName);
+  finally
+    MS.Free;
+  end;
+end;
+
+procedure CreateDocxFixture(const APath: string);
+const
+  CT =
+    '<?xml version="1.0" encoding="UTF-8" standalone="yes"?>' +
+    '<Types xmlns="http://schemas.openxmlformats.org/package/2006/content-types">' +
+    '<Default Extension="rels" ContentType="application/vnd.openxmlformats-package.relationships+xml"/>' +
+    '<Default Extension="xml" ContentType="application/xml"/>' +
+    '<Override PartName="/word/document.xml" ContentType="application/vnd.openxmlformats-officedocument.wordprocessingml.document.main+xml"/>' +
+    '</Types>';
+  RELS =
+    '<?xml version="1.0" encoding="UTF-8" standalone="yes"?>' +
+    '<Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships">' +
+    '<Relationship Id="rId1" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/officeDocument" Target="word/document.xml"/>' +
+    '</Relationships>';
+  DRELS =
+    '<?xml version="1.0" encoding="UTF-8" standalone="yes"?>' +
+    '<Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships"/>';
+  DOC =
+    '<?xml version="1.0" encoding="UTF-8" standalone="yes"?>' +
+    '<w:document xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main">' +
+    '<w:body>' +
+    '<w:p><w:pPr><w:pStyle w:val="Heading1"/></w:pPr><w:r><w:t>Hello World</w:t></w:r></w:p>' +
+    '<w:p><w:r><w:t>This is a test document.</w:t></w:r></w:p>' +
+    '<w:tbl>' +
+    '<w:tr>' +
+    '<w:tc><w:p><w:r><w:t>Name</w:t></w:r></w:p></w:tc>' +
+    '<w:tc><w:p><w:r><w:t>Age</w:t></w:r></w:p></w:tc>' +
+    '</w:tr>' +
+    '<w:tr>' +
+    '<w:tc><w:p><w:r><w:t>Alice</w:t></w:r></w:p></w:tc>' +
+    '<w:tc><w:p><w:r><w:t>30</w:t></w:r></w:p></w:tc>' +
+    '</w:tr>' +
+    '</w:tbl>' +
+    '<w:sectPr/>' +
+    '</w:body>' +
+    '</w:document>';
+var
+  Zip: TZipFile;
+begin
+  Zip := TZipFile.Create;
+  try
+    Zip.Open(APath, zmWrite);
+    AddZipEntry(Zip, '[Content_Types].xml',       CT);
+    AddZipEntry(Zip, '_rels/.rels',               RELS);
+    AddZipEntry(Zip, 'word/_rels/document.xml.rels', DRELS);
+    AddZipEntry(Zip, 'word/document.xml',         DOC);
+  finally
+    Zip.Free;
+  end;
+end;
+
+procedure CreateXlsxFixture(const APath: string);
+const
+  CT =
+    '<?xml version="1.0" encoding="UTF-8" standalone="yes"?>' +
+    '<Types xmlns="http://schemas.openxmlformats.org/package/2006/content-types">' +
+    '<Default Extension="rels" ContentType="application/vnd.openxmlformats-package.relationships+xml"/>' +
+    '<Default Extension="xml" ContentType="application/xml"/>' +
+    '<Override PartName="/xl/workbook.xml" ContentType="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet.main+xml"/>' +
+    '</Types>';
+  RELS =
+    '<?xml version="1.0" encoding="UTF-8" standalone="yes"?>' +
+    '<Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships">' +
+    '<Relationship Id="rId1" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/officeDocument" Target="xl/workbook.xml"/>' +
+    '</Relationships>';
+  WB =
+    '<?xml version="1.0" encoding="UTF-8" standalone="yes"?>' +
+    '<workbook xmlns="http://schemas.openxmlformats.org/spreadsheetml/2006/main" xmlns:r="http://schemas.openxmlformats.org/officeDocument/2006/relationships">' +
+    '<sheets><sheet name="Products" sheetId="1" r:id="rId1"/></sheets>' +
+    '</workbook>';
+  WB_RELS =
+    '<?xml version="1.0" encoding="UTF-8" standalone="yes"?>' +
+    '<Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships">' +
+    '<Relationship Id="rId1" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/worksheet" Target="worksheets/sheet1.xml"/>' +
+    '<Relationship Id="rId2" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/sharedStrings" Target="sharedStrings.xml"/>' +
+    '</Relationships>';
+  SS =
+    '<?xml version="1.0" encoding="UTF-8" standalone="yes"?>' +
+    '<sst xmlns="http://schemas.openxmlformats.org/spreadsheetml/2006/main" count="4" uniqueCount="4">' +
+    '<si><t>Product</t></si>' +
+    '<si><t>Price</t></si>' +
+    '<si><t>Widget</t></si>' +
+    '<si><t>Gadget</t></si>' +
+    '</sst>';
+  SHEET =
+    '<?xml version="1.0" encoding="UTF-8" standalone="yes"?>' +
+    '<worksheet xmlns="http://schemas.openxmlformats.org/spreadsheetml/2006/main">' +
+    '<sheetData>' +
+    '<row r="1"><c r="A1" t="s"><v>0</v></c><c r="B1" t="s"><v>1</v></c></row>' +
+    '<row r="2"><c r="A2" t="s"><v>2</v></c><c r="B2"><v>9.99</v></c></row>' +
+    '<row r="3"><c r="A3" t="s"><v>3</v></c><c r="B3"><v>19.99</v></c></row>' +
+    '</sheetData>' +
+    '</worksheet>';
+var
+  Zip: TZipFile;
+begin
+  Zip := TZipFile.Create;
+  try
+    Zip.Open(APath, zmWrite);
+    AddZipEntry(Zip, '[Content_Types].xml',          CT);
+    AddZipEntry(Zip, '_rels/.rels',                  RELS);
+    AddZipEntry(Zip, 'xl/workbook.xml',              WB);
+    AddZipEntry(Zip, 'xl/_rels/workbook.xml.rels',   WB_RELS);
+    AddZipEntry(Zip, 'xl/sharedStrings.xml',         SS);
+    AddZipEntry(Zip, 'xl/worksheets/sheet1.xml',     SHEET);
+  finally
+    Zip.Free;
+  end;
+end;
+
+procedure CreatePptxFixture(const APath: string);
+const
+  CT =
+    '<?xml version="1.0" encoding="UTF-8" standalone="yes"?>' +
+    '<Types xmlns="http://schemas.openxmlformats.org/package/2006/content-types">' +
+    '<Default Extension="rels" ContentType="application/vnd.openxmlformats-package.relationships+xml"/>' +
+    '<Default Extension="xml" ContentType="application/xml"/>' +
+    '<Override PartName="/ppt/presentation.xml" ContentType="application/vnd.openxmlformats-officedocument.presentationml.presentation.main+xml"/>' +
+    '</Types>';
+  RELS =
+    '<?xml version="1.0" encoding="UTF-8" standalone="yes"?>' +
+    '<Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships">' +
+    '<Relationship Id="rId1" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/officeDocument" Target="ppt/presentation.xml"/>' +
+    '</Relationships>';
+  PRES =
+    '<?xml version="1.0" encoding="UTF-8" standalone="yes"?>' +
+    '<p:presentation xmlns:p="http://schemas.openxmlformats.org/presentationml/2006/main" xmlns:r="http://schemas.openxmlformats.org/officeDocument/2006/relationships">' +
+    '<p:sldIdLst><p:sldId id="256" r:id="rId1"/><p:sldId id="257" r:id="rId2"/></p:sldIdLst>' +
+    '</p:presentation>';
+  SLIDE1 =
+    '<?xml version="1.0" encoding="UTF-8" standalone="yes"?>' +
+    '<p:sld xmlns:p="http://schemas.openxmlformats.org/presentationml/2006/main"' +
+    ' xmlns:a="http://schemas.openxmlformats.org/drawingml/2006/main">' +
+    '<p:cSld><p:spTree>' +
+    '<p:sp><p:txBody>' +
+    '<a:p><a:r><a:t>Slide One Title</a:t></a:r></a:p>' +
+    '</p:txBody></p:sp>' +
+    '<p:sp><p:txBody>' +
+    '<a:p><a:r><a:t>First bullet</a:t></a:r></a:p>' +
+    '<a:p><a:r><a:t>Second bullet</a:t></a:r></a:p>' +
+    '</p:txBody></p:sp>' +
+    '</p:spTree></p:cSld>' +
+    '</p:sld>';
+  SLIDE2 =
+    '<?xml version="1.0" encoding="UTF-8" standalone="yes"?>' +
+    '<p:sld xmlns:p="http://schemas.openxmlformats.org/presentationml/2006/main"' +
+    ' xmlns:a="http://schemas.openxmlformats.org/drawingml/2006/main">' +
+    '<p:cSld><p:spTree>' +
+    '<p:sp><p:txBody>' +
+    '<a:p><a:r><a:t>Slide Two Content</a:t></a:r></a:p>' +
+    '</p:txBody></p:sp>' +
+    '</p:spTree></p:cSld>' +
+    '</p:sld>';
+var
+  Zip: TZipFile;
+begin
+  Zip := TZipFile.Create;
+  try
+    Zip.Open(APath, zmWrite);
+    AddZipEntry(Zip, '[Content_Types].xml',    CT);
+    AddZipEntry(Zip, '_rels/.rels',            RELS);
+    AddZipEntry(Zip, 'ppt/presentation.xml',   PRES);
+    AddZipEntry(Zip, 'ppt/slides/slide1.xml',  SLIDE1);
+    AddZipEntry(Zip, 'ppt/slides/slide2.xml',  SLIDE2);
+  finally
+    Zip.Free;
+  end;
+end;
+
+// ==========================================================================
+// TDOCXConverter
+// ==========================================================================
+
+procedure TestDOCXConverter;
+var
+  Conv    : TDOCXConverter;
+  DocxPath: string;
+
+  function ConvFile(const APath: string): TConversionResult;
+  var FS: TFileStream;
+  begin
+    FS := TFileStream.Create(APath, fmOpenRead or fmShareDenyWrite);
+    try Result := Conv.Convert(FS, TStreamInfo.FromFile(APath));
+    finally FS.Free; end;
+  end;
+
+begin
+  Section('TDOCXConverter');
+  Conv := TDOCXConverter.Create;
+  try
+    Check(Conv.Accepts(TStreamInfo.From('.docx', '')),     'Accepts .docx');
+    Check(Conv.Accepts(TStreamInfo.From('.docm', '')),     'Accepts .docm');
+    Check(not Conv.Accepts(TStreamInfo.From('.doc', '')),  'Rejects .doc');
+
+    DocxPath := FixturePath('sample.docx');
+    CreateDocxFixture(DocxPath);
+    try
+      var R := ConvFile(DocxPath);
+      Check(R.Success,                            'sample.docx: success');
+      Check(R.Markdown.Contains('# Hello World'), 'sample.docx: heading');
+      Check(R.Markdown.Contains('test document'), 'sample.docx: paragraph text');
+      Check(R.Markdown.Contains('Name'),          'sample.docx: table header');
+      Check(R.Markdown.Contains('Alice'),         'sample.docx: table data');
+      Check(R.Markdown.Contains('30'),            'sample.docx: table value');
+      Check(R.Markdown.Contains('---'),           'sample.docx: table separator');
+    finally
+      TFile.Delete(DocxPath);
+    end;
+
+    var MS := TMemoryStream.Create;
+    try
+      var R2 := Conv.Convert(MS, TStreamInfo.From('.docx', ''));
+      Check(not R2.Success, 'empty stream: failure');
+    finally
+      MS.Free;
+    end;
+  finally
+    Conv.Free;
+  end;
+end;
+
+// ==========================================================================
+// TXLSXConverter
+// ==========================================================================
+
+procedure TestXLSXConverter;
+var
+  Conv    : TXLSXConverter;
+  XlsxPath: string;
+
+  function ConvFile(const APath: string): TConversionResult;
+  var FS: TFileStream;
+  begin
+    FS := TFileStream.Create(APath, fmOpenRead or fmShareDenyWrite);
+    try Result := Conv.Convert(FS, TStreamInfo.FromFile(APath));
+    finally FS.Free; end;
+  end;
+
+begin
+  Section('TXLSXConverter');
+  Conv := TXLSXConverter.Create;
+  try
+    Check(Conv.Accepts(TStreamInfo.From('.xlsx', '')),     'Accepts .xlsx');
+    Check(Conv.Accepts(TStreamInfo.From('.xlsm', '')),     'Accepts .xlsm');
+    Check(not Conv.Accepts(TStreamInfo.From('.xls', '')),  'Rejects .xls');
+
+    XlsxPath := FixturePath('sample.xlsx');
+    CreateXlsxFixture(XlsxPath);
+    try
+      var R := ConvFile(XlsxPath);
+      Check(R.Success,                          'sample.xlsx: success');
+      Check(R.Markdown.Contains('## Products'), 'sample.xlsx: sheet heading');
+      Check(R.Markdown.Contains('Product'),     'sample.xlsx: header Product');
+      Check(R.Markdown.Contains('Price'),       'sample.xlsx: header Price');
+      Check(R.Markdown.Contains('Widget'),      'sample.xlsx: row Widget');
+      Check(R.Markdown.Contains('9.99'),        'sample.xlsx: row price');
+      Check(R.Markdown.Contains('Gadget'),      'sample.xlsx: row Gadget');
+      Check(R.Markdown.Contains('---'),         'sample.xlsx: table separator');
+    finally
+      TFile.Delete(XlsxPath);
+    end;
+  finally
+    Conv.Free;
+  end;
+end;
+
+// ==========================================================================
+// TPPTXConverter
+// ==========================================================================
+
+procedure TestPPTXConverter;
+var
+  Conv    : TPPTXConverter;
+  PptxPath: string;
+
+  function ConvFile(const APath: string): TConversionResult;
+  var FS: TFileStream;
+  begin
+    FS := TFileStream.Create(APath, fmOpenRead or fmShareDenyWrite);
+    try Result := Conv.Convert(FS, TStreamInfo.FromFile(APath));
+    finally FS.Free; end;
+  end;
+
+begin
+  Section('TPPTXConverter');
+  Conv := TPPTXConverter.Create;
+  try
+    Check(Conv.Accepts(TStreamInfo.From('.pptx', '')),     'Accepts .pptx');
+    Check(Conv.Accepts(TStreamInfo.From('.ppsx', '')),     'Accepts .ppsx');
+    Check(not Conv.Accepts(TStreamInfo.From('.ppt', '')),  'Rejects .ppt');
+
+    PptxPath := FixturePath('sample.pptx');
+    CreatePptxFixture(PptxPath);
+    try
+      var R := ConvFile(PptxPath);
+      Check(R.Success,                               'sample.pptx: success');
+      Check(R.Markdown.Contains('## Slide 1'),       'sample.pptx: slide 1 heading');
+      Check(R.Markdown.Contains('Slide One Title'),  'sample.pptx: slide 1 title text');
+      Check(R.Markdown.Contains('First bullet'),     'sample.pptx: slide 1 bullet');
+      Check(R.Markdown.Contains('---'),              'sample.pptx: slide separator');
+      Check(R.Markdown.Contains('## Slide 2'),       'sample.pptx: slide 2 heading');
+      Check(R.Markdown.Contains('Slide Two Content'),'sample.pptx: slide 2 text');
+    finally
+      TFile.Delete(PptxPath);
+    end;
+  finally
+    Conv.Free;
+  end;
+end;
+
+// ==========================================================================
 // Engine integration — Fase 2
 // ==========================================================================
 
@@ -651,11 +986,45 @@ begin
 end;
 
 // ==========================================================================
+// Engine integration — Fase 3
+// ==========================================================================
+
+procedure TestEnginePhase3;
+var
+  MD       : TMarkItDown;
+  DocxPath : string;
+  XlsxPath : string;
+  PptxPath : string;
+begin
+  Section('TMarkItDown engine — Fase 3 formats');
+  MD := TMarkItDown.Create;
+  try
+    DocxPath := FixturePath('eng3_test.docx');
+    XlsxPath := FixturePath('eng3_test.xlsx');
+    PptxPath := FixturePath('eng3_test.pptx');
+    CreateDocxFixture(DocxPath);
+    CreateXlsxFixture(XlsxPath);
+    CreatePptxFixture(PptxPath);
+    try
+      Check(MD.ConvertFile(DocxPath).Success, 'Engine routes .docx');
+      Check(MD.ConvertFile(XlsxPath).Success, 'Engine routes .xlsx');
+      Check(MD.ConvertFile(PptxPath).Success, 'Engine routes .pptx');
+    finally
+      TFile.Delete(DocxPath);
+      TFile.Delete(XlsxPath);
+      TFile.Delete(PptxPath);
+    end;
+  finally
+    MD.Free;
+  end;
+end;
+
+// ==========================================================================
 // Main
 // ==========================================================================
 
 begin
-  WriteLn('=== Extract library — Fase 1 + Fase 2 tests ===');
+  WriteLn('=== Extract library — Fase 1 + Fase 2 + Fase 3 tests ===');
   try
     TestResult;
     TestStreamInfo;
@@ -669,6 +1038,10 @@ begin
     TestRTFConverter;
     TestHTMLConverter;
     TestEnginePhase2;
+    TestDOCXConverter;
+    TestXLSXConverter;
+    TestPPTXConverter;
+    TestEnginePhase3;
   except
     on E: Exception do
       WriteLn('UNHANDLED EXCEPTION: ', E.Message);

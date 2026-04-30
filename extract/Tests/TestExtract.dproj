@@ -46,6 +46,10 @@
     <DCCReference Include="..\Src\Converters\uExtract.Conv.INI.pas"/>
     <DCCReference Include="..\Src\Converters\uExtract.Conv.RTF.pas"/>
     <DCCReference Include="..\Src\Converters\uExtract.Conv.HTML.pas"/>
+    <DCCReference Include="..\Src\uExtract.OpenXML.pas"/>
+    <DCCReference Include="..\Src\Converters\uExtract.Conv.DOCX.pas"/>
+    <DCCReference Include="..\Src\Converters\uExtract.Conv.XLSX.pas"/>
+    <DCCReference Include="..\Src\Converters\uExtract.Conv.PPTX.pas"/>
   </ItemGroup>
   <Import Project="$(BDS)\Bin\CodeGear.Delphi.Targets" Condition="Exists('$(BDS)\Bin\CodeGear.Delphi.Targets')"/>
   <Import Project="$(APPDATA)\Embarcadero\$(BDSAPPDATABASEDIR)\$(PRODUCTVERSION)\UserTools.proj" Condition="Exists('$(APPDATA)\Embarcadero\$(BDSAPPDATABASEDIR)\$(PRODUCTVERSION)\UserTools.proj')"/>

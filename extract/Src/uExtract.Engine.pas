@@ -59,7 +59,10 @@ uses
   uExtract.Conv.XML,
   uExtract.Conv.INI,
   uExtract.Conv.RTF,
-  uExtract.Conv.HTML;
+  uExtract.Conv.HTML,
+  uExtract.Conv.DOCX,
+  uExtract.Conv.XLSX,
+  uExtract.Conv.PPTX;
 
 { TMarkItDown }
 
@@ -78,6 +81,9 @@ begin
     RegisterConverter(TINIConverter.Create);
     RegisterConverter(TRTFConverter.Create);
     RegisterConverter(THTMLConverter.Create);
+    RegisterConverter(TDOCXConverter.Create);
+    RegisterConverter(TXLSXConverter.Create);
+    RegisterConverter(TPPTXConverter.Create);
     RegisterConverter(TTextConverter.Create);
   end;
 end;

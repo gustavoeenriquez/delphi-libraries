@@ -1,0 +1,48 @@
+package AiExtract;
+
+{$R *.res}
+{$IFDEF IMPLICITBUILDING This IFDEF should not be used by users}
+{$ALIGN 8}
+{$ASSERTIONS ON}
+{$BOOLEVAL OFF}
+{$DEBUGINFO OFF}
+{$EXTENDEDSYNTAX ON}
+{$IMPORTEDDATA ON}
+{$IOCHECKS ON}
+{$LOCALSYMBOLS ON}
+{$LONGSTRINGS ON}
+{$OPENSTRINGS ON}
+{$OPTIMIZATION OFF}
+{$OVERFLOWCHECKS OFF}
+{$RANGECHECKS OFF}
+{$REFERENCEINFO ON}
+{$SAFEDIVIDE OFF}
+{$STACKFRAMES ON}
+{$TYPEDADDRESS OFF}
+{$VARSTRINGCHECKS ON}
+{$WRITEABLECONST OFF}
+{$MINENUMSIZE 1}
+{$IMAGEBASE $400000}
+{$DEFINE DEBUG}
+{$ENDIF IMPLICITBUILDING}
+{$RUNONLY}
+{$IMPLICITBUILD ON}
+
+requires
+  rtl;
+
+contains
+  uExtract.Result      in 'Src\uExtract.Result.pas',
+  uExtract.StreamInfo  in 'Src\uExtract.StreamInfo.pas',
+  uExtract.Converter   in 'Src\uExtract.Converter.pas',
+  uExtract.Engine      in 'Src\uExtract.Engine.pas',
+  uExtract.Conv.Text   in 'Src\Converters\uExtract.Conv.Text.pas',
+  uExtract.Conv.Markdown in 'Src\Converters\uExtract.Conv.Markdown.pas',
+  uExtract.Conv.CSV    in 'Src\Converters\uExtract.Conv.CSV.pas',
+  uExtract.Conv.JSON   in 'Src\Converters\uExtract.Conv.JSON.pas',
+  uExtract.Conv.XML    in 'Src\Converters\uExtract.Conv.XML.pas',
+  uExtract.Conv.INI    in 'Src\Converters\uExtract.Conv.INI.pas',
+  uExtract.Conv.RTF    in 'Src\Converters\uExtract.Conv.RTF.pas',
+  uExtract.Conv.HTML   in 'Src\Converters\uExtract.Conv.HTML.pas';
+
+end.

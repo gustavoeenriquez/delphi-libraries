@@ -1,0 +1,11 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<catalog>
+  <book id="1">
+    <title>Clean Code</title>
+    <author>Robert C. Martin</author>
+  </book>
+  <book id="2">
+    <title>The Pragmatic Programmer</title>
+    <author>Hunt &amp; Thomas</author>
+  </book>
+</catalog>

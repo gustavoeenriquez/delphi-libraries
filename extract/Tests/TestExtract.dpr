@@ -1,7 +1,7 @@
 ﻿program TestExtract;
 
 {
-  Test suite for the extract/ library (Fase 1 + Fase 2 + Fase 3).
+  Test suite for the extract/ library (Fase 1 + Fase 2 + Fase 3 + Fase 4).
   Uses the same lightweight Pass/Fail/Check pattern as the PDF test suite.
 }
 
@@ -26,7 +26,11 @@ uses
   uExtract.OpenXML       in '..\Src\uExtract.OpenXML.pas',
   uExtract.Conv.DOCX     in '..\Src\Converters\uExtract.Conv.DOCX.pas',
   uExtract.Conv.XLSX     in '..\Src\Converters\uExtract.Conv.XLSX.pas',
-  uExtract.Conv.PPTX     in '..\Src\Converters\uExtract.Conv.PPTX.pas';
+  uExtract.Conv.PPTX     in '..\Src\Converters\uExtract.Conv.PPTX.pas',
+  uExtract.Conv.PDF      in '..\Src\Converters\uExtract.Conv.PDF.pas',
+  uExtract.Conv.EPUB     in '..\Src\Converters\uExtract.Conv.EPUB.pas',
+  uPDF.Objects           in '..\..\pdf\Src\Core\uPDF.Objects.pas',
+  uPDF.Writer            in '..\..\pdf\Src\Core\uPDF.Writer.pas';
 
 // ==========================================================================
 // Helpers
@@ -967,6 +971,202 @@ begin
 end;
 
 // ==========================================================================
+// PDF fixture builder (uses TPDFBuilder from the pdf/ library)
+// ==========================================================================
+
+procedure CreatePdfFixture(const APath: string);
+var
+  Builder: TPDFBuilder;
+  Page   : TPDFDictionary;
+  CB     : TPDFContentBuilder;
+  Stm    : TPDFStream;
+begin
+  Builder := TPDFBuilder.Create;
+  try
+    Builder.SetTitle('Extract Test PDF');
+    Page := Builder.AddPage(612, 792);
+    Builder.AddStandardFont(Page, 'F1', 'Helvetica');
+    CB := TPDFContentBuilder.Create;
+    try
+      CB.BeginText;
+      CB.SetFont('F1', 14);
+      CB.SetTextMatrix(1, 0, 0, 1, 50, 700);
+      CB.ShowText('Hello PDF');
+      CB.MoveTextPos(0, -20);
+      CB.ShowText('This is a test document for PDF extraction.');
+      CB.EndText;
+      Stm := TPDFStream.Create;
+      Stm.SetRawData(CB.Build);
+      Page.SetValue('Contents', Stm);
+    finally
+      CB.Free;
+    end;
+    Builder.SaveToFile(APath);
+  finally
+    Builder.Free;
+  end;
+end;
+
+// ==========================================================================
+// EPUB fixture builder
+// ==========================================================================
+
+procedure CreateEpubFixture(const APath: string);
+const
+  CONT =
+    '<?xml version="1.0" encoding="UTF-8"?>' +
+    '<container version="1.0" xmlns="urn:oasis:names:tc:opendocument:xmlns:container">' +
+    '<rootfiles>' +
+    '<rootfile full-path="OEBPS/content.opf"' +
+    ' media-type="application/oebps-package+xml"/>' +
+    '</rootfiles>' +
+    '</container>';
+  OPF =
+    '<?xml version="1.0" encoding="UTF-8"?>' +
+    '<package xmlns="http://www.idpf.org/2007/opf" version="2.0">' +
+    '<manifest>' +
+    '<item id="ch1" href="chapter1.html" media-type="application/xhtml+xml"/>' +
+    '<item id="ch2" href="chapter2.html" media-type="application/xhtml+xml"/>' +
+    '</manifest>' +
+    '<spine>' +
+    '<itemref idref="ch1"/>' +
+    '<itemref idref="ch2"/>' +
+    '</spine>' +
+    '</package>';
+  CH1 =
+    '<?xml version="1.0" encoding="UTF-8"?>' +
+    '<html xmlns="http://www.w3.org/1999/xhtml">' +
+    '<head><title>Chapter 1</title></head>' +
+    '<body>' +
+    '<h1>Introduction</h1>' +
+    '<p>This is the first chapter of the book.</p>' +
+    '</body>' +
+    '</html>';
+  CH2 =
+    '<?xml version="1.0" encoding="UTF-8"?>' +
+    '<html xmlns="http://www.w3.org/1999/xhtml">' +
+    '<head><title>Chapter 2</title></head>' +
+    '<body>' +
+    '<h2>The Story Continues</h2>' +
+    '<p>Second chapter content here.</p>' +
+    '</body>' +
+    '</html>';
+var
+  Zip: TZipFile;
+begin
+  Zip := TZipFile.Create;
+  try
+    Zip.Open(APath, zmWrite);
+    AddZipEntry(Zip, 'META-INF/container.xml', CONT);
+    AddZipEntry(Zip, 'OEBPS/content.opf',      OPF);
+    AddZipEntry(Zip, 'OEBPS/chapter1.html',    CH1);
+    AddZipEntry(Zip, 'OEBPS/chapter2.html',    CH2);
+  finally
+    Zip.Free;
+  end;
+end;
+
+// ==========================================================================
+// TPDFExtractConverter
+// ==========================================================================
+
+procedure TestPDFConverter;
+var
+  Conv   : TPDFExtractConverter;
+  PdfPath: string;
+
+  function ConvFile(const APath: string): TConversionResult;
+  var FS: TFileStream;
+  begin
+    FS := TFileStream.Create(APath, fmOpenRead or fmShareDenyWrite);
+    try Result := Conv.Convert(FS, TStreamInfo.FromFile(APath));
+    finally FS.Free; end;
+  end;
+
+begin
+  Section('TPDFExtractConverter');
+  Conv := TPDFExtractConverter.Create;
+  try
+    Check(Conv.Accepts(TStreamInfo.From('.pdf', '')),     'Accepts .pdf');
+    Check(not Conv.Accepts(TStreamInfo.From('.docx', '')), 'Rejects .docx');
+
+    var MS := TMemoryStream.Create;
+    try
+      var R := Conv.Convert(MS, TStreamInfo.From('.pdf', ''));
+      Check(not R.Success, 'empty stream: failure');
+    finally
+      MS.Free;
+    end;
+
+    PdfPath := FixturePath('sample.pdf');
+    try
+      CreatePdfFixture(PdfPath);
+      var R2 := ConvFile(PdfPath);
+      Check(R2.Success,                           'sample.pdf: success');
+      Check(R2.Title = 'Extract Test PDF',        'sample.pdf: title extracted');
+      Check(R2.Markdown.Contains('Hello PDF'),    'sample.pdf: text Hello PDF');
+      Check(R2.Markdown.Contains('extraction'),   'sample.pdf: text extraction');
+    finally
+      TFile.Delete(PdfPath);
+    end;
+  finally
+    Conv.Free;
+  end;
+end;
+
+// ==========================================================================
+// TEPUBConverter
+// ==========================================================================
+
+procedure TestEPUBConverter;
+var
+  Conv    : TEPUBConverter;
+  EpubPath: string;
+
+  function ConvFile(const APath: string): TConversionResult;
+  var FS: TFileStream;
+  begin
+    FS := TFileStream.Create(APath, fmOpenRead or fmShareDenyWrite);
+    try Result := Conv.Convert(FS, TStreamInfo.FromFile(APath));
+    finally FS.Free; end;
+  end;
+
+begin
+  Section('TEPUBConverter');
+  Conv := TEPUBConverter.Create;
+  try
+    Check(Conv.Accepts(TStreamInfo.From('.epub', '')),     'Accepts .epub');
+    Check(not Conv.Accepts(TStreamInfo.From('.pdf', '')),  'Rejects .pdf');
+
+    var MS := TMemoryStream.Create;
+    try
+      var R := Conv.Convert(MS, TStreamInfo.From('.epub', ''));
+      Check(not R.Success, 'empty stream: failure');
+    finally
+      MS.Free;
+    end;
+
+    EpubPath := FixturePath('sample.epub');
+    CreateEpubFixture(EpubPath);
+    try
+      var R2 := ConvFile(EpubPath);
+      Check(R2.Success,                               'sample.epub: success');
+      Check(R2.Markdown.Contains('## Chapter 1'),     'sample.epub: chapter 1 heading');
+      Check(R2.Markdown.Contains('Introduction'),     'sample.epub: ch1 h1 text');
+      Check(R2.Markdown.Contains('first chapter'),    'sample.epub: ch1 body text');
+      Check(R2.Markdown.Contains('---'),              'sample.epub: chapter separator');
+      Check(R2.Markdown.Contains('## Chapter 2'),     'sample.epub: chapter 2 heading');
+      Check(R2.Markdown.Contains('Story Continues'),  'sample.epub: ch2 text');
+      Check(R2.Markdown.Contains('Second chapter'),   'sample.epub: ch2 body text');
+    finally
+      TFile.Delete(EpubPath);
+    end;
+  finally
+    Conv.Free;
+  end;
+end;
+
+// ==========================================================================
 // Engine integration — Fase 2
 // ==========================================================================
 
@@ -1020,11 +1220,40 @@ begin
 end;
 
 // ==========================================================================
+// Engine integration — Fase 4
+// ==========================================================================
+
+procedure TestEnginePhase4;
+var
+  MD      : TMarkItDown;
+  PdfPath : string;
+  EpubPath: string;
+begin
+  Section('TMarkItDown engine — Fase 4 formats');
+  MD := TMarkItDown.Create;
+  try
+    PdfPath  := FixturePath('eng4_test.pdf');
+    EpubPath := FixturePath('eng4_test.epub');
+    CreatePdfFixture(PdfPath);
+    CreateEpubFixture(EpubPath);
+    try
+      Check(MD.ConvertFile(PdfPath).Success,  'Engine routes .pdf');
+      Check(MD.ConvertFile(EpubPath).Success, 'Engine routes .epub');
+    finally
+      TFile.Delete(PdfPath);
+      TFile.Delete(EpubPath);
+    end;
+  finally
+    MD.Free;
+  end;
+end;
+
+// ==========================================================================
 // Main
 // ==========================================================================
 
 begin
-  WriteLn('=== Extract library — Fase 1 + Fase 2 + Fase 3 tests ===');
+  WriteLn('=== Extract library — Fase 1 + Fase 2 + Fase 3 + Fase 4 tests ===');
   try
     TestResult;
     TestStreamInfo;
@@ -1042,6 +1271,9 @@ begin
     TestXLSXConverter;
     TestPPTXConverter;
     TestEnginePhase3;
+    TestPDFConverter;
+    TestEPUBConverter;
+    TestEnginePhase4;
   except
     on E: Exception do
       WriteLn('UNHANDLED EXCEPTION: ', E.Message);

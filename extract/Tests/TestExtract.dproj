@@ -13,7 +13,7 @@
   <PropertyGroup Condition="'$(Config)'=='Base' or '$(Base)'!=''">
     <DCC_DcuOutput>.\dcu\$(Platform)\$(Config)</DCC_DcuOutput>
     <DCC_ExeOutput>.\bin\$(Platform)\$(Config)</DCC_ExeOutput>
-    <DCC_UnitSearchPath>..\Src;..\Src\Converters</DCC_UnitSearchPath>
+    <DCC_UnitSearchPath>..\Src;..\Src\Converters;..\..\pdf\Src\Core</DCC_UnitSearchPath>
     <DCC_ScopedEnums>True</DCC_ScopedEnums>
     <DCC_Warnings>True</DCC_Warnings>
   </PropertyGroup>
@@ -50,6 +50,8 @@
     <DCCReference Include="..\Src\Converters\uExtract.Conv.DOCX.pas"/>
     <DCCReference Include="..\Src\Converters\uExtract.Conv.XLSX.pas"/>
     <DCCReference Include="..\Src\Converters\uExtract.Conv.PPTX.pas"/>
+    <DCCReference Include="..\Src\Converters\uExtract.Conv.PDF.pas"/>
+    <DCCReference Include="..\Src\Converters\uExtract.Conv.EPUB.pas"/>
   </ItemGroup>
   <Import Project="$(BDS)\Bin\CodeGear.Delphi.Targets" Condition="Exists('$(BDS)\Bin\CodeGear.Delphi.Targets')"/>
   <Import Project="$(APPDATA)\Embarcadero\$(BDSAPPDATABASEDIR)\$(PRODUCTVERSION)\UserTools.proj" Condition="Exists('$(APPDATA)\Embarcadero\$(BDSAPPDATABASEDIR)\$(PRODUCTVERSION)\UserTools.proj')"/>

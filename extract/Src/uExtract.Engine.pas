@@ -62,7 +62,9 @@ uses
   uExtract.Conv.HTML,
   uExtract.Conv.DOCX,
   uExtract.Conv.XLSX,
-  uExtract.Conv.PPTX;
+  uExtract.Conv.PPTX,
+  uExtract.Conv.PDF,
+  uExtract.Conv.EPUB;
 
 { TMarkItDown }
 
@@ -84,6 +86,8 @@ begin
     RegisterConverter(TDOCXConverter.Create);
     RegisterConverter(TXLSXConverter.Create);
     RegisterConverter(TPPTXConverter.Create);
+    RegisterConverter(TPDFExtractConverter.Create);
+    RegisterConverter(TEPUBConverter.Create);
     RegisterConverter(TTextConverter.Create);
   end;
 end;

@@ -47,6 +47,8 @@ contains
   uExtract.OpenXML     in 'Src\uExtract.OpenXML.pas',
   uExtract.Conv.DOCX   in 'Src\Converters\uExtract.Conv.DOCX.pas',
   uExtract.Conv.XLSX   in 'Src\Converters\uExtract.Conv.XLSX.pas',
-  uExtract.Conv.PPTX   in 'Src\Converters\uExtract.Conv.PPTX.pas';
+  uExtract.Conv.PPTX   in 'Src\Converters\uExtract.Conv.PPTX.pas',
+  uExtract.Conv.PDF    in 'Src\Converters\uExtract.Conv.PDF.pas',
+  uExtract.Conv.EPUB   in 'Src\Converters\uExtract.Conv.EPUB.pas';
 
 end.

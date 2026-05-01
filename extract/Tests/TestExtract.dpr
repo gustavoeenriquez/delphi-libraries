@@ -374,15 +374,15 @@ begin
 end;
 
 // ==========================================================================
-// TMarkItDown engine integration
+// TAiExtractLib engine integration
 // ==========================================================================
 
 procedure TestEngine;
 var
-  MD: TMarkItDown;
+  MD: TAiExtractLib;
 begin
-  Section('TMarkItDown engine');
-  MD := TMarkItDown.Create;
+  Section('TAiExtractLib engine');
+  MD := TAiExtractLib.Create;
   try
     // file not found
     var R1 := MD.ConvertFile('nonexistent_xyz.txt');
@@ -424,7 +424,7 @@ begin
     end;
 
     // custom converter registration
-    var MD2 := TMarkItDown.Create(False {no defaults});
+    var MD2 := TAiExtractLib.Create(False {no defaults});
     try
       MD2.RegisterConverter(TTextConverter.Create);
       var R9 := MD2.ConvertFile(FixturePath('hello.txt'));
@@ -1172,10 +1172,10 @@ end;
 
 procedure TestEnginePhase2;
 var
-  MD: TMarkItDown;
+  MD: TAiExtractLib;
 begin
-  Section('TMarkItDown engine — Fase 2 formats');
-  MD := TMarkItDown.Create;
+  Section('TAiExtractLib engine — Fase 2 formats');
+  MD := TAiExtractLib.Create;
   try
     Check(MD.ConvertFile(FixturePath('sample.ini')).Success, 'Engine routes .ini');
     Check(MD.ConvertFile(FixturePath('sample.rtf')).Success, 'Engine routes .rtf');
@@ -1191,13 +1191,13 @@ end;
 
 procedure TestEnginePhase3;
 var
-  MD       : TMarkItDown;
+  MD       : TAiExtractLib;
   DocxPath : string;
   XlsxPath : string;
   PptxPath : string;
 begin
-  Section('TMarkItDown engine — Fase 3 formats');
-  MD := TMarkItDown.Create;
+  Section('TAiExtractLib engine — Fase 3 formats');
+  MD := TAiExtractLib.Create;
   try
     DocxPath := FixturePath('eng3_test.docx');
     XlsxPath := FixturePath('eng3_test.xlsx');
@@ -1225,12 +1225,12 @@ end;
 
 procedure TestEnginePhase4;
 var
-  MD      : TMarkItDown;
+  MD      : TAiExtractLib;
   PdfPath : string;
   EpubPath: string;
 begin
-  Section('TMarkItDown engine — Fase 4 formats');
-  MD := TMarkItDown.Create;
+  Section('TAiExtractLib engine — Fase 4 formats');
+  MD := TAiExtractLib.Create;
   try
     PdfPath  := FixturePath('eng4_test.pdf');
     EpubPath := FixturePath('eng4_test.epub');

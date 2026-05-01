@@ -48,7 +48,7 @@ In **Tools → Options → Language → Delphi → Library** add, for each targe
 ```pascal
 uses uExtract.Engine, uExtract.Result;
 
-var Engine := TMarkItDown.Create;   // all 13 converters registered by default
+var Engine := TAiExtractLib.Create;   // all 13 converters registered by default
 try
   var R := Engine.ConvertFile('C:\Docs\report.xlsx');
   if R.Success then
@@ -65,7 +65,7 @@ end;
 ```pascal
 uses uExtract.Engine, uExtract.Result, uExtract.StreamInfo;
 
-var Engine := TMarkItDown.Create;
+var Engine := TAiExtractLib.Create;
 try
   var Stream := TFileStream.Create('brochure.pdf', fmOpenRead or fmShareDenyWrite);
   try
@@ -106,14 +106,14 @@ var R    := Engine.ConvertStream(MyStream, Info);
 
 ## API reference
 
-### `TMarkItDown`
+### `TAiExtractLib`
 
 ```pascal
 // All 13 built-in converters registered (default).
-Engine := TMarkItDown.Create;
+Engine := TAiExtractLib.Create;
 
 // Empty engine — add only what you need.
-Engine := TMarkItDown.Create(False {ARegisterDefaults});
+Engine := TAiExtractLib.Create(False {ARegisterDefaults});
 Engine.RegisterConverter(TCSVConverter.Create);
 Engine.RegisterConverter(THTMLConverter.Create);
 
@@ -234,7 +234,7 @@ Engine.RegisterConverter(TMarkdownLogConverter.Create);
 ## Architecture
 
 ```
-TMarkItDown
+TAiExtractLib
   │
   ├─ RegisterConverter(TDocumentConverter)   sorted by Priority (ascending)
   │
@@ -273,7 +273,7 @@ extract/
     uExtract.Result.pas       TConversionResult
     uExtract.StreamInfo.pas   TStreamInfo
     uExtract.Converter.pas    TDocumentConverter (abstract base)
-    uExtract.Engine.pas       TMarkItDown (engine + converter registry)
+    uExtract.Engine.pas       TAiExtractLib (engine + converter registry)
     uExtract.OpenXML.pas      Shared XML/ZIP helpers for OOXML and EPUB
     Converters/
       uExtract.Conv.Text.pas

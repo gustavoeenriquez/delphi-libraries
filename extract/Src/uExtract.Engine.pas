@@ -1,10 +1,10 @@
 ﻿unit uExtract.Engine;
 
 {
-  TMarkItDown — multi-format document-to-Markdown converter.
+  TAiExtractLib — multi-format document-to-Markdown converter.
 
   Usage:
-    var MD := TMarkItDown.CreateDefault;
+    var MD := TAiExtractLib.CreateDefault;
     try
       R := MD.ConvertFile('report.csv');
       WriteLn(R.Markdown);
@@ -27,7 +27,7 @@ uses
   uExtract.Converter;
 
 type
-  TMarkItDown = class
+  TAiExtractLib = class
   private
     FConverters: TObjectList<TDocumentConverter>;
     procedure SortConverters;
@@ -66,9 +66,9 @@ uses
   uExtract.Conv.PDF,
   uExtract.Conv.EPUB;
 
-{ TMarkItDown }
+{ TAiExtractLib }
 
-constructor TMarkItDown.Create(ARegisterDefaults: Boolean);
+constructor TAiExtractLib.Create(ARegisterDefaults: Boolean);
 begin
   inherited Create;
   FConverters := TObjectList<TDocumentConverter>.Create(True {owns});
@@ -92,13 +92,13 @@ begin
   end;
 end;
 
-destructor TMarkItDown.Destroy;
+destructor TAiExtractLib.Destroy;
 begin
   FConverters.Free;
   inherited;
 end;
 
-procedure TMarkItDown.SortConverters;
+procedure TAiExtractLib.SortConverters;
 begin
   FConverters.Sort(TComparer<TDocumentConverter>.Construct(
     function(const A, B: TDocumentConverter): Integer
@@ -109,7 +109,7 @@ begin
     end));
 end;
 
-procedure TMarkItDown.RegisterConverter(AConverter: TDocumentConverter);
+procedure TAiExtractLib.RegisterConverter(AConverter: TDocumentConverter);
 begin
   FConverters.Add(AConverter);
   SortConverters;
@@ -117,7 +117,7 @@ end;
 
 // ---- magic byte detection --------------------------------------------------
 
-function TMarkItDown.DetectMagicExt(AStream: TStream): string;
+function TAiExtractLib.DetectMagicExt(AStream: TStream): string;
 var
   Buf    : array[0..7] of Byte;
   N      : Integer;
@@ -146,7 +146,7 @@ end;
 
 // ---- public API ------------------------------------------------------------
 
-function TMarkItDown.ConvertFile(const AFileName: string): TConversionResult;
+function TAiExtractLib.ConvertFile(const AFileName: string): TConversionResult;
 var
   FS  : TFileStream;
   Info: TStreamInfo;
@@ -163,7 +163,7 @@ begin
   end;
 end;
 
-function TMarkItDown.ConvertStream(AStream: TStream;
+function TAiExtractLib.ConvertStream(AStream: TStream;
                                    const AInfo: TStreamInfo): TConversionResult;
 var
   Info: TStreamInfo;

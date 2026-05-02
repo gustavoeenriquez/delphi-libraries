@@ -1,0 +1,61 @@
+<?xml version="1.0" encoding="utf-8"?>
+<Project xmlns="http://schemas.microsoft.com/developer/msbuild/2003">
+  <PropertyGroup>
+    <ProjectGuid>{C3D4E5F6-A7B8-9012-CDEF-123456789012}</ProjectGuid>
+    <MainSource>TestWebDriver.dpr</MainSource>
+    <Base>True</Base>
+    <Config Condition="'$(Config)'==''">Debug</Config>
+    <Platform Condition="'$(Platform)'==''">Win64</Platform>
+    <FrameworkType>None</FrameworkType>
+    <ProjectType>Application</ProjectType>
+    <AppType>Console</AppType>
+  </PropertyGroup>
+  <PropertyGroup Condition="'$(Config)'=='Base' or '$(Base)'!=''">
+    <DCC_DcuOutput>.\dcu\$(Platform)\$(Config)</DCC_DcuOutput>
+    <DCC_ExeOutput>.\bin\$(Platform)\$(Config)</DCC_ExeOutput>
+    <DCC_UnitSearchPath>..\Src;..\..\extract\Src;..\..\extract\Src\Converters;..\..\pdf\Src\Core</DCC_UnitSearchPath>
+    <DCC_ScopedEnums>True</DCC_ScopedEnums>
+    <DCC_Warnings>True</DCC_Warnings>
+  </PropertyGroup>
+  <PropertyGroup Condition="'$(Config)'=='Debug'">
+    <Base>True</Base>
+    <DCC_Optimize>False</DCC_Optimize>
+    <DCC_DebugInformation>2</DCC_DebugInformation>
+    <DCC_LocalSymbols>True</DCC_LocalSymbols>
+    <DCC_Define>DEBUG</DCC_Define>
+  </PropertyGroup>
+  <PropertyGroup Condition="'$(Config)'=='Release'">
+    <Base>True</Base>
+    <DCC_Optimize>True</DCC_Optimize>
+    <DCC_DebugInformation>0</DCC_DebugInformation>
+    <DCC_Define>RELEASE</DCC_Define>
+  </PropertyGroup>
+  <ItemGroup>
+    <DelphiCompile Include="TestWebDriver.dpr">
+      <MainSource>MainSource</MainSource>
+    </DelphiCompile>
+    <DCCReference Include="..\Src\uWebDriver.pas"/>
+    <DCCReference Include="..\Src\uWebCrawl.pas"/>
+    <DCCReference Include="..\..\extract\Src\uExtract.Result.pas"/>
+    <DCCReference Include="..\..\extract\Src\uExtract.StreamInfo.pas"/>
+    <DCCReference Include="..\..\extract\Src\uExtract.Converter.pas"/>
+    <DCCReference Include="..\..\extract\Src\uExtract.Engine.pas"/>
+    <DCCReference Include="..\..\extract\Src\uExtract.OpenXML.pas"/>
+    <DCCReference Include="..\..\extract\Src\Converters\uExtract.Conv.Text.pas"/>
+    <DCCReference Include="..\..\extract\Src\Converters\uExtract.Conv.Markdown.pas"/>
+    <DCCReference Include="..\..\extract\Src\Converters\uExtract.Conv.CSV.pas"/>
+    <DCCReference Include="..\..\extract\Src\Converters\uExtract.Conv.JSON.pas"/>
+    <DCCReference Include="..\..\extract\Src\Converters\uExtract.Conv.XML.pas"/>
+    <DCCReference Include="..\..\extract\Src\Converters\uExtract.Conv.INI.pas"/>
+    <DCCReference Include="..\..\extract\Src\Converters\uExtract.Conv.RTF.pas"/>
+    <DCCReference Include="..\..\extract\Src\Converters\uExtract.Conv.HTML.pas"/>
+    <DCCReference Include="..\..\extract\Src\uExtract.OpenXML.pas"/>
+    <DCCReference Include="..\..\extract\Src\Converters\uExtract.Conv.DOCX.pas"/>
+    <DCCReference Include="..\..\extract\Src\Converters\uExtract.Conv.XLSX.pas"/>
+    <DCCReference Include="..\..\extract\Src\Converters\uExtract.Conv.PPTX.pas"/>
+    <DCCReference Include="..\..\extract\Src\Converters\uExtract.Conv.PDF.pas"/>
+    <DCCReference Include="..\..\extract\Src\Converters\uExtract.Conv.EPUB.pas"/>
+  </ItemGroup>
+  <Import Project="$(BDS)\Bin\CodeGear.Delphi.Targets" Condition="Exists('$(BDS)\Bin\CodeGear.Delphi.Targets')"/>
+  <Import Project="$(APPDATA)\Embarcadero\$(BDSAPPDATABASEDIR)\$(PRODUCTVERSION)\UserTools.proj" Condition="Exists('$(APPDATA)\Embarcadero\$(BDSAPPDATABASEDIR)\$(PRODUCTVERSION)\UserTools.proj')"/>
+</Project>

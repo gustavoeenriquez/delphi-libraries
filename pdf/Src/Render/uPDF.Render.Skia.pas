@@ -28,6 +28,7 @@ type
     function GetColorSpace(const AName: string): TPDFColorSpace;
     function GetExtGState(const AName: string): TPDFDictionary;
     function GetPattern(const AName: string): TPDFObject;
+    function GetShading(const AName: string): TPDFObject;
   end;
 
   // -------------------------------------------------------------------------
@@ -47,18 +48,19 @@ type
     FFontCache: TPDFFontCache;
 
     // ---- Per-render context (reset in RenderPage) ----
-    FCanvas:    ISkCanvas;
-    FPage:      TPDFPage;
-    FPageW:     Single;   // page width in PDF points
-    FPageH:     Single;   // page height in PDF points
-    FScaleX:    Single;   // PDF points → render pixels
-    FScaleY:    Single;
-    FRenderW:   Single;   // render target size in pixels
-    FRenderH:   Single;
+    FCanvas:           ISkCanvas;
+    FPage:             TPDFPage;
+    FCurrentResources: IPDFResources;  // active resource set (page or form)
+    FPageW:            Single;   // page width in PDF points
+    FPageH:            Single;   // page height in PDF points
+    FScaleX:           Single;   // PDF points → render pixels
+    FScaleY:           Single;
+    FRenderW:          Single;   // render target size in pixels
+    FRenderH:          Single;
     // Page-flip + scale matrix (PDF → screen)
-    FPageFlip:  TMatrix;
+    FPageFlip:         TMatrix;
     // Accumulates glyph outlines (device space) during a BT..ET block for clip modes
-    FTextClipBuilder: ISkPathBuilder;
+    FTextClipBuilder:  ISkPathBuilder;
 
     // ---- Content-stream callbacks ----
     procedure OnPaintPath(const APath: TPDFPath;
@@ -76,6 +78,8 @@ type
                             const AState: TPDFGraphicsState);
     procedure OnTextBlock(AIsBT: Boolean;
                           const AState: TPDFGraphicsState);
+    procedure OnPaintShading(const AName: string;
+                             const AState: TPDFGraphicsState);
 
     // ---- Internal helpers ----
     function  BuildSkPath(const APath: TPDFPath;
@@ -99,6 +103,20 @@ type
 
     // Draw a decoded TPDFImage (or inline image) at the current CTM position
     procedure DrawPDFImage(AImage: TPDFImage; const ACanvasMatrix: TMatrix);
+
+    // ---- Shading / pattern helpers ----
+    // Evaluate a PDF function (Type 2 or 3) at parameter t → color components
+    function  EvalPDFFunction(AFunc: TPDFObject; T: Single): TArray<Single>;
+    // Convert shading color components to TAlphaColor
+    function  ShadingComponentsToAlpha(const AComps: TArray<Single>;
+                const ACSName: string): TAlphaColor;
+    // Build a Skia gradient shader from a shading dict.
+    // APreMatrix transforms from shading/pattern space to user space.
+    function  BuildShadingShader(AShading: TPDFDictionary;
+                const APreMatrix: TPDFMatrix): ISkShader;
+    // Look up a pattern and build its fill shader (nil if not a gradient pattern)
+    function  BuildPatternShader(const APatternName: string;
+                const AState: TPDFGraphicsState): ISkShader;
 
     // Process a form XObject (recursive)
     procedure RenderFormXObject(AStream: TPDFStream;
@@ -196,6 +214,11 @@ end;
 function TPDFPageResources.GetPattern(const AName: string): TPDFObject;
 begin
   Result := FPage.GetResource('Pattern', AName);
+end;
+
+function TPDFPageResources.GetShading(const AName: string): TPDFObject;
+begin
+  Result := FPage.GetResource('Shading', AName);
 end;
 
 // =========================================================================
@@ -349,9 +372,20 @@ var
   Intervals: TArray<Single>;
   I: Integer;
 begin
-  APaint.Style       := TSkPaintStyle.Stroke;
-  APaint.Color       := PDFColorToAlpha(AState.StrokeColor, AState.StrokeAlpha);
-  APaint.AntiAlias   := FOptions.Antialias;
+  APaint.Style     := TSkPaintStyle.Stroke;
+  APaint.AntiAlias := FOptions.Antialias;
+
+  // Pattern color space: use gradient shader if available
+  if (AState.StrokeColorSpace = 'Pattern') and (AState.StrokePatternName <> '') then
+  begin
+    var Shader := BuildPatternShader(AState.StrokePatternName, AState);
+    if Shader <> nil then
+      APaint.Shader := Shader
+    else
+      APaint.Color := PDFColorToAlpha(AState.StrokeColor, AState.StrokeAlpha);
+  end
+  else
+    APaint.Color := PDFColorToAlpha(AState.StrokeColor, AState.StrokeAlpha);
   APaint.StrokeWidth := AState.LineWidth * Max(FScaleX, FScaleY);  // scale to pixels
   APaint.StrokeCap   := PDFLineCapToSkia(AState.LineCap);
   APaint.StrokeJoin  := PDFLineJoinToSkia(AState.LineJoin);
@@ -372,9 +406,21 @@ procedure TPDFSkiaRenderer.ConfigureFillPaint(APaint: ISkPaint;
   const AState: TPDFGraphicsState; AEvenOdd: Boolean);
 begin
   APaint.Style     := TSkPaintStyle.Fill;
-  APaint.Color     := PDFColorToAlpha(AState.FillColor, AState.FillAlpha);
   APaint.AntiAlias := FOptions.Antialias;
   APaint.Blender   := TSkBlender.MakeMode(PDFBlendToSkia(AState.BlendMode));
+
+  // Pattern color space: use gradient shader if available
+  if (AState.FillColorSpace = 'Pattern') and (AState.FillPatternName <> '') then
+  begin
+    var Shader := BuildPatternShader(AState.FillPatternName, AState);
+    if Shader <> nil then
+    begin
+      APaint.Shader := Shader;
+      Exit;
+    end;
+  end;
+
+  APaint.Color := PDFColorToAlpha(AState.FillColor, AState.FillAlpha);
   // EvenOdd fill type is set on the ISkPath, not the paint
 end;
 
@@ -747,6 +793,330 @@ begin
 end;
 
 // =========================================================================
+// Shading / pattern helpers
+// =========================================================================
+
+function TPDFSkiaRenderer.EvalPDFFunction(AFunc: TPDFObject;
+  T: Single): TArray<Single>;
+var
+  Dict:    TPDFDictionary;
+  FuncType: Integer;
+  N:       Double;
+  C0Arr, C1Arr: TPDFArray;
+  NOut, I: Integer;
+  TN:      Single;
+  BoundsArr, EncodeArr, FuncsArr: TPDFArray;
+  NFunc, FuncIdx: Integer;
+  FD0, FD1, E0, E1: Single;
+  DomainArr: TPDFArray;
+begin
+  Result := nil;
+  if AFunc = nil then Exit;
+  if AFunc.IsStream then
+    Dict := TPDFStream(AFunc).Dict
+  else if AFunc.IsDictionary then
+    Dict := TPDFDictionary(AFunc)
+  else
+    Exit;
+
+  FuncType := Dict.GetAsInteger('FunctionType', -1);
+
+  case FuncType of
+    2: // Exponential interpolation: f(t) = C0 + t^N * (C1 - C0)
+    begin
+      N     := Dict.GetAsReal('N', 1);
+      C0Arr := Dict.GetAsArray('C0');
+      C1Arr := Dict.GetAsArray('C1');
+      NOut  := 3; // default DeviceRGB
+      if C0Arr <> nil then NOut := C0Arr.Count;
+      SetLength(Result, NOut);
+      if N = 1 then TN := T
+      else TN := Single(Power(T, N));
+      for I := 0 to NOut - 1 do
+      begin
+        var C0v: Single := 0;
+        var C1v: Single := 1;
+        if C0Arr <> nil then C0v := C0Arr.GetAsReal(I, 0);
+        if C1Arr <> nil then C1v := C1Arr.GetAsReal(I, 1);
+        Result[I] := C0v + TN * (C1v - C0v);
+      end;
+    end;
+
+    3: // Stitching: composed sub-functions
+    begin
+      FuncsArr  := Dict.GetAsArray('Functions');
+      BoundsArr := Dict.GetAsArray('Bounds');
+      EncodeArr := Dict.GetAsArray('Encode');
+      if (FuncsArr = nil) or (FuncsArr.Count = 0) then Exit;
+      NFunc := FuncsArr.Count;
+
+      DomainArr := Dict.GetAsArray('Domain');
+      var D0: Single := 0;
+      var D1: Single := 1;
+      if DomainArr <> nil then
+      begin
+        D0 := DomainArr.GetAsReal(0, 0);
+        D1 := DomainArr.GetAsReal(1, 1);
+      end;
+      T := Max(D0, Min(D1, T));
+
+      // Find which sub-function t falls in
+      FuncIdx := NFunc - 1;
+      FD0     := D0;
+      FD1     := D1;
+      if NFunc = 1 then begin FD0 := D0; FD1 := D1; end
+      else
+      begin
+        for I := 0 to NFunc - 2 do
+        begin
+          var Bi: Single := 0;
+          if BoundsArr <> nil then Bi := BoundsArr.GetAsReal(I, 0);
+          if T <= Bi then
+          begin
+            FuncIdx := I;
+            if I = 0 then FD0 := D0
+            else FD0 := Single(BoundsArr.GetAsReal(I - 1, 0));
+            FD1 := Bi;
+            Break;
+          end;
+          if I = NFunc - 2 then // last interval: Bounds[N-2] .. D1
+          begin
+            FD0 := Bi;
+            FD1 := D1;
+          end;
+        end;
+      end;
+
+      // Map t into sub-function domain via Encode
+      E0 := 0; E1 := 1;
+      if EncodeArr <> nil then
+      begin
+        E0 := EncodeArr.GetAsReal(FuncIdx * 2,     0);
+        E1 := EncodeArr.GetAsReal(FuncIdx * 2 + 1, 1);
+      end;
+      if FD1 > FD0 then
+        T := E0 + (T - FD0) / (FD1 - FD0) * (E1 - E0)
+      else
+        T := E0;
+
+      Result := EvalPDFFunction(FuncsArr.Get(FuncIdx), T);
+    end;
+  else
+  begin
+    // Unsupported / unknown — return black DeviceRGB
+    SetLength(Result, 3);
+    Result[0] := 0; Result[1] := 0; Result[2] := 0;
+  end;
+  end;
+end;
+
+// -------------------------------------------------------------------------
+
+function TPDFSkiaRenderer.ShadingComponentsToAlpha(const AComps: TArray<Single>;
+  const ACSName: string): TAlphaColor;
+var
+  R, G, B, Gv, C, M, Y, K: Single;
+begin
+  if ACSName = 'DeviceGray' then
+  begin
+    Gv := EnsureRange(AComps[0], 0, 1);
+    Result := (Cardinal($FF) shl 24) or (Round(Gv*255) shl 16) or
+              (Round(Gv*255) shl 8) or Round(Gv*255);
+  end
+  else if ACSName = 'DeviceCMYK' then
+  begin
+    C := AComps[0]; M := AComps[1]; Y := AComps[2]; K := AComps[3];
+    R := EnsureRange((1 - C) * (1 - K), 0, 1);
+    G := EnsureRange((1 - M) * (1 - K), 0, 1);
+    B := EnsureRange((1 - Y) * (1 - K), 0, 1);
+    Result := (Cardinal($FF) shl 24) or (Round(R*255) shl 16) or
+              (Round(G*255) shl 8) or Round(B*255);
+  end
+  else // DeviceRGB (default)
+  begin
+    if Length(AComps) >= 3 then
+    begin
+      R := EnsureRange(AComps[0], 0, 1);
+      G := EnsureRange(AComps[1], 0, 1);
+      B := EnsureRange(AComps[2], 0, 1);
+    end else if Length(AComps) = 1 then
+    begin
+      Gv := EnsureRange(AComps[0], 0, 1);
+      R := Gv; G := Gv; B := Gv;
+    end else
+    begin
+      R := 0; G := 0; B := 0;
+    end;
+    Result := (Cardinal($FF) shl 24) or (Round(R*255) shl 16) or
+              (Round(G*255) shl 8) or Round(B*255);
+  end;
+end;
+
+// -------------------------------------------------------------------------
+// Transform a 2-D point by a PDF matrix: x' = A*x+C*y+E, y' = B*x+D*y+F
+function PDFTransformPoint(const AP: TPointF; const AM: TPDFMatrix): TPointF; inline;
+begin
+  Result.X := AM.A * AP.X + AM.C * AP.Y + AM.E;
+  Result.Y := AM.B * AP.X + AM.D * AP.Y + AM.F;
+end;
+
+function PDFScaleRadius(const AR: Single; const AM: TPDFMatrix): Single; inline;
+begin
+  // Approximate: use magnitude of x-basis vector for uniform-scale patterns
+  Result := AR * Sqrt(AM.A * AM.A + AM.B * AM.B);
+end;
+
+// -------------------------------------------------------------------------
+
+function TPDFSkiaRenderer.BuildShadingShader(AShading: TPDFDictionary;
+  const APreMatrix: TPDFMatrix): ISkShader;
+const
+  NGradStops = 16;
+var
+  ShadingType: Integer;
+  CSName:      string;
+  FuncObj:     TPDFObject;
+  CoordsArr:   TPDFArray;
+  Colors:      TArray<TAlphaColor>;
+  Positions:   TArray<Single>;
+  I:           Integer;
+  T:           Single;
+  Comps:       TArray<Single>;
+begin
+  Result := nil;
+  if AShading = nil then Exit;
+
+  ShadingType := AShading.GetAsInteger('ShadingType', 0);
+  if not (ShadingType in [2, 3]) then Exit;  // only axial and radial implemented
+
+  CSName    := AShading.GetAsName('ColorSpace', 'DeviceRGB');
+  FuncObj   := AShading.Get('Function');
+  CoordsArr := AShading.GetAsArray('Coords');
+  if (CoordsArr = nil) or (FuncObj = nil) then Exit;
+
+  // Build gradient colour stops by sampling the function at NGradStops points
+  SetLength(Colors,    NGradStops);
+  SetLength(Positions, NGradStops);
+  for I := 0 to NGradStops - 1 do
+  begin
+    T := I / (NGradStops - 1);
+    Positions[I] := T;
+    Comps := EvalPDFFunction(FuncObj, T);
+    if Length(Comps) > 0 then
+      Colors[I] := ShadingComponentsToAlpha(Comps, CSName)
+    else
+      Colors[I] := TAlphaColors.Black;
+  end;
+
+  case ShadingType of
+    2: // Axial (linear) gradient
+    begin
+      if CoordsArr.Count < 4 then Exit;
+      var P0 := TPointF.Create(CoordsArr.GetAsReal(0, 0), CoordsArr.GetAsReal(1, 0));
+      var P1 := TPointF.Create(CoordsArr.GetAsReal(2, 1), CoordsArr.GetAsReal(3, 0));
+      // Transform shading coords to canvas user space via APreMatrix
+      P0 := PDFTransformPoint(P0, APreMatrix);
+      P1 := PDFTransformPoint(P1, APreMatrix);
+      Result := TSkShader.MakeGradientLinear(P0, P1, Colors, Positions,
+        TSkTileMode.Clamp);
+    end;
+
+    3: // Radial (two-point conical) gradient
+    begin
+      if CoordsArr.Count < 6 then Exit;
+      var P0  := TPointF.Create(CoordsArr.GetAsReal(0, 0), CoordsArr.GetAsReal(1, 0));
+      var R0  := Single(CoordsArr.GetAsReal(2, 0));
+      var P1  := TPointF.Create(CoordsArr.GetAsReal(3, 0), CoordsArr.GetAsReal(4, 0));
+      var R1  := Single(CoordsArr.GetAsReal(5, 1));
+      P0 := PDFTransformPoint(P0, APreMatrix);
+      P1 := PDFTransformPoint(P1, APreMatrix);
+      R0 := PDFScaleRadius(R0, APreMatrix);
+      R1 := PDFScaleRadius(R1, APreMatrix);
+      Result := TSkShader.MakeGradientTwoPointConical(P0, R0, P1, R1,
+        Colors, Positions, TSkTileMode.Clamp);
+    end;
+  end;
+end;
+
+// -------------------------------------------------------------------------
+
+function TPDFSkiaRenderer.BuildPatternShader(const APatternName: string;
+  const AState: TPDFGraphicsState): ISkShader;
+var
+  PatObj:     TPDFObject;
+  PatDict:    TPDFDictionary;
+  PatType:    Integer;
+  PatMatrix:  TPDFMatrix;
+  ShadingObj: TPDFObject;
+  ShadingDict:TPDFDictionary;
+begin
+  Result := nil;
+  if (FCurrentResources = nil) or (APatternName = '') then Exit;
+  PatObj := FCurrentResources.GetPattern(APatternName);
+  if PatObj = nil then Exit;
+
+  if PatObj.IsDictionary then
+    PatDict := TPDFDictionary(PatObj)
+  else if PatObj.IsStream then
+    PatDict := TPDFStream(PatObj).Dict
+  else
+    Exit;
+
+  PatType := PatDict.GetAsInteger('PatternType', 0);
+  if PatType <> 2 then Exit;  // only shading patterns implemented
+
+  PatMatrix := PatDict.GetMatrix('Matrix');
+
+  // Get the shading dict — may be inline dict or a reference to another dict
+  ShadingObj := PatDict.Get('Shading');
+  if ShadingObj = nil then Exit;
+  if ShadingObj.IsDictionary then
+    ShadingDict := TPDFDictionary(ShadingObj)
+  else if ShadingObj.IsStream then
+    ShadingDict := TPDFStream(ShadingObj).Dict
+  else
+    Exit;
+
+  Result := BuildShadingShader(ShadingDict, PatMatrix);
+end;
+
+// -------------------------------------------------------------------------
+
+procedure TPDFSkiaRenderer.OnPaintShading(const AName: string;
+  const AState: TPDFGraphicsState);
+var
+  ShadingObj:  TPDFObject;
+  ShadingDict: TPDFDictionary;
+  Shader:      ISkShader;
+  Paint:       ISkPaint;
+begin
+  if FCurrentResources = nil then Exit;
+  ShadingObj := FCurrentResources.GetShading(AName);
+  if ShadingObj = nil then Exit;
+
+  if ShadingObj.IsDictionary then
+    ShadingDict := TPDFDictionary(ShadingObj)
+  else if ShadingObj.IsStream then
+    ShadingDict := TPDFStream(ShadingObj).Dict
+  else
+    Exit;
+
+  // For 'sh', shading coords are in user space (no additional pattern matrix)
+  Shader := BuildShadingShader(ShadingDict, TPDFMatrix.Identity);
+  if Shader = nil then Exit;
+
+  Paint := TSkPaint.Create;
+  Paint.AntiAlias := FOptions.Antialias;
+  Paint.Shader    := Shader;
+  Paint.Blender   := TSkBlender.MakeMode(PDFBlendToSkia(AState.BlendMode));
+
+  // Set canvas matrix to CTM * page-flip so shader coords align with user space
+  FCanvas.SetMatrix(PDFMatrixToSkia(AState.CTM) * FPageFlip);
+  // Fill the entire clipping region with the shading
+  FCanvas.DrawRect(TRectF.Create(-1e6, -1e6, 1e6, 1e6), Paint);
+end;
+
+// =========================================================================
 // Form XObject (recursive)
 // =========================================================================
 
@@ -801,7 +1171,9 @@ begin
     end;
 
     var SavedClipBuilder := FTextClipBuilder;
-    FTextClipBuilder := nil;
+    var SavedResources   := FCurrentResources;
+    FTextClipBuilder  := nil;
+    FCurrentResources := FormRes;
     Processor := TPDFContentStreamProcessor.Create;
     try
       Processor.OnPaintPath        := OnPaintPath;
@@ -810,10 +1182,12 @@ begin
       Processor.OnPaintInlineImage := OnPaintInlineImage;
       Processor.OnSaveRestore      := OnSaveRestore;
       Processor.OnTextBlock        := OnTextBlock;
+      Processor.OnPaintShading     := OnPaintShading;
       Processor.Process(FormBytes, FormRes, FPage.Document.Resolver);
     finally
       Processor.Free;
-      FTextClipBuilder := SavedClipBuilder;
+      FTextClipBuilder  := SavedClipBuilder;
+      FCurrentResources := SavedResources;
     end;
   finally
     FCanvas.Restore;
@@ -853,7 +1227,8 @@ begin
   Content := APage.ContentStreamBytes;
   if Length(Content) = 0 then Exit;
 
-  Resources := TPDFPageResources.Create(APage);
+  Resources         := TPDFPageResources.Create(APage);
+  FCurrentResources := Resources;
 
   FTextClipBuilder := nil;
   Processor := TPDFContentStreamProcessor.Create;
@@ -864,9 +1239,11 @@ begin
     Processor.OnPaintInlineImage := OnPaintInlineImage;
     Processor.OnSaveRestore      := OnSaveRestore;
     Processor.OnTextBlock        := OnTextBlock;
+    Processor.OnPaintShading     := OnPaintShading;
     Processor.Process(Content, Resources, APage.Document.Resolver);
   finally
     Processor.Free;
+    FCurrentResources := nil;
   end;
 
   // Reset canvas matrix to identity when done

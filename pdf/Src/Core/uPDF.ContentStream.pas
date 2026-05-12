@@ -113,6 +113,11 @@ type
   TPDFOnTextBlock = reference to procedure(AIsBT: Boolean;
     const AState: TPDFGraphicsState);
 
+  // Called for the 'sh' operator (paint shading directly over clip region)
+  TPDFOnPaintShading = reference to procedure(
+    const AName: string;
+    const AState: TPDFGraphicsState);
+
   // -------------------------------------------------------------------------
   // Resources wrapper (abstracts /Font, /XObject, /ColorSpace lookups)
   // -------------------------------------------------------------------------
@@ -123,6 +128,7 @@ type
     function  GetColorSpace(const AName: string): TPDFColorSpace;
     function  GetExtGState(const AName: string): TPDFDictionary;
     function  GetPattern(const AName: string): TPDFObject;
+    function  GetShading(const AName: string): TPDFObject;
   end;
 
   // -------------------------------------------------------------------------
@@ -146,6 +152,7 @@ type
     FOnPaintInlineImage:TPDFOnPaintInlineImage;
     FOnSaveRestore:     TPDFOnSaveRestore;
     FOnTextBlock:       TPDFOnTextBlock;
+    FOnPaintShading:    TPDFOnPaintShading;
 
     // Current text position (redundant with GS.Text but easier to access)
     FCurrentX, FCurrentY: Single;  // current point (user space)
@@ -233,6 +240,9 @@ type
     procedure Op_BT(const A: TArray<TPDFObject>);   // begin text
     procedure Op_ET(const A: TArray<TPDFObject>);   // end text
 
+    // ---- Shading ----
+    procedure Op_sh(const A: TArray<TPDFObject>);   // paint shading
+
     // ---- XObjects ----
     procedure Op_Do(const A: TArray<TPDFObject>);   // invoke XObject
 
@@ -275,6 +285,7 @@ type
     property OnPaintInlineImage: TPDFOnPaintInlineImage  read FOnPaintInlineImage write FOnPaintInlineImage;
     property OnSaveRestore:      TPDFOnSaveRestore       read FOnSaveRestore      write FOnSaveRestore;
     property OnTextBlock:        TPDFOnTextBlock         read FOnTextBlock        write FOnTextBlock;
+    property OnPaintShading:     TPDFOnPaintShading      read FOnPaintShading     write FOnPaintShading;
 
     // Access graphics state (read-only during processing)
     function GraphicsState: TPDFGraphicsStateStack;
@@ -474,6 +485,8 @@ begin
   // Text block
   FOperators.Add('BT', Op_BT);
   FOperators.Add('ET', Op_ET);
+  // Shading
+  FOperators.Add('sh', Op_sh);
   // XObjects
   FOperators.Add('Do', Op_Do);
   // Marked content
@@ -913,7 +926,26 @@ procedure TPDFContentStreamProcessor.SetColorFromArgs(const AArgs: TArray<TPDFOb
 var
   N:     TArray<Single>;
   Color: TPDFColor;
+  I:     Integer;
 begin
+  // Pattern color space: last arg is a Name (pattern resource), preceding args are
+  // optional color components for uncolored tiling patterns (ignored here).
+  if ACSName = 'Pattern' then
+  begin
+    var PatName := '';
+    for I := High(AArgs) downto 0 do
+      if AArgs[I].IsName then
+      begin
+        PatName := AArgs[I].AsName;
+        Break;
+      end;
+    if AIsStroke then
+      FGS.CurrentRef^.StrokePatternName := PatName
+    else
+      FGS.CurrentRef^.FillPatternName := PatName;
+    Exit;
+  end;
+
   N := ArgsAsNumbers(AArgs);
   if ACSName = 'DeviceGray' then
     Color := TPDFColor.MakeGray(N[0])
@@ -1269,5 +1301,15 @@ procedure TPDFContentStreamProcessor.Op_MP(const A: TArray<TPDFObject>);  begin 
 procedure TPDFContentStreamProcessor.Op_DP(const A: TArray<TPDFObject>);  begin end;
 procedure TPDFContentStreamProcessor.Op_BX(const A: TArray<TPDFObject>);  begin end;
 procedure TPDFContentStreamProcessor.Op_EX(const A: TArray<TPDFObject>);  begin end;
+
+// =========================================================================
+// Shading
+// =========================================================================
+
+procedure TPDFContentStreamProcessor.Op_sh(const A: TArray<TPDFObject>);
+begin
+  if (Length(A) >= 1) and Assigned(FOnPaintShading) then
+    FOnPaintShading(A[0].AsName, FGS.Current);
+end;
 
 end.

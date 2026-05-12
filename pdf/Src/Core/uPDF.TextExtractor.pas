@@ -61,6 +61,7 @@ type
     function GetColorSpace(const AName: string): TPDFColorSpace;
     function GetExtGState(const AName: string): TPDFDictionary;
     function GetPattern(const AName: string): TPDFObject;
+    function GetShading(const AName: string): TPDFObject;
   end;
 
   // -------------------------------------------------------------------------
@@ -208,6 +209,11 @@ end;
 function TPDFPageResources.GetPattern(const AName: string): TPDFObject;
 begin
   Result := FPage.GetResource('Pattern', AName);
+end;
+
+function TPDFPageResources.GetShading(const AName: string): TPDFObject;
+begin
+  Result := FPage.GetResource('Shading', AName);
 end;
 
 // =========================================================================

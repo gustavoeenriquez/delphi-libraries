@@ -78,6 +78,9 @@ type
     // ---- Clipping ----
     // Clip path is maintained by the renderer; just track the rule here
     ClipRule:          Integer;   // 0=nonzero, 1=evenodd
+    // ---- Pattern ----
+    FillPatternName:   string;   // non-empty when FillColorSpace = 'Pattern'
+    StrokePatternName: string;   // non-empty when StrokeColorSpace = 'Pattern'
 
     procedure Reset;
   end;
@@ -175,6 +178,8 @@ begin
   SoftMask.Reset;
   Text.Reset;
   ClipRule          := 0;
+  FillPatternName   := '';
+  StrokePatternName := '';
 end;
 
 // =========================================================================

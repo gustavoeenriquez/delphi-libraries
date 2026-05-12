@@ -580,8 +580,8 @@ PDFViewerControl1.ZoomFit;
 | `uPDF.Crypto` | MD5, SHA-1, SHA-256/384/512, RC4, AES-128/256 primitives |
 | `uPDF.Encryption` | Standard security handler Rev 2/3/4/6 — RC4 + AES, user/owner auth |
 | `uPDF.Filters` | FlateDecode, ASCIIHex, ASCII85, LZW, RunLength, DCT (JPEG passthrough) |
-| `uPDF.ContentStream` | Content-stream interpreter (all path/text/color/clip/transform operators) |
-| `uPDF.GraphicsState` | Full graphics-state stack: CTM, colors, fonts, line params, clipping |
+| `uPDF.ContentStream` | Content-stream interpreter (all path/text/color/clip/transform/shading operators incl. `scn`/`SCN` pattern names and `sh` shading) |
+| `uPDF.GraphicsState` | Full graphics-state stack: CTM, colors, fonts, line params, clipping, pattern names |
 | `uPDF.ColorSpace` | DeviceGray/RGB/CMYK, CalGray/RGB, ICCBased, Indexed, Pattern, Separation |
 | `uPDF.Font` | Type0/1/3/TrueType + CIDFont: glyph widths, ToUnicode CMap, encoding maps |
 | `uPDF.FontCMap` | CMaps: predefined identities, embedded, Adobe-CNS1/GB1/Japan1/Korea1 |
@@ -611,7 +611,7 @@ PDFViewerControl1.ZoomFit;
 |---|---|
 | `uPDF.Render.Types` | `TPDFRenderTarget`, tile size, resolution constants |
 | `uPDF.Render.FontCache` | Platform font resolver + glyph-metric cache |
-| `uPDF.Render.Skia` | Page rasterizer backed by **Skia4Delphi** — paths, text, images |
+| `uPDF.Render.Skia` | Page rasterizer backed by **Skia4Delphi** — paths, text, images, axial/radial gradient shading patterns |
 | `uPDF.Viewer.Cache` | Tile + page-bitmap LRU cache |
 | `uPDF.Viewer.Control` | `TPDFViewerControl` — scrollable FMX control, zoom, page navigation |
 
@@ -628,8 +628,8 @@ PDFViewerControl1.ZoomFit;
 | TestTTFParser (tables, CharToGlyph, metrics, embedding permission) | 51 ✅ |
 | TestTTFEmbeddedFont (widths, EncodeTextHex, CMap, subset bytes, PDF objects) | 51 ✅ |
 | TestPDFEmbeddedWriter (structure, content encoding, multi-page, conformance) | 40 ✅ |
-| TestDocumentSave (round-trip, page ops, metadata, LZW, encrypted save) | 69 ✅ |
-| **Total** | **391+ ✅** |
+| TestDocumentSave (round-trip, page ops, metadata, LZW, encrypted save, pattern color space) | 76 ✅ |
+| **Total** | **398+ ✅** |
 
 Run the tests:
 

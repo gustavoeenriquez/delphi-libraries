@@ -885,6 +885,87 @@ begin
 end;
 
 // =========================================================================
+// T14 -- Pattern color space: scn stores pattern name; sh fires OnPaintShading
+// =========================================================================
+
+procedure TestPatternColorSpace;
+var
+  Processor:   TPDFContentStreamProcessor;
+  CS:          TBytes;
+  ShadingFired: Boolean;
+  ShadingName:  string;
+begin
+  Section('T14 -- Pattern color space (scn / sh operators)');
+  try
+    // --- scn stores pattern name in FillPatternName ---
+    Processor := TPDFContentStreamProcessor.Create;
+    try
+      // "/Pattern cs\n/MyPat scn\n" — set Pattern color space then select pattern
+      CS := TEncoding.ASCII.GetBytes('/Pattern cs'#10'/MyPat scn'#10);
+      Processor.Process(CS, nil);
+      Check(Processor.GraphicsState.Current.FillColorSpace = 'Pattern',
+        'FillColorSpace = ''Pattern'' after "cs"');
+      Check(Processor.GraphicsState.Current.FillPatternName = 'MyPat',
+        Format('FillPatternName = ''MyPat'' after "scn"  (got "%s")',
+          [Processor.GraphicsState.Current.FillPatternName]));
+    finally
+      Processor.Free;
+    end;
+
+    // --- SCN (stroke) variant ---
+    Processor := TPDFContentStreamProcessor.Create;
+    try
+      CS := TEncoding.ASCII.GetBytes('/Pattern CS'#10'/StrokePat SCN'#10);
+      Processor.Process(CS, nil);
+      Check(Processor.GraphicsState.Current.StrokeColorSpace = 'Pattern',
+        'StrokeColorSpace = ''Pattern'' after "CS"');
+      Check(Processor.GraphicsState.Current.StrokePatternName = 'StrokePat',
+        Format('StrokePatternName = ''StrokePat'' after "SCN"  (got "%s")',
+          [Processor.GraphicsState.Current.StrokePatternName]));
+    finally
+      Processor.Free;
+    end;
+
+    // --- sh fires OnPaintShading with correct name ---
+    ShadingFired := False;
+    ShadingName  := '';
+    Processor := TPDFContentStreamProcessor.Create;
+    try
+      Processor.OnPaintShading :=
+        procedure(const AName: string; const AState: TPDFGraphicsState)
+        begin
+          ShadingFired := True;
+          ShadingName  := AName;
+        end;
+      CS := TEncoding.ASCII.GetBytes('/MyShadingObject sh'#10);
+      Processor.Process(CS, nil);
+      Check(ShadingFired, 'OnPaintShading fires for "sh" operator');
+      Check(ShadingName = 'MyShadingObject',
+        Format('OnPaintShading receives correct name  (got "%s")', [ShadingName]));
+    finally
+      Processor.Free;
+    end;
+
+    // --- cs + scn preserves earlier fill color after reset to non-pattern ---
+    Processor := TPDFContentStreamProcessor.Create;
+    try
+      CS := TEncoding.ASCII.GetBytes(
+        '/Pattern cs'#10'/P1 scn'#10'0.5 g'#10);
+      Processor.Process(CS, nil);
+      // After 'g' (DeviceGray), FillColorSpace should switch away from Pattern
+      Check(Processor.GraphicsState.Current.FillColorSpace = 'DeviceGray',
+        'FillColorSpace resets to DeviceGray after "g" operator');
+    finally
+      Processor.Free;
+    end;
+
+  except
+    on E: Exception do
+      Fail('Unhandled exception', E.ClassName + ': ' + E.Message);
+  end;
+end;
+
+// =========================================================================
 // Main
 // =========================================================================
 
@@ -904,6 +985,7 @@ begin
   TestMetadataUnicode;
   TestLZWRoundTrip;
   TestEncryptedDocSave;
+  TestPatternColorSpace;
 
   WriteLn;
   WriteLn(Format('Results: %d passed, %d failed', [PassCount, FailCount]));

@@ -1,4 +1,4 @@
-unit AudioCodec;
+﻿unit AudioCodec;
 
 {
   AudioCodec.pas - Unified audio decoder interface and factory
@@ -41,7 +41,8 @@ interface
 uses
   SysUtils, Classes,
   AudioTypes,
-  AudioFormatDetect;
+  AudioFormatDetect,
+  WAVWriter;
 
 // ---------------------------------------------------------------------------
 // IAudioDecoder — unified decode interface
@@ -66,7 +67,29 @@ type
   end;
 
 // ---------------------------------------------------------------------------
-// Factory functions
+// IAudioEncoder — unified encode interface
+// ---------------------------------------------------------------------------
+
+type
+  IAudioEncoder = interface
+    ['{E1D2C3B4-A596-4E78-9012-F3456789ABCD}']
+    // Encode FrameCount frames from Buffer. FrameCount < 0 = all in Buffer.
+    // Returns aerOK on success, aerError on unrecoverable failure.
+    function Encode(const Buffer: TAudioBuffer; FrameCount: Integer = -1): TAudioEncodeResult;
+
+    // Flush internal buffers and finalize the stream. Safe to call multiple times.
+    procedure Finalize;
+
+    // Encoder configuration (available after construction).
+    function GetInfo: TAudioInfo;
+    function GetReady: Boolean;
+
+    property Info : TAudioInfo read GetInfo;
+    property Ready: Boolean    read GetReady;
+  end;
+
+// ---------------------------------------------------------------------------
+// Decoder factory functions
 // ---------------------------------------------------------------------------
 
 // Create a decoder for the given stream.
@@ -80,6 +103,32 @@ function CreateAudioDecoder(AStream: TStream;
 // The returned decoder owns its internal stream.
 function CreateAudioDecoderFromFile(const FileName: string): IAudioDecoder;
 
+// ---------------------------------------------------------------------------
+// Encoder factory functions
+// ---------------------------------------------------------------------------
+
+// Create a WAV encoder writing to AStream.
+// If OwnsStream = True the encoder frees the stream on Finalize/destroy.
+function CreateWAVEncoder(AStream: TStream; SampleRate: Cardinal;
+  Channels: Word; OwnsStream: Boolean = False;
+  OutputFormat: TWAVOutputFormat = woPCM16): IAudioEncoder;
+
+// Create a WAV encoder writing to a new file.
+function CreateWAVEncoderToFile(const FileName: string;
+  SampleRate: Cardinal; Channels: Word;
+  OutputFormat: TWAVOutputFormat = woPCM16): IAudioEncoder;
+
+// Create a FLAC encoder writing to AStream.
+// BitsPerSample: 16 or 24.  BlockSize: frames per FLAC frame (default 4096).
+function CreateFLACEncoder(AStream: TStream; SampleRate: Cardinal;
+  Channels: Byte; BitsPerSample: Byte; OwnsStream: Boolean = False;
+  BlockSize: Integer = 4096): IAudioEncoder;
+
+// Create a FLAC encoder writing to a new file.
+function CreateFLACEncoderToFile(const FileName: string;
+  SampleRate: Cardinal; Channels: Byte; BitsPerSample: Byte;
+  BlockSize: Integer = 4096): IAudioEncoder;
+
 implementation
 
 uses
@@ -89,7 +138,9 @@ uses
   WAVTypes,
   WAVReader,
   FLACTypes,
+  FLACFrameEncoder,
   FLACStreamDecoder,
+  FLACStreamEncoder,
   VorbisTypes,
   VorbisDecoder,
   OpusDecoder;
@@ -383,7 +434,194 @@ begin
 end;
 
 // ===========================================================================
-// Factory
+// WAV encoder adapter
+// ===========================================================================
+
+type
+  TWAVEncoderAdapter = class(TInterfacedObject, IAudioEncoder)
+  private
+    FWriter : TWAVWriter;
+    FInfo   : TAudioInfo;
+  public
+    constructor Create(AStream: TStream; SampleRate: Cardinal;
+      Channels: Word; OwnsStream: Boolean; OutputFormat: TWAVOutputFormat);
+    constructor CreateToFile(const FileName: string; SampleRate: Cardinal;
+      Channels: Word; OutputFormat: TWAVOutputFormat);
+    destructor  Destroy; override;
+    function  Encode(const Buffer: TAudioBuffer; FrameCount: Integer = -1): TAudioEncodeResult;
+    procedure Finalize;
+    function  GetInfo: TAudioInfo;
+    function  GetReady: Boolean;
+  end;
+
+constructor TWAVEncoderAdapter.Create(AStream: TStream; SampleRate: Cardinal;
+  Channels: Word; OwnsStream: Boolean; OutputFormat: TWAVOutputFormat);
+begin
+  inherited Create;
+  FWriter          := TWAVWriter.Create(AStream, SampleRate, Channels, OutputFormat, OwnsStream);
+  FInfo.Format     := afWAV;
+  FInfo.SampleRate := SampleRate;
+  FInfo.Channels   := Channels;
+  FInfo.BitDepth   := 16;
+  FInfo.IsFloat    := OutputFormat = woFloat32;
+  FInfo.DurationMs := -1;
+  FInfo.BitRate    := 0;
+end;
+
+constructor TWAVEncoderAdapter.CreateToFile(const FileName: string;
+  SampleRate: Cardinal; Channels: Word; OutputFormat: TWAVOutputFormat);
+begin
+  inherited Create;
+  FWriter          := TWAVWriter.Create(FileName, SampleRate, Channels, OutputFormat);
+  FInfo.Format     := afWAV;
+  FInfo.SampleRate := SampleRate;
+  FInfo.Channels   := Channels;
+  FInfo.BitDepth   := 16;
+  FInfo.IsFloat    := OutputFormat = woFloat32;
+  FInfo.DurationMs := -1;
+  FInfo.BitRate    := 0;
+end;
+
+destructor TWAVEncoderAdapter.Destroy;
+begin
+  FWriter.Free;
+  inherited Destroy;
+end;
+
+function TWAVEncoderAdapter.Encode(const Buffer: TAudioBuffer;
+  FrameCount: Integer): TAudioEncodeResult;
+begin
+  Result := FWriter.WriteSamples(Buffer, FrameCount);
+end;
+
+procedure TWAVEncoderAdapter.Finalize;
+begin
+  FWriter.Finalize;
+end;
+
+function TWAVEncoderAdapter.GetInfo: TAudioInfo;
+begin
+  Result := FInfo;
+end;
+
+function TWAVEncoderAdapter.GetReady: Boolean;
+begin
+  Result := True;
+end;
+
+// ===========================================================================
+// FLAC encoder adapter
+// ===========================================================================
+
+type
+  TFLACEncoderAdapter = class(TInterfacedObject, IAudioEncoder)
+  private
+    FEncoder : TFLACStreamEncoder;
+    FInfo    : TAudioInfo;
+  public
+    constructor Create(AStream: TStream; SampleRate: Cardinal;
+      Channels: Byte; BitsPerSample: Byte; OwnsStream: Boolean; BlockSize: Integer);
+    constructor CreateToFile(const FileName: string; SampleRate: Cardinal;
+      Channels: Byte; BitsPerSample: Byte; BlockSize: Integer);
+    destructor  Destroy; override;
+    function  Encode(const Buffer: TAudioBuffer; FrameCount: Integer = -1): TAudioEncodeResult;
+    procedure Finalize;
+    function  GetInfo: TAudioInfo;
+    function  GetReady: Boolean;
+  end;
+
+constructor TFLACEncoderAdapter.Create(AStream: TStream; SampleRate: Cardinal;
+  Channels: Byte; BitsPerSample: Byte; OwnsStream: Boolean; BlockSize: Integer);
+begin
+  inherited Create;
+  FEncoder         := TFLACStreamEncoder.Create(AStream, SampleRate, Channels,
+                        BitsPerSample, BlockSize, OwnsStream, FLACDefaultConfig);
+  FInfo.Format     := afFLAC;
+  FInfo.SampleRate := SampleRate;
+  FInfo.Channels   := Channels;
+  FInfo.BitDepth   := BitsPerSample;
+  FInfo.IsFloat    := False;
+  FInfo.DurationMs := -1;
+  FInfo.BitRate    := 0;
+end;
+
+constructor TFLACEncoderAdapter.CreateToFile(const FileName: string;
+  SampleRate: Cardinal; Channels: Byte; BitsPerSample: Byte; BlockSize: Integer);
+begin
+  inherited Create;
+  FEncoder         := TFLACStreamEncoder.Create(FileName, SampleRate, Channels,
+                        BitsPerSample, BlockSize);
+  FInfo.Format     := afFLAC;
+  FInfo.SampleRate := SampleRate;
+  FInfo.Channels   := Channels;
+  FInfo.BitDepth   := BitsPerSample;
+  FInfo.IsFloat    := False;
+  FInfo.DurationMs := -1;
+  FInfo.BitRate    := 0;
+end;
+
+destructor TFLACEncoderAdapter.Destroy;
+begin
+  FEncoder.Free;
+  inherited Destroy;
+end;
+
+function TFLACEncoderAdapter.Encode(const Buffer: TAudioBuffer;
+  FrameCount: Integer): TAudioEncodeResult;
+begin
+  Result := FEncoder.Write(Buffer, FrameCount);
+end;
+
+procedure TFLACEncoderAdapter.Finalize;
+begin
+  FEncoder.Finalize;
+end;
+
+function TFLACEncoderAdapter.GetInfo: TAudioInfo;
+begin
+  Result := FInfo;
+end;
+
+function TFLACEncoderAdapter.GetReady: Boolean;
+begin
+  Result := FEncoder.Ready;
+end;
+
+// ===========================================================================
+// Encoder factory
+// ===========================================================================
+
+function CreateWAVEncoder(AStream: TStream; SampleRate: Cardinal;
+  Channels: Word; OwnsStream: Boolean; OutputFormat: TWAVOutputFormat): IAudioEncoder;
+begin
+  Result := TWAVEncoderAdapter.Create(AStream, SampleRate, Channels,
+    OwnsStream, OutputFormat);
+end;
+
+function CreateWAVEncoderToFile(const FileName: string;
+  SampleRate: Cardinal; Channels: Word; OutputFormat: TWAVOutputFormat): IAudioEncoder;
+begin
+  Result := TWAVEncoderAdapter.CreateToFile(FileName, SampleRate, Channels, OutputFormat);
+end;
+
+function CreateFLACEncoder(AStream: TStream; SampleRate: Cardinal;
+  Channels: Byte; BitsPerSample: Byte; OwnsStream: Boolean;
+  BlockSize: Integer): IAudioEncoder;
+begin
+  Result := TFLACEncoderAdapter.Create(AStream, SampleRate, Channels,
+    BitsPerSample, OwnsStream, BlockSize);
+end;
+
+function CreateFLACEncoderToFile(const FileName: string;
+  SampleRate: Cardinal; Channels: Byte; BitsPerSample: Byte;
+  BlockSize: Integer): IAudioEncoder;
+begin
+  Result := TFLACEncoderAdapter.CreateToFile(FileName, SampleRate, Channels,
+    BitsPerSample, BlockSize);
+end;
+
+// ===========================================================================
+// Decoder factory
 // ===========================================================================
 
 function CreateAudioDecoder(AStream: TStream;

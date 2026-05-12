@@ -17,11 +17,12 @@ program AudioCodecTests;
 {$APPTYPE CONSOLE}
 
 uses
-  SysUtils, Classes, Math,
+  SysUtils, Classes, Math, IOUtils,
   AudioTypes,
   AudioFormatDetect,
   AudioCodec,
-  WAVTypes;
+  WAVTypes,
+  WAVWriter;
 
 // ---------------------------------------------------------------------------
 // Test harness
@@ -573,6 +574,261 @@ begin
 end;
 
 // ---------------------------------------------------------------------------
+// AC31-AC38: IAudioEncoder — WAV
+// ---------------------------------------------------------------------------
+
+procedure TestAC31_CreateWAVEncoder;
+var
+  S  : TBytesStream;
+  Enc: IAudioEncoder;
+begin
+  S   := TBytesStream.Create(nil);
+  Enc := CreateWAVEncoder(S, 44100, 2, True {owns});
+  Check('AC31: CreateWAVEncoder → non-nil', Enc <> nil);
+end;
+
+procedure TestAC32_WAVEncoderReady;
+var
+  S  : TBytesStream;
+  Enc: IAudioEncoder;
+begin
+  S   := TBytesStream.Create(nil);
+  Enc := CreateWAVEncoder(S, 44100, 2, True);
+  Check('AC32: WAV encoder Ready = True', (Enc <> nil) and Enc.Ready);
+end;
+
+procedure TestAC33_WAVEncoderInfoFormat;
+var
+  S  : TBytesStream;
+  Enc: IAudioEncoder;
+begin
+  S   := TBytesStream.Create(nil);
+  Enc := CreateWAVEncoder(S, 44100, 2, True);
+  Check('AC33: WAV encoder Info.Format = afWAV',
+    (Enc <> nil) and (Enc.Info.Format = afWAV));
+end;
+
+procedure TestAC34_WAVEncoderInfoSampleRate;
+var
+  S  : TBytesStream;
+  Enc: IAudioEncoder;
+begin
+  S   := TBytesStream.Create(nil);
+  Enc := CreateWAVEncoder(S, 48000, 1, True);
+  Check('AC34: WAV encoder Info.SampleRate = 48000',
+    (Enc <> nil) and (Enc.Info.SampleRate = 48000));
+end;
+
+procedure TestAC35_WAVEncoderEncodeReturnsOK;
+var
+  S   : TBytesStream;
+  Enc : IAudioEncoder;
+  Buf : TAudioBuffer;
+  Res : TAudioEncodeResult;
+begin
+  S   := TBytesStream.Create(nil);
+  Enc := CreateWAVEncoder(S, 44100, 1, True);
+  Buf := AudioBufferCreate(1, 64);
+  Res := Enc.Encode(Buf, 64);
+  Enc.Finalize;
+  Check('AC35: WAV encoder Encode returns aerOK', Res = aerOK);
+end;
+
+procedure TestAC36_WAVEncoderRoundtrip;
+var
+  S    : TBytesStream;
+  Enc  : IAudioEncoder;
+  Dec  : IAudioDecoder;
+  InBuf, OutBuf: TAudioBuffer;
+  I    : Integer;
+  Res  : TAudioDecodeResult;
+begin
+  // Fill buffer with a known ramp
+  InBuf := AudioBufferCreate(2, 128);
+  for I := 0 to 127 do
+  begin
+    InBuf[0][I] := I / 127.0;
+    InBuf[1][I] := -I / 127.0;
+  end;
+
+  S   := TBytesStream.Create(nil);
+  Enc := CreateWAVEncoder(S, 44100, 2, False, woPCM24);
+  Enc.Encode(InBuf, 128);
+  Enc.Finalize;
+
+  S.Position := 0;
+  Dec := CreateAudioDecoder(S, True {owns});
+  OutBuf := nil;
+  Res := Dec.Decode(OutBuf);
+
+  Check('AC36: WAV encode→decode roundtrip: format OK',
+    (Res = adrOK) and (Length(OutBuf) = 2) and (Length(OutBuf[0]) = 128));
+  Check('AC36b: WAV roundtrip channel 0 within 16-bit quantization error',
+    (Res = adrOK) and (Length(OutBuf[0]) = 128) and
+    (Abs(OutBuf[0][0] - InBuf[0][0]) < 0.01) and
+    (Abs(OutBuf[0][127] - InBuf[0][127]) < 0.01));
+end;
+
+procedure TestAC37_WAVEncoderToFile;
+var
+  Enc  : IAudioEncoder;
+  Dec  : IAudioDecoder;
+  Buf  : TAudioBuffer;
+  TmpF : string;
+begin
+  TmpF := TPath.GetTempFileName + '.wav';
+  Enc  := CreateWAVEncoderToFile(TmpF, 22050, 1);
+  Buf  := AudioBufferCreate(1, 32);
+  Enc.Encode(Buf, 32);
+  Enc.Finalize;
+  Enc  := nil;
+
+  Dec  := CreateAudioDecoderFromFile(TmpF);
+  Check('AC37: CreateWAVEncoderToFile produces a decodable file',
+    (Dec <> nil) and (Dec.Info.SampleRate = 22050));
+  Dec := nil;
+  try DeleteFile(TmpF); except end;
+end;
+
+procedure TestAC38_WAVEncoderFinalizeIsSafe;
+var
+  S  : TBytesStream;
+  Enc: IAudioEncoder;
+begin
+  S   := TBytesStream.Create(nil);
+  Enc := CreateWAVEncoder(S, 44100, 1, True);
+  Enc.Finalize;
+  Enc.Finalize; // second call must not crash
+  Check('AC38: WAV encoder Finalize is idempotent', True);
+end;
+
+// ---------------------------------------------------------------------------
+// AC39-AC46: IAudioEncoder — FLAC
+// ---------------------------------------------------------------------------
+
+procedure TestAC39_CreateFLACEncoder;
+var
+  S  : TBytesStream;
+  Enc: IAudioEncoder;
+begin
+  S   := TBytesStream.Create(nil);
+  Enc := CreateFLACEncoder(S, 44100, 2, 16, True);
+  Check('AC39: CreateFLACEncoder → non-nil', Enc <> nil);
+end;
+
+procedure TestAC40_FLACEncoderReady;
+var
+  S  : TBytesStream;
+  Enc: IAudioEncoder;
+begin
+  S   := TBytesStream.Create(nil);
+  Enc := CreateFLACEncoder(S, 44100, 2, 16, True);
+  Check('AC40: FLAC encoder Ready = True', (Enc <> nil) and Enc.Ready);
+end;
+
+procedure TestAC41_FLACEncoderInfoFormat;
+var
+  S  : TBytesStream;
+  Enc: IAudioEncoder;
+begin
+  S   := TBytesStream.Create(nil);
+  Enc := CreateFLACEncoder(S, 44100, 2, 16, True);
+  Check('AC41: FLAC encoder Info.Format = afFLAC',
+    (Enc <> nil) and (Enc.Info.Format = afFLAC));
+end;
+
+procedure TestAC42_FLACEncoderInfoSampleRate;
+var
+  S  : TBytesStream;
+  Enc: IAudioEncoder;
+begin
+  S   := TBytesStream.Create(nil);
+  Enc := CreateFLACEncoder(S, 48000, 1, 16, True);
+  Check('AC42: FLAC encoder Info.SampleRate = 48000',
+    (Enc <> nil) and (Enc.Info.SampleRate = 48000));
+end;
+
+procedure TestAC43_FLACEncoderEncodeReturnsOK;
+var
+  S   : TBytesStream;
+  Enc : IAudioEncoder;
+  Buf : TAudioBuffer;
+  Res : TAudioEncodeResult;
+begin
+  S   := TBytesStream.Create(nil);
+  Enc := CreateFLACEncoder(S, 44100, 1, 16, True);
+  Buf := AudioBufferCreate(1, 4096);
+  Res := Enc.Encode(Buf, 4096);
+  Enc.Finalize;
+  Check('AC43: FLAC encoder Encode returns aerOK', Res = aerOK);
+end;
+
+procedure TestAC44_FLACEncoderRoundtrip;
+var
+  S    : TBytesStream;
+  Enc  : IAudioEncoder;
+  Dec  : IAudioDecoder;
+  InBuf, OutBuf: TAudioBuffer;
+  I    : Integer;
+  Res  : TAudioDecodeResult;
+  TotalSamples: Integer;
+begin
+  InBuf := AudioBufferCreate(1, 4096);
+  for I := 0 to 4095 do
+    InBuf[0][I] := Sin(I / 4096.0 * 6.28318);
+
+  S   := TBytesStream.Create(nil);
+  Enc := CreateFLACEncoder(S, 44100, 1, 16, False);
+  Enc.Encode(InBuf, 4096);
+  Enc.Finalize;
+
+  S.Position := 0;
+  Dec := CreateAudioDecoder(S, True);
+  TotalSamples := 0;
+  repeat
+    OutBuf := nil;
+    Res := Dec.Decode(OutBuf);
+    if Res = adrOK then
+      Inc(TotalSamples, Length(OutBuf[0]));
+  until Res <> adrOK;
+
+  Check('AC44: FLAC encode→decode roundtrip recovers all 4096 samples',
+    TotalSamples = 4096);
+end;
+
+procedure TestAC45_FLACEncoderToFile;
+var
+  Enc  : IAudioEncoder;
+  Dec  : IAudioDecoder;
+  Buf  : TAudioBuffer;
+  TmpF : string;
+begin
+  TmpF := TPath.GetTempFileName + '.flac';
+  Enc  := CreateFLACEncoderToFile(TmpF, 44100, 2, 16);
+  Buf  := AudioBufferCreate(2, 4096);
+  Enc.Encode(Buf, 4096);
+  Enc.Finalize;
+  Enc  := nil;
+
+  Dec  := CreateAudioDecoderFromFile(TmpF);
+  Check('AC45: CreateFLACEncoderToFile produces a decodable file',
+    (Dec <> nil) and (Dec.Info.Format = afFLAC) and (Dec.Info.SampleRate = 44100));
+  Dec := nil;
+  try DeleteFile(TmpF); except end;
+end;
+
+procedure TestAC46_FLACEncoderInfoChannels;
+var
+  S  : TBytesStream;
+  Enc: IAudioEncoder;
+begin
+  S   := TBytesStream.Create(nil);
+  Enc := CreateFLACEncoder(S, 44100, 6, 24, True);
+  Check('AC46: FLAC encoder Info.Channels = 6',
+    (Enc <> nil) and (Enc.Info.Channels = 6));
+end;
+
+// ---------------------------------------------------------------------------
 // Main
 // ---------------------------------------------------------------------------
 
@@ -615,6 +871,26 @@ begin
   TestAC28_OggVorbisDetectionRoundTrip;
   TestAC29_OggOpusDetectionRoundTrip;
   TestAC30_WAVDecodeBufferChannelCount;
+
+  // IAudioEncoder — WAV
+  TestAC31_CreateWAVEncoder;
+  TestAC32_WAVEncoderReady;
+  TestAC33_WAVEncoderInfoFormat;
+  TestAC34_WAVEncoderInfoSampleRate;
+  TestAC35_WAVEncoderEncodeReturnsOK;
+  TestAC36_WAVEncoderRoundtrip;
+  TestAC37_WAVEncoderToFile;
+  TestAC38_WAVEncoderFinalizeIsSafe;
+
+  // IAudioEncoder — FLAC
+  TestAC39_CreateFLACEncoder;
+  TestAC40_FLACEncoderReady;
+  TestAC41_FLACEncoderInfoFormat;
+  TestAC42_FLACEncoderInfoSampleRate;
+  TestAC43_FLACEncoderEncodeReturnsOK;
+  TestAC44_FLACEncoderRoundtrip;
+  TestAC45_FLACEncoderToFile;
+  TestAC46_FLACEncoderInfoChannels;
 
   WriteLn;
   WriteLn(Format('%d/%d tests passed', [GPassed, GTotal]));

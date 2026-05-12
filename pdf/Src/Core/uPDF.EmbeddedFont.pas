@@ -1,4 +1,4 @@
-unit uPDF.EmbeddedFont;
+﻿unit uPDF.EmbeddedFont;
 
 {$SCOPEDENUMS ON}
 

@@ -1,4 +1,4 @@
-unit uPDF.Signatures;
+﻿unit uPDF.Signatures;
 
 {$SCOPEDENUMS ON}
 

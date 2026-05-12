@@ -277,6 +277,11 @@ type
     function  ToDebugString: string; override;
     // Invalidate decode cache (call after modifying dict filters)
     procedure InvalidateCache;
+    // For encrypted documents: decrypt raw bytes in-place, clear the
+    // decryption context. Preserves existing filters (DCTDecode, FlateDecode,
+    // etc.) so the writer can still write the stream with its original
+    // compression intact.
+    procedure StripEncryption;
   end;
 
   // -------------------------------------------------------------------------
@@ -1058,6 +1063,20 @@ procedure TPDFStream.InvalidateCache;
 begin
   FDecoded     := False;
   FDecodedData := nil;
+end;
+
+procedure TPDFStream.StripEncryption;
+var
+  Raw: TBytes;
+begin
+  if (FDecryptionContext = nil) or (FDecryptObjNum = 0) then Exit;
+  Raw := RawBytes;   // force lazy load from file source
+  if System.Length(Raw) > 0 then
+    Raw := FDecryptionContext.DecryptBytes(Raw, FDecryptObjNum, FDecryptGenNum, True);
+  SetRawData(Raw);   // stores plaintext, clears FDecoded/FDecodedData/FSourceStream
+  FDecryptionContext := nil;
+  FDecryptObjNum     := 0;
+  FDecryptGenNum     := 0;
 end;
 
 function TPDFStream.Clone: TPDFObject;

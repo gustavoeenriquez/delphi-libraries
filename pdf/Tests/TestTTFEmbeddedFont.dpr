@@ -1,4 +1,4 @@
-program TestTTFEmbeddedFont;
+﻿program TestTTFEmbeddedFont;
 
 {$APPTYPE CONSOLE}
 {$SCOPEDENUMS ON}

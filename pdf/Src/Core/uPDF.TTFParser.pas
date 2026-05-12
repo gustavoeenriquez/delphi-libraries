@@ -1,4 +1,4 @@
-unit uPDF.TTFParser;
+﻿unit uPDF.TTFParser;
 
 {$SCOPEDENUMS ON}
 

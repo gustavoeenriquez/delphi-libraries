@@ -57,6 +57,8 @@ type
     FRenderH:   Single;
     // Page-flip + scale matrix (PDF → screen)
     FPageFlip:  TMatrix;
+    // Accumulates glyph outlines (device space) during a BT..ET block for clip modes
+    FTextClipBuilder: ISkPathBuilder;
 
     // ---- Content-stream callbacks ----
     procedure OnPaintPath(const APath: TPDFPath;
@@ -72,6 +74,8 @@ type
                                  const AState: TPDFGraphicsState);
     procedure OnSaveRestore(AIsSave: Boolean;
                             const AState: TPDFGraphicsState);
+    procedure OnTextBlock(AIsBT: Boolean;
+                          const AState: TPDFGraphicsState);
 
     // ---- Internal helpers ----
     function  BuildSkPath(const APath: TPDFPath;
@@ -431,6 +435,24 @@ begin
 end;
 
 // -------------------------------------------------------------------------
+procedure TPDFSkiaRenderer.OnTextBlock(AIsBT: Boolean;
+  const AState: TPDFGraphicsState);
+begin
+  if AIsBT then
+    FTextClipBuilder := nil
+  else
+  begin
+    if FTextClipBuilder <> nil then
+    begin
+      var ClipPath := FTextClipBuilder.Detach;
+      FCanvas.SetMatrix(TMatrix.Identity);
+      FCanvas.ClipPath(ClipPath, TSkClipOp.Intersect, FOptions.Antialias);
+      FTextClipBuilder := nil;
+    end;
+  end;
+end;
+
+// -------------------------------------------------------------------------
 procedure TPDFSkiaRenderer.OnPaintPath(const APath: TPDFPath;
   const AState: TPDFGraphicsState; AOp: TPDFPaintOp);
 var
@@ -533,6 +555,22 @@ begin
 
   FCanvas.SetMatrix(TextMatrix(AGlyph.GlyphMatrix));
 
+  // For clip-variant modes: accumulate glyph outlines in device space for ET
+  if Mode in [TPDFTextRenderMode.FillAndClip, TPDFTextRenderMode.StrokeAndClip,
+              TPDFTextRenderMode.FillStrokeClip, TPDFTextRenderMode.Clip] then
+  begin
+    var Glyphs := Font.GetGlyphs(Unicode);
+    if FTextClipBuilder = nil then
+      FTextClipBuilder := TSkPathBuilder.Create;
+    var DevMat := FCanvas.GetLocalToDeviceAs3x3;
+    for var G in Glyphs do
+    begin
+      var P := Font.GetPath(G);
+      if P <> nil then
+        FTextClipBuilder.AddPath(P.Transform(DevMat));
+    end;
+  end;
+
   case Mode of
     TPDFTextRenderMode.Fill,
     TPDFTextRenderMode.FillAndClip:
@@ -575,7 +613,8 @@ begin
       Paint.Blender     := TSkBlender.MakeMode(PDFBlendToSkia(AState.BlendMode));
       FCanvas.DrawSimpleText(Unicode, 0, 0, Font, Paint);
     end;
-    // TPDFTextRenderMode.Clip, etc.: clip-only modes — TODO Phase 8
+
+    TPDFTextRenderMode.Clip: ; // path-only clip — outline accumulated above, applied at ET
   end;
 end;
 
@@ -642,10 +681,10 @@ end;
 procedure TPDFSkiaRenderer.DrawPDFImage(AImage: TPDFImage;
   const ACanvasMatrix: TMatrix);
 var
-  SkImg:     ISkImage;
-  ImgInfo:   TSkImageInfo;
-  RGBA:      TBytes;
-  Paint:     ISkPaint;
+  SkImg:   ISkImage;
+  ImgInfo: TSkImageInfo;
+  RGBA:    TBytes;
+  Paint:   ISkPaint;
 begin
   if (AImage.Width <= 0) or (AImage.Height <= 0) then Exit;
 
@@ -653,14 +692,39 @@ begin
 
   if AImage.IsJPEG then
   begin
-    // JPEG: pass encoded bytes directly to Skia
     var Samples := AImage.Samples;
     if Length(Samples) > 0 then
-      SkImg := TSkImage.MakeFromEncoded(Samples);
+    begin
+      var JpegImg := TSkImage.MakeFromEncoded(Samples);
+      if (JpegImg <> nil) and (AImage.SMask <> nil) then
+      begin
+        // JPEG + soft-mask: decode JPEG pixels via ReadPixels, then bake SMask into alpha.
+        var W := AImage.Width;
+        var H := AImage.Height;
+        var ReadInfo := TSkImageInfo.Create(W, H, TSkColorType.RGBA8888, TSkAlphaType.Unpremul);
+        SetLength(RGBA, W * H * 4);
+        if JpegImg.ReadPixels(ReadInfo, @RGBA[0], NativeUInt(W) * 4) then
+        begin
+          var MaskSamples := AImage.SMask.Samples;
+          for var I := 0 to W * H - 1 do
+          begin
+            var A: Byte;
+            if I < Length(MaskSamples) then A := MaskSamples[I] else A := 255;
+            RGBA[I*4+3] := A;
+          end;
+          ImgInfo := TSkImageInfo.Create(W, H, TSkColorType.RGBA8888, TSkAlphaType.Unpremul);
+          SkImg := TSkImage.MakeFromRaster(ImgInfo, @RGBA[0], NativeUInt(W) * 4);
+        end
+        else
+          SkImg := JpegImg; // ReadPixels failed — render opaque
+      end
+      else
+        SkImg := JpegImg;
+    end;
   end
   else
   begin
-    // Raw pixels: convert to RGBA8888
+    // Raw pixels: ToRGBA already applies SMask into the alpha channel
     RGBA := AImage.ToRGBA;
     if Length(RGBA) > 0 then
     begin
@@ -675,14 +739,6 @@ begin
 
   Paint := TSkPaint.Create;
   Paint.AntiAlias := FOptions.Antialias;
-
-  // Apply optional soft mask alpha
-  if (AImage.SMask <> nil) then
-  begin
-    // Simplified: use the soft-mask average luminosity as a global alpha
-    // Full soft-mask compositing requires off-screen layer — TODO Phase 8
-    Paint.AlphaF := 0.9;
-  end;
 
   FCanvas.SetMatrix(ACanvasMatrix);
   // Draw into the unit square [0,0]-[1,1]; ImageMatrix already corrects Y-flip
@@ -744,6 +800,8 @@ begin
       FCanvas.ClipPath(BBoxBuilder.Detach, TSkClipOp.Intersect, False);
     end;
 
+    var SavedClipBuilder := FTextClipBuilder;
+    FTextClipBuilder := nil;
     Processor := TPDFContentStreamProcessor.Create;
     try
       Processor.OnPaintPath        := OnPaintPath;
@@ -751,9 +809,11 @@ begin
       Processor.OnPaintXObject     := OnPaintXObject;
       Processor.OnPaintInlineImage := OnPaintInlineImage;
       Processor.OnSaveRestore      := OnSaveRestore;
+      Processor.OnTextBlock        := OnTextBlock;
       Processor.Process(FormBytes, FormRes, FPage.Document.Resolver);
     finally
       Processor.Free;
+      FTextClipBuilder := SavedClipBuilder;
     end;
   finally
     FCanvas.Restore;
@@ -795,6 +855,7 @@ begin
 
   Resources := TPDFPageResources.Create(APage);
 
+  FTextClipBuilder := nil;
   Processor := TPDFContentStreamProcessor.Create;
   try
     Processor.OnPaintPath        := OnPaintPath;
@@ -802,6 +863,7 @@ begin
     Processor.OnPaintXObject     := OnPaintXObject;
     Processor.OnPaintInlineImage := OnPaintInlineImage;
     Processor.OnSaveRestore      := OnSaveRestore;
+    Processor.OnTextBlock        := OnTextBlock;
     Processor.Process(Content, Resources, APage.Document.Resolver);
   finally
     Processor.Free;

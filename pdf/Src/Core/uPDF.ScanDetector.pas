@@ -1,4 +1,4 @@
-unit uPDF.ScanDetector;
+﻿unit uPDF.ScanDetector;
 
 {$SCOPEDENUMS ON}
 

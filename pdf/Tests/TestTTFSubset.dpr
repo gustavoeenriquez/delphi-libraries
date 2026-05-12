@@ -1,4 +1,4 @@
-program TestTTFSubset;
+﻿program TestTTFSubset;
 
 {$APPTYPE CONSOLE}
 {$SCOPEDENUMS ON}

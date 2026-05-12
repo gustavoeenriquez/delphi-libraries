@@ -388,9 +388,12 @@ begin
     StreamObj.SetRawData(Data);
   end;
 
-  // Skip past the stream body and 'endstream' keyword
+  // Skip past the stream body to 'endstream'.
+  // IMPORTANT: use SeekTo(StreamDataOffset + Len) instead of SkipBytes(Len)
+  // because GetAsInteger('Length') above may call LoadObject → SeekTo, leaving
+  // the lexer at an arbitrary position (e.g. after the resolved length object).
   if Len > 0 then
-    ALexer.SkipBytes(Len);
+    ALexer.SeekTo(StreamDataOffset + Len);
 
   // Skip optional whitespace + 'endstream'
   var EndTok := ALexer.NextToken;

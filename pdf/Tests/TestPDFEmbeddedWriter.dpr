@@ -1,4 +1,4 @@
-program TestPDFEmbeddedWriter;
+﻿program TestPDFEmbeddedWriter;
 
 {$APPTYPE CONSOLE}
 {$SCOPEDENUMS ON}

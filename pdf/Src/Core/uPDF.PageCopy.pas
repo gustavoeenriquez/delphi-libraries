@@ -1,4 +1,4 @@
-unit uPDF.PageCopy;
+﻿unit uPDF.PageCopy;
 
 {$SCOPEDENUMS ON}
 

@@ -16,7 +16,7 @@ No DLLs, no C bindings, no external dependencies beyond the Delphi RTL.
 | **TTF/OTF font embedding (Identity-H, CIDFontType2, ISO 32000 §9.9)** | ✅ |
 | Text extraction | ✅ |
 | Image extraction | ✅ |
-| Encryption (RC4 + AES-128/256) | ✅ |
+| Encryption (RC4 + AES-128/256) read + full rewrite / decrypt-and-save | ✅ |
 | AcroForms field enumeration | ✅ |
 | AcroForms fill + appearance stream generation | ✅ |
 | Annotations, Outline (bookmarks) | ✅ |
@@ -75,6 +75,26 @@ try
     if not Doc.Authenticate('userpassword') then
       raise Exception.Create('Wrong password');
   // read pages normally ...
+finally
+  Doc.Free;
+end;
+```
+
+### Save an encrypted PDF as a plain (unencrypted) copy
+
+`SaveToStream` / `SaveToFile` performs a full rewrite that automatically strips
+encryption from all streams (RC4 and AES).  The output is a standard PDF with
+no `/Encrypt` dictionary.
+
+```pascal
+uses uPDF.Types, uPDF.Document;
+
+var Doc := TPDFDocument.Create;
+try
+  Doc.LoadFromFile('protected.pdf');
+  if Doc.IsEncrypted then
+    Doc.Authenticate('userpassword');   // empty string tries the blank password
+  Doc.SaveToFile('unlocked.pdf');       // output is unencrypted
 finally
   Doc.Free;
 end;
@@ -608,7 +628,8 @@ PDFViewerControl1.ZoomFit;
 | TestTTFParser (tables, CharToGlyph, metrics, embedding permission) | 51 ✅ |
 | TestTTFEmbeddedFont (widths, EncodeTextHex, CMap, subset bytes, PDF objects) | 51 ✅ |
 | TestPDFEmbeddedWriter (structure, content encoding, multi-page, conformance) | 40 ✅ |
-| **Total** | **322+ ✅** |
+| TestDocumentSave (round-trip, page ops, metadata, LZW, encrypted save) | 69 ✅ |
+| **Total** | **391+ ✅** |
 
 Run the tests:
 

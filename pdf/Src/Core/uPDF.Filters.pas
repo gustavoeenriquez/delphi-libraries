@@ -711,8 +711,160 @@ begin
 end;
 
 procedure TPDFLZWFilter.Encode(AInput: TStream; AOutput: TStream; AParams: TObject);
+// LZW encode — MSB-first bits, EarlyChange=1 (PDF default).
+// The table maps (prefix_code, byte) → code via open-addressing hash.
+//
+// Synchronization note: the decoder adds table entry E when it *reads* code
+// c_k (using OldCode + first char of c_k).  The encoder adds the same entry E
+// when it *writes* c_{k-1} — one code earlier.  Therefore the code-size bump
+// must be deferred one write (PendingBump) so encoder and decoder widen their
+// bit-windows at the identical position in the stream.
+const
+  CLEAR_CODE = 256;
+  EOD_CODE   = 257;
+  MAX_CODES  = 4096;
+  HASH_SIZE  = 5003;   // prime > MAX_CODES
+var
+  HPrefix:     array[0..HASH_SIZE-1] of Integer;  // -1 = empty slot
+  HChar:       array[0..HASH_SIZE-1] of Byte;
+  HCode:       array[0..HASH_SIZE-1] of Integer;
+  BitBuf:      UInt32;
+  BitsLeft:    Integer;
+  CodeSize:    Integer;
+  NextCode:    Integer;
+  Current:     Integer;
+  Ch:          Byte;
+  Found:       Integer;
+  Started:     Boolean;
+  PendingBump: Boolean;   // deferred CodeSize increment
+
+  procedure WriteCode(ACode: Integer);
+  var B: Byte;
+  begin
+    BitBuf   := (BitBuf shl CodeSize) or UInt32(ACode);
+    Inc(BitsLeft, CodeSize);
+    while BitsLeft >= 8 do
+    begin
+      Dec(BitsLeft, 8);
+      B := (BitBuf shr BitsLeft) and $FF;
+      AOutput.Write(B, 1);
+    end;
+  end;
+
+  procedure ResetTable;
+  begin
+    CodeSize    := 9;
+    NextCode    := 258;
+    PendingBump := False;
+    FillChar(HPrefix, SizeOf(HPrefix), $FF);
+  end;
+
+  function HashOf(APrefix, ACh: Integer): Integer; inline;
+  begin
+    Result := Integer((UInt32(APrefix + 1) * 256 + UInt32(ACh)) mod HASH_SIZE);
+  end;
+
+  function StepOf(APrefix, ACh: Integer): Integer; inline;
+  begin
+    Result := 1 + Integer((UInt32(APrefix + 1) * 256 + UInt32(ACh)) mod (HASH_SIZE - 1));
+  end;
+
+  function FindCode(APrefix, ACh: Integer): Integer;
+  var H2, S2: Integer;
+  begin
+    H2 := HashOf(APrefix, ACh);
+    S2 := StepOf(APrefix, ACh);
+    while HPrefix[H2] >= 0 do
+    begin
+      if (HPrefix[H2] = APrefix) and (HChar[H2] = ACh) then
+        Exit(HCode[H2]);
+      H2 := (H2 + S2) mod HASH_SIZE;
+    end;
+    Result := -1;
+  end;
+
+  procedure AddCode(APrefix, ACh, ACode: Integer);
+  var H2, S2: Integer;
+  begin
+    H2 := HashOf(APrefix, ACh);
+    S2 := StepOf(APrefix, ACh);
+    while HPrefix[H2] >= 0 do
+      H2 := (H2 + S2) mod HASH_SIZE;
+    HPrefix[H2] := APrefix;
+    HChar[H2]   := ACh;
+    HCode[H2]   := ACode;
+  end;
+
 begin
-  raise EPDFNotSupportedError.Create('LZW encoding not implemented');
+  AInput.Position := 0;
+  BitBuf      := 0;
+  BitsLeft    := 0;
+  Started     := False;
+  Current     := 0;
+  PendingBump := False;
+  ResetTable;
+
+  WriteCode(CLEAR_CODE);
+
+  while AInput.Read(Ch, 1) = 1 do
+  begin
+    if not Started then
+    begin
+      Current := Ch;
+      Started := True;
+      Continue;
+    end;
+
+    Found := FindCode(Current, Ch);
+    if Found >= 0 then
+      Current := Found
+    else
+    begin
+      WriteCode(Current);
+
+      // Apply the deferred bump after writing: this keeps the encoder and
+      // decoder code-width windows aligned (decoder bumps after *reading* the
+      // code that triggers NextCode == 2^CodeSize; encoder must therefore bump
+      // after *writing* that same code, not one code earlier).
+      if PendingBump then
+      begin
+        Inc(CodeSize);
+        PendingBump := False;
+      end;
+
+      if NextCode < MAX_CODES then
+      begin
+        AddCode(Current, Ch, NextCode);
+        Inc(NextCode);
+        if (NextCode = (1 shl CodeSize)) and (CodeSize < 12) then
+          PendingBump := True;
+      end
+      else
+      begin
+        WriteCode(CLEAR_CODE);
+        ResetTable;   // also resets PendingBump
+      end;
+
+      Current := Ch;
+    end;
+  end;
+
+  if Started then
+  begin
+    if PendingBump then
+    begin
+      Inc(CodeSize);
+      PendingBump := False;
+    end;
+    WriteCode(Current);
+  end;
+  WriteCode(EOD_CODE);
+
+  if BitsLeft > 0 then
+  begin
+    var B: Byte := Byte((BitBuf shl (8 - BitsLeft)) and $FF);
+    AOutput.Write(B, 1);
+  end;
 end;
 
 // =========================================================================

@@ -233,6 +233,12 @@ type
     procedure AddStandardFont(APageDict: TPDFDictionary;
                 const AResName, ABaseFontName: string);
 
+    // ---- Content ----
+    // Set the content stream for a page created with AddPage.
+    // AContent: raw PDF operators from TPDFContentBuilder.Build.
+    // A second call on the same page overwrites the previous content.
+    procedure SetPageContent(APageDict: TPDFDictionary; const AContent: TBytes);
+
     // ---- Save ----
     procedure SaveToStream(AStream: TStream;
       const AOptions: TPDFWriteOptions); overload;
@@ -1362,6 +1368,16 @@ begin
   FD.SetValue('BaseFont', TPDFName.Create(ABaseFontName));
   FD.SetValue('Encoding', TPDFName.Create('WinAnsiEncoding'));
   FontDict.SetValue(AResName, FD);
+end;
+
+procedure TPDFBuilder.SetPageContent(APageDict: TPDFDictionary;
+  const AContent: TBytes);
+var
+  Stm: TPDFStream;
+begin
+  Stm := TPDFStream.Create;
+  Stm.SetRawData(AContent);
+  APageDict.SetValue('Contents', Stm);
 end;
 
 function TPDFBuilder.AddEmbeddedFont(APageDict: TPDFDictionary;

@@ -1,4 +1,4 @@
-program TestTTFParser;
+﻿program TestTTFParser;
 
 // Tests for uPDF.TTFParser — Phase 1 of TTF/OTF font embedding.
 // Uses Windows system fonts (arial.ttf, calibri.ttf) as fixtures;

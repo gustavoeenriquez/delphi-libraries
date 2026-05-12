@@ -1,4 +1,4 @@
-program DemoEmbeddedFont;
+﻿program DemoEmbeddedFont;
 
 {$APPTYPE CONSOLE}
 {$SCOPEDENUMS ON}

@@ -1,4 +1,4 @@
-unit uPDF.Watermark;
+﻿unit uPDF.Watermark;
 
 {$SCOPEDENUMS ON}
 

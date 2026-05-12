@@ -1,4 +1,4 @@
-unit uPDF.TOC;
+﻿unit uPDF.TOC;
 
 {$SCOPEDENUMS ON}
 

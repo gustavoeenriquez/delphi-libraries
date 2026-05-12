@@ -1,4 +1,4 @@
-unit uPDF.TextSearch;
+﻿unit uPDF.TextSearch;
 
 {$SCOPEDENUMS ON}
 

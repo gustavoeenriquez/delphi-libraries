@@ -22,16 +22,22 @@ type
     FPages:       TObjectList<TPDFPage>;
     FVersion:     TPDFVersion;
     FIsOpen:      Boolean;
-    FDecryptor:   TPDFDecryptor; // nil for unencrypted PDFs
+    FDecryptor:   IDecryptionContext; // nil for unencrypted PDFs
     FNextObjNum:  Integer;       // For write path: next available object number
+    FInfoDict:    TPDFDictionary; // owned; nil until first metadata setter call
 
     procedure LoadPages;
     procedure LoadPageTree(ANode: TPDFDictionary; AInherit: TPDFDictionary);
+    procedure DoFullRewriteFromParser(AStream: TStream);
+    procedure DoFullRewriteFromScratch(AStream: TStream);
 
     function  GetPageCount: Integer;
     function  GetPage(AIndex: Integer): TPDFPage;
     function  GetIsEncrypted: Boolean;
     function  NewObjectNumber: Integer;
+    function  EnsureInfoDict: TPDFDictionary;
+    function  GetInfoString(const AKey: string): string;
+    procedure SetInfoString(const AKey, AValue: string);
 
   public
     constructor Create;
@@ -61,9 +67,15 @@ type
     function  GetProducer: string;
     procedure SetTitle(const AValue: string);
     procedure SetAuthor(const AValue: string);
+    procedure SetSubject(const AValue: string);
+    procedure SetCreator(const AValue: string);
+    procedure SetProducer(const AValue: string);
 
     property  Title:    string read GetTitle    write SetTitle;
     property  Author:   string read GetAuthor   write SetAuthor;
+    property  Subject:  string read GetSubject  write SetSubject;
+    property  Creator:  string read GetCreator  write SetCreator;
+    property  Producer: string read GetProducer write SetProducer;
 
     // ---- State ----
     property  Version:     TPDFVersion read FVersion;
@@ -99,6 +111,8 @@ type
     FMediaBox:        TPDFRect;
     FCropBox:         TPDFRect;
     FRotation:        Integer;
+    FOrigObjNum:             Integer;  // obj# in source file (0 = created fresh via AddPage)
+    FPendingContentOverride: TBytes;   // set by AppendContent; merged into /Contents on SaveToStream
 
     function  GetWidth: Single;
     function  GetHeight: Single;
@@ -110,7 +124,7 @@ type
 
   public
     constructor Create(ADocument: TPDFDocument; ADict: TPDFDictionary;
-      AIndex: Integer);
+      AIndex: Integer; AOrigObjNum: Integer = 0);
     destructor  Destroy; override;
 
     // Page geometry (after applying rotation)
@@ -132,6 +146,12 @@ type
     // Resolve a resource by type and name, e.g. ('Font', 'F1')
     function  GetResource(const AType, AName: string): TPDFObject;
 
+    // Append PDF operators on top of existing page content.
+    // AOperators: raw bytes from TPDFContentBuilder.Build.
+    // Takes effect when the parent TPDFDocument.SaveToStream is called.
+    // Can be called multiple times; each call appends to the previous result.
+    procedure AppendContent(const AOperators: TBytes);
+
     property  PageIndex: Integer read FPageIndex;
     property  Document:  TPDFDocument read FDocument;
   end;
@@ -139,7 +159,8 @@ type
 implementation
 
 uses
-  System.Math;
+  System.Math,
+  uPDF.Writer;
 
 // =========================================================================
 // TPDFDocument
@@ -156,7 +177,7 @@ end;
 
 destructor TPDFDocument.Destroy;
 begin
-  FDecryptor.Free;
+  FInfoDict.Free;
   FPages.Free;
   FParser.Free;   // owns pool → destroys all PDF objects
   inherited;
@@ -326,7 +347,7 @@ begin
             MergedDict.SetValue(K, V.Clone);
         end);
 
-      var Page := TPDFPage.Create(Self, MergedDict, FPages.Count);
+      var Page := TPDFPage.Create(Self, MergedDict, FPages.Count, ANode.ID.Number);
       FPages.Add(Page);
     except
       MergedDict.Free;
@@ -391,63 +412,90 @@ begin
 end;
 
 // =========================================================================
+// Metadata helpers
+// =========================================================================
+
+// Encode a Unicode string as PDF text string (UTF-16 BE with BOM $FE $FF).
+function UnicodeStringToPDFBytes(const S: string): RawByteString;
+var
+  I: Integer;
+  W: Word;
+begin
+  if S = '' then begin Result := ''; Exit; end;
+  SetLength(Result, 2 + Length(S) * 2);
+  PByte(@Result[1])^ := $FE;
+  PByte(@Result[2])^ := $FF;
+  for I := 1 to Length(S) do
+  begin
+    W := Ord(S[I]);
+    PByte(@Result[2 + (I - 1) * 2 + 1])^ := W shr 8;
+    PByte(@Result[2 + (I - 1) * 2 + 2])^ := W and $FF;
+  end;
+end;
+
+// Return FInfoDict, creating and initialising it on first call.
+// For loaded documents the parser's Info entries are cloned in so existing
+// metadata is preserved when only some fields are updated.
+function TPDFDocument.EnsureInfoDict: TPDFDictionary;
+begin
+  if FInfoDict = nil then
+  begin
+    if FParser <> nil then
+    begin
+      var InfoRef := FParser.Trailer.Get('Info');
+      if (InfoRef <> nil) and InfoRef.IsDictionary then
+        FInfoDict := TPDFDictionary(InfoRef.Clone)
+      else
+        FInfoDict := TPDFDictionary.Create;
+    end
+    else
+      FInfoDict := TPDFDictionary.Create;
+  end;
+  Result := FInfoDict;
+end;
+
+// =========================================================================
 // Metadata
 // =========================================================================
 
-function TPDFDocument.GetTitle: string;
+function TPDFDocument.GetInfoString(const AKey: string): string;
 begin
-  var InfoRef := FParser.Trailer.Get('Info');
-  if (InfoRef <> nil) and InfoRef.IsDictionary then
-    Result := TPDFDictionary(InfoRef).GetAsUnicodeString('Title')
+  if FInfoDict <> nil then
+    Result := FInfoDict.GetAsUnicodeString(AKey)
+  else if FParser <> nil then
+  begin
+    var InfoRef := FParser.Trailer.Get('Info');
+    if (InfoRef <> nil) and InfoRef.IsDictionary then
+      Result := TPDFDictionary(InfoRef).GetAsUnicodeString(AKey)
+    else
+      Result := '';
+  end
   else
     Result := '';
 end;
 
-function TPDFDocument.GetAuthor: string;
+procedure TPDFDocument.SetInfoString(const AKey, AValue: string);
+var
+  Info: TPDFDictionary;
 begin
-  var InfoRef := FParser.Trailer.Get('Info');
-  if (InfoRef <> nil) and InfoRef.IsDictionary then
-    Result := TPDFDictionary(InfoRef).GetAsUnicodeString('Author')
+  Info := EnsureInfoDict;
+  if AValue = '' then
+    Info.Remove(AKey)
   else
-    Result := '';
+    Info.SetValue(AKey, TPDFString.Create(UnicodeStringToPDFBytes(AValue), False));
 end;
 
-function TPDFDocument.GetSubject: string;
-begin
-  var InfoRef := FParser.Trailer.Get('Info');
-  if (InfoRef <> nil) and InfoRef.IsDictionary then
-    Result := TPDFDictionary(InfoRef).GetAsUnicodeString('Subject')
-  else
-    Result := '';
-end;
+function TPDFDocument.GetTitle:    string; begin Result := GetInfoString('Title');    end;
+function TPDFDocument.GetAuthor:   string; begin Result := GetInfoString('Author');   end;
+function TPDFDocument.GetSubject:  string; begin Result := GetInfoString('Subject');  end;
+function TPDFDocument.GetCreator:  string; begin Result := GetInfoString('Creator');  end;
+function TPDFDocument.GetProducer: string; begin Result := GetInfoString('Producer'); end;
 
-function TPDFDocument.GetCreator: string;
-begin
-  var InfoRef := FParser.Trailer.Get('Info');
-  if (InfoRef <> nil) and InfoRef.IsDictionary then
-    Result := TPDFDictionary(InfoRef).GetAsUnicodeString('Creator')
-  else
-    Result := '';
-end;
-
-function TPDFDocument.GetProducer: string;
-begin
-  var InfoRef := FParser.Trailer.Get('Info');
-  if (InfoRef <> nil) and InfoRef.IsDictionary then
-    Result := TPDFDictionary(InfoRef).GetAsUnicodeString('Producer')
-  else
-    Result := '';
-end;
-
-procedure TPDFDocument.SetTitle(const AValue: string);
-begin
-  // TODO: create/update Info dict
-end;
-
-procedure TPDFDocument.SetAuthor(const AValue: string);
-begin
-  // TODO: create/update Info dict
-end;
+procedure TPDFDocument.SetTitle(const AValue: string);    begin SetInfoString('Title',    AValue); end;
+procedure TPDFDocument.SetAuthor(const AValue: string);   begin SetInfoString('Author',   AValue); end;
+procedure TPDFDocument.SetSubject(const AValue: string);  begin SetInfoString('Subject',  AValue); end;
+procedure TPDFDocument.SetCreator(const AValue: string);  begin SetInfoString('Creator',  AValue); end;
+procedure TPDFDocument.SetProducer(const AValue: string); begin SetInfoString('Producer', AValue); end;
 
 // =========================================================================
 // Encryption / Authentication
@@ -505,8 +553,7 @@ begin
     Exit;
   end;
 
-  FDecryptor.Free;
-  FDecryptor := Decryptor;
+  FDecryptor := Decryptor;   // interface assignment releases old value, AddRefs new
   FParser.SetDecryptionContext(FDecryptor);
   Result := True;
 end;
@@ -517,7 +564,14 @@ end;
 
 procedure TPDFDocument.SaveToStream(AStream: TStream; AMode: TPDFSaveMode);
 begin
-  raise EPDFNotSupportedError.Create('PDF writing not yet implemented (Phase 5)');
+  if AMode = TPDFSaveMode.Incremental then
+    raise EPDFNotSupportedError.Create(
+      'Incremental save is not available on TPDFDocument; use TPDFIncrementalUpdater');
+
+  if FParser <> nil then
+    DoFullRewriteFromParser(AStream)
+  else
+    DoFullRewriteFromScratch(AStream);
 end;
 
 procedure TPDFDocument.SaveToFile(const APath: string; AMode: TPDFSaveMode);
@@ -530,17 +584,269 @@ begin
   end;
 end;
 
+// -------------------------------------------------------------------------
+// DoFullRewriteFromParser
+// Walk the parser's XRef, clone every object, replace the /Pages tree with
+// the current FPages list (pages may have been modified/added/removed), and
+// write a fresh PDF using TPDFWriter.WriteFull.
+// -------------------------------------------------------------------------
+procedure TPDFDocument.DoFullRewriteFromParser(AStream: TStream);
+var
+  Objects:      TObjectDictionary<Integer, TPDFObject>;
+  PagesObjNum:  Integer;
+  CatalogObjNum: Integer;
+  PageObjNums:  TArray<Integer>;
+  NextNew:      Integer;
+  I:            Integer;
+begin
+  Objects := TObjectDictionary<Integer, TPDFObject>.Create([doOwnsValues]);
+  try
+    // ---- Step 1: clone every in-use object from the XRef ----
+    NextNew := FParser.XRef.HighestObjectNumber + 1;
+
+    FParser.XRef.ForEach(
+      procedure(ObjNum: Integer; Entry: TPDFXRefEntry)
+      var
+        Obj: TPDFObject;
+        ObjType: string;
+      begin
+        if Entry.EntryType = TPDFXRefEntryType.Free then Exit;
+
+        Obj := FParser.LoadObject(ObjNum, Entry.Generation);
+        if (Obj = nil) or Obj.IsNull then Exit;
+
+        // Skip PDF 1.5 infrastructure streams (ObjStm, XRef streams) —
+        // constituent objects are written as plain indirect objects.
+        if Obj.IsStream then
+        begin
+          ObjType := TPDFStream(Obj).Dict.GetAsName('Type');
+          if (ObjType = 'ObjStm') or (ObjType = 'XRef') then Exit;
+          if FParser.IsEncrypted then
+            TPDFStream(Obj).StripEncryption  // decrypt in-place; preserves filters
+          else
+            TPDFStream(Obj).RawBytes;   // force lazy load before clone
+        end
+        else if Obj.IsDictionary then
+        begin
+          ObjType := TPDFDictionary(Obj).GetAsName('Type');
+          if ObjType = 'XRef' then Exit;
+        end;
+
+        Objects.AddOrSetValue(ObjNum, Obj.Clone);
+      end);
+
+    // ---- Step 2: find /Pages root obj# ----
+    PagesObjNum := 0;
+    var PagesRaw := FCatalog.RawGet('Pages');
+    if (PagesRaw <> nil) and PagesRaw.IsReference then
+      PagesObjNum := TPDFReference(PagesRaw).RefID.Number
+    else
+    begin
+      var PagesObj := FCatalog.Get('Pages');
+      if (PagesObj <> nil) and (PagesObj.ID.Number > 0) then
+        PagesObjNum := PagesObj.ID.Number;
+    end;
+    if PagesObjNum = 0 then
+    begin
+      PagesObjNum := NextNew;
+      Inc(NextNew);
+    end;
+
+    // ---- Step 3: assign obj#s to current pages ----
+    SetLength(PageObjNums, FPages.Count);
+    for I := 0 to FPages.Count - 1 do
+    begin
+      if FPages[I].FOrigObjNum > 0 then
+        PageObjNums[I] := FPages[I].FOrigObjNum
+      else
+      begin
+        PageObjNums[I] := NextNew;
+        Inc(NextNew);
+      end;
+    end;
+
+    // ---- Step 4: rebuild flat /Pages tree ----
+    var NewPagesDict := TPDFDictionary.Create;
+    NewPagesDict.SetValue('Type',  TPDFName.Create('Pages'));
+    NewPagesDict.SetValue('Count', TPDFInteger.Create(FPages.Count));
+    var KidsArr := TPDFArray.Create;
+    for I := 0 to FPages.Count - 1 do
+      KidsArr.Add(TPDFReference.CreateNum(PageObjNums[I], 0));
+    NewPagesDict.SetValue('Kids', KidsArr);
+    Objects.AddOrSetValue(PagesObjNum, NewPagesDict);
+
+    // ---- Step 5: write page dicts from FPages (with any modifications) ----
+    for I := 0 to FPages.Count - 1 do
+    begin
+      var PageDict := TPDFDictionary(FPages[I].FDict.Clone);
+      PageDict.SetValue('Type',   TPDFName.Create('Page'));
+      PageDict.SetValue('Parent', TPDFReference.CreateNum(PagesObjNum, 0));
+      PageDict.Remove('Kids');   // not a valid key on leaf pages
+
+      // AppendContent override: register a new content stream and point /Contents to it
+      if Length(FPages[I].FPendingContentOverride) > 0 then
+      begin
+        var ContentObjNum := NextNew;
+        Inc(NextNew);
+        var ContentStm := TPDFStream.Create;
+        ContentStm.SetRawData(FPages[I].FPendingContentOverride);
+        ContentStm.Dict.SetValue('Length',
+          TPDFInteger.Create(Length(FPages[I].FPendingContentOverride)));
+        Objects.AddOrSetValue(ContentObjNum, ContentStm);
+        PageDict.SetValue('Contents', TPDFReference.CreateNum(ContentObjNum, 0));
+      end;
+
+      Objects.AddOrSetValue(PageObjNums[I], PageDict);
+    end;
+
+    // ---- Step 6: find catalog obj# and ensure /Pages ref is correct ----
+    CatalogObjNum := 0;
+    var RootRaw := FParser.Trailer.RawGet('Root');
+    if (RootRaw <> nil) and RootRaw.IsReference then
+      CatalogObjNum := TPDFReference(RootRaw).RefID.Number
+    else if (FCatalog <> nil) and (FCatalog.ID.Number > 0) then
+      CatalogObjNum := FCatalog.ID.Number;
+
+    var CatObj: TPDFObject;
+    if (CatalogObjNum > 0) and Objects.TryGetValue(CatalogObjNum, CatObj) and
+       CatObj.IsDictionary then
+      TPDFDictionary(CatObj).SetValue('Pages',
+        TPDFReference.CreateNum(PagesObjNum, 0));
+
+    // ---- Step 7: locate catalog and info dicts for WriteFull ----
+    var CatalogDict: TPDFDictionary := nil;
+    var InfoDict:    TPDFDictionary := nil;
+
+    if (CatalogObjNum > 0) and Objects.TryGetValue(CatalogObjNum, CatObj) and
+       CatObj.IsDictionary then
+      CatalogDict := TPDFDictionary(CatObj);
+
+    if FInfoDict <> nil then
+    begin
+      // Metadata was set — inject FInfoDict into Objects (reuse original obj# if present)
+      var InfoObjNum: Integer := 0;
+      var InfoRawRef := FParser.Trailer.RawGet('Info');
+      if (InfoRawRef <> nil) and InfoRawRef.IsReference then
+        InfoObjNum := TPDFReference(InfoRawRef).RefID.Number;
+      if InfoObjNum = 0 then
+      begin
+        InfoObjNum := NextNew;
+        Inc(NextNew);
+      end;
+      Objects.AddOrSetValue(InfoObjNum, FInfoDict.Clone);
+      InfoDict := TPDFDictionary(Objects[InfoObjNum]);
+    end
+    else
+    begin
+      var InfoRawRef := FParser.Trailer.RawGet('Info');
+      if (InfoRawRef <> nil) and InfoRawRef.IsReference then
+      begin
+        var InfoNum := TPDFReference(InfoRawRef).RefID.Number;
+        var InfoObj: TPDFObject;
+        if Objects.TryGetValue(InfoNum, InfoObj) and InfoObj.IsDictionary then
+          InfoDict := TPDFDictionary(InfoObj);
+      end;
+    end;
+
+    // ---- Step 8: write ----
+    var Opts := TPDFWriteOptions.Default;
+    Opts.Version := FVersion;
+    var Writer := TPDFWriter.Create(AStream, Opts);
+    try
+      Writer.WriteFull(CatalogDict, InfoDict, Objects);
+    finally
+      Writer.Free;
+    end;
+  finally
+    Objects.Free;
+  end;
+end;
+
+// -------------------------------------------------------------------------
+// DoFullRewriteFromScratch
+// Document was created with AddPage (no parser).  Serialise FPages as a
+// minimal PDF with a flat /Pages tree and no content streams.
+// -------------------------------------------------------------------------
+procedure TPDFDocument.DoFullRewriteFromScratch(AStream: TStream);
+var
+  Objects:  TObjectDictionary<Integer, TPDFObject>;
+  PageNums: TArray<Integer>;
+  PagesNum: Integer;
+  CatNum:   Integer;
+  I:        Integer;
+begin
+  Objects := TObjectDictionary<Integer, TPDFObject>.Create([doOwnsValues]);
+  try
+    FNextObjNum := 1;
+    CatNum   := FNextObjNum; Inc(FNextObjNum);
+    PagesNum := FNextObjNum; Inc(FNextObjNum);
+
+    SetLength(PageNums, FPages.Count);
+    for I := 0 to FPages.Count - 1 do
+    begin
+      PageNums[I] := FNextObjNum;
+      Inc(FNextObjNum);
+    end;
+
+    // /Pages tree
+    var PagesDict := TPDFDictionary.Create;
+    PagesDict.SetValue('Type',  TPDFName.Create('Pages'));
+    PagesDict.SetValue('Count', TPDFInteger.Create(FPages.Count));
+    var Kids := TPDFArray.Create;
+    for I := 0 to FPages.Count - 1 do
+      Kids.Add(TPDFReference.CreateNum(PageNums[I], 0));
+    PagesDict.SetValue('Kids', Kids);
+    Objects.Add(PagesNum, PagesDict);
+
+    // Page objects
+    for I := 0 to FPages.Count - 1 do
+    begin
+      var PageDict := TPDFDictionary(FPages[I].FDict.Clone);
+      PageDict.SetValue('Type',   TPDFName.Create('Page'));
+      PageDict.SetValue('Parent', TPDFReference.CreateNum(PagesNum, 0));
+      Objects.Add(PageNums[I], PageDict);
+    end;
+
+    // Catalog
+    var CatalogDict := TPDFDictionary.Create;
+    CatalogDict.SetValue('Type',  TPDFName.Create('Catalog'));
+    CatalogDict.SetValue('Pages', TPDFReference.CreateNum(PagesNum, 0));
+    Objects.Add(CatNum, CatalogDict);
+
+    // Inject Info dict if metadata was set
+    var InfoDictForWrite: TPDFDictionary := nil;
+    if FInfoDict <> nil then
+    begin
+      var InfoNum := FNextObjNum; Inc(FNextObjNum);
+      Objects.Add(InfoNum, FInfoDict.Clone);
+      InfoDictForWrite := TPDFDictionary(Objects[InfoNum]);
+    end;
+
+    var Opts := TPDFWriteOptions.Default;
+    Opts.Version := FVersion;
+    var Writer := TPDFWriter.Create(AStream, Opts);
+    try
+      Writer.WriteFull(CatalogDict, InfoDictForWrite, Objects);
+    finally
+      Writer.Free;
+    end;
+  finally
+    Objects.Free;
+  end;
+end;
+
 // =========================================================================
 // TPDFPage
 // =========================================================================
 
 constructor TPDFPage.Create(ADocument: TPDFDocument; ADict: TPDFDictionary;
-  AIndex: Integer);
+  AIndex: Integer; AOrigObjNum: Integer);
 begin
   inherited Create;
   FDocument   := ADocument;
   FDict       := ADict;
   FPageIndex  := AIndex;
+  FOrigObjNum := AOrigObjNum;
   FRotation   := FDict.GetAsInteger('Rotate', 0);
 
   // Normalize rotation to 0..270
@@ -650,6 +956,33 @@ end;
 function TPDFPage.ContentStreamBytes: TBytes;
 begin
   Result := BuildContentStream;
+end;
+
+procedure TPDFPage.AppendContent(const AOperators: TBytes);
+var
+  Current:   TBytes;
+  MergedLen: Integer;
+begin
+  if Length(AOperators) = 0 then Exit;
+
+  // Build on top of any previously-appended override, not the on-disk bytes,
+  // so successive AppendContent calls accumulate correctly.
+  if Length(FPendingContentOverride) > 0 then
+    Current := FPendingContentOverride
+  else
+    Current := BuildContentStream;
+
+  if Length(Current) = 0 then
+  begin
+    FPendingContentOverride := Copy(AOperators);
+    Exit;
+  end;
+
+  MergedLen := Length(Current) + 1 + Length(AOperators);
+  SetLength(FPendingContentOverride, MergedLen);
+  Move(Current[0],    FPendingContentOverride[0],               Length(Current));
+  FPendingContentOverride[Length(Current)] := Ord(' ');         // operator separator
+  Move(AOperators[0], FPendingContentOverride[Length(Current) + 1], Length(AOperators));
 end;
 
 end.

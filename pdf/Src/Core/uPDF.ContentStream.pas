@@ -109,6 +109,10 @@ type
   TPDFOnSaveRestore = reference to procedure(AIsSave: Boolean;
     const AState: TPDFGraphicsState);
 
+  // Called at BT (AIsBT=True) and ET (AIsBT=False)
+  TPDFOnTextBlock = reference to procedure(AIsBT: Boolean;
+    const AState: TPDFGraphicsState);
+
   // -------------------------------------------------------------------------
   // Resources wrapper (abstracts /Font, /XObject, /ColorSpace lookups)
   // -------------------------------------------------------------------------
@@ -141,6 +145,7 @@ type
     FOnPaintXObject:    TPDFOnPaintXObject;
     FOnPaintInlineImage:TPDFOnPaintInlineImage;
     FOnSaveRestore:     TPDFOnSaveRestore;
+    FOnTextBlock:       TPDFOnTextBlock;
 
     // Current text position (redundant with GS.Text but easier to access)
     FCurrentX, FCurrentY: Single;  // current point (user space)
@@ -269,6 +274,7 @@ type
     property OnPaintXObject:     TPDFOnPaintXObject      read FOnPaintXObject     write FOnPaintXObject;
     property OnPaintInlineImage: TPDFOnPaintInlineImage  read FOnPaintInlineImage write FOnPaintInlineImage;
     property OnSaveRestore:      TPDFOnSaveRestore       read FOnSaveRestore      write FOnSaveRestore;
+    property OnTextBlock:        TPDFOnTextBlock         read FOnTextBlock        write FOnTextBlock;
 
     // Access graphics state (read-only during processing)
     function GraphicsState: TPDFGraphicsStateStack;
@@ -1075,11 +1081,12 @@ procedure TPDFContentStreamProcessor.Op_BT(const A: TArray<TPDFObject>);
 begin
   FGS.CurrentRef^.Text.TextMatrix     := TPDFMatrix.Identity;
   FGS.CurrentRef^.Text.TextLineMatrix := TPDFMatrix.Identity;
+  if Assigned(FOnTextBlock) then FOnTextBlock(True, FGS.Current);
 end;
 
 procedure TPDFContentStreamProcessor.Op_ET(const A: TArray<TPDFObject>);
 begin
-  // End text block — no state change needed beyond what BT reset
+  if Assigned(FOnTextBlock) then FOnTextBlock(False, FGS.Current);
 end;
 
 procedure TPDFContentStreamProcessor.Op_Td(const A: TArray<TPDFObject>);

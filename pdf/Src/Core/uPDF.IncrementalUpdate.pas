@@ -1,4 +1,4 @@
-unit uPDF.IncrementalUpdate;
+﻿unit uPDF.IncrementalUpdate;
 
 {$SCOPEDENUMS ON}
 

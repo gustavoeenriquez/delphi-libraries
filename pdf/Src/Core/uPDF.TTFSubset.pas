@@ -1,4 +1,4 @@
-unit uPDF.TTFSubset;
+﻿unit uPDF.TTFSubset;
 
 {$SCOPEDENUMS ON}
 

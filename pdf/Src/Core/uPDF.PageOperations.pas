@@ -1,4 +1,4 @@
-unit uPDF.PageOperations;
+﻿unit uPDF.PageOperations;
 
 {$SCOPEDENUMS ON}
 

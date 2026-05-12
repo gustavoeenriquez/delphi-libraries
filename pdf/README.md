@@ -554,6 +554,48 @@ finally
 end;
 ```
 
+### Render a page to an image (headless / server-side)
+
+`TPDFSkiaRenderer` renders any page without a UI framework — useful for
+thumbnails, server-side preview generation, or batch export.
+
+```pascal
+uses uPDF.Types, uPDF.Document, uPDF.Render.Types, uPDF.Render.Skia;
+
+var
+  Doc      : TPDFDocument;
+  Renderer : TPDFSkiaRenderer;
+begin
+  Doc      := TPDFDocument.Create;
+  Renderer := TPDFSkiaRenderer.Create(TPDFRenderOptions.ForScreen);  // 96 DPI
+  try
+    Doc.LoadFromFile('document.pdf');
+
+    // Render page 0 to a PNG file (width × height in pixels)
+    Renderer.RenderPageToFile(Doc[0], 794, 1123, 'page1.png');
+
+    // Or get raw PNG bytes (e.g. to stream over HTTP)
+    var PngBytes := Renderer.RenderPageToPng(Doc[0], 794, 1123);
+    TFile.WriteAllBytes('page1_copy.png', PngBytes);
+
+    // Or get JPEG bytes at quality 85
+    var JpgBytes := Renderer.RenderPageToJpeg(Doc[0], 794, 1123, 85);
+    TFile.WriteAllBytes('page1.jpg', JpgBytes);
+  finally
+    Renderer.Free;
+    Doc.Free;
+  end;
+end;
+```
+
+`TPDFRenderOptions` presets:
+
+| Preset | DPI | Use |
+|---|:---:|---|
+| `TPDFRenderOptions.Default` | 72 | quick preview |
+| `TPDFRenderOptions.ForScreen` | 96 | screen display |
+| `TPDFRenderOptions.ForPrint(300)` | 300 | print-quality export |
+
 ### FMX visual viewer
 
 ```pascal

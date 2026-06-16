@@ -152,6 +152,12 @@ type
     // Can be called multiple times; each call appends to the previous result.
     procedure AppendContent(const AOperators: TBytes);
 
+    // Replace the ENTIRE page content stream with ABytes (overwrite, not
+    // append). Used by content-stream redaction after rewriting the operators.
+    // Takes effect on the parent TPDFDocument.SaveToStream. A subsequent
+    // AppendContent will append on top of this replacement.
+    procedure SetContent(const ABytes: TBytes);
+
     property  PageIndex: Integer read FPageIndex;
     property  Document:  TPDFDocument read FDocument;
   end;
@@ -983,6 +989,14 @@ begin
   Move(Current[0],    FPendingContentOverride[0],               Length(Current));
   FPendingContentOverride[Length(Current)] := Ord(' ');         // operator separator
   Move(AOperators[0], FPendingContentOverride[Length(Current) + 1], Length(AOperators));
+end;
+
+procedure TPDFPage.SetContent(const ABytes: TBytes);
+begin
+  // Overwrite the whole content stream. SaveToStream honors the override only
+  // when it is non-empty; a fully blank page is not a redaction use case, so an
+  // empty ABytes is treated as a no-op here.
+  FPendingContentOverride := Copy(ABytes);
 end;
 
 end.

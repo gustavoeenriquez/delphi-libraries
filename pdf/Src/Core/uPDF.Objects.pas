@@ -148,6 +148,10 @@ type
   private
     FBytes:  RawByteString;
     FIsHex:  Boolean;       // was written as <hexhex> in source
+    FSourceOffset: Int64;   // byte offset of this string token in its source
+                            // content stream; -1 if not set by a lexer loop.
+                            // Used by content-stream redaction to map emitted
+                            // glyphs back to the exact operand to rewrite.
   public
     constructor Create(const ABytes: RawByteString; AIsHex: Boolean = False); reintroduce;
     // Replace stored bytes after decryption (called by parser)
@@ -158,6 +162,8 @@ type
     function ToUnicode: string;
     function Clone: TPDFObject; override;
     function ToDebugString: string; override;
+    // Source byte offset of the string token (set by the content lexer loop).
+    property SourceOffset: Int64 read FSourceOffset write FSourceOffset;
   end;
 
   // -------------------------------------------------------------------------
@@ -556,6 +562,7 @@ begin
   inherited Create;
   FBytes := ABytes;
   FIsHex := AIsHex;
+  FSourceOffset := -1;
 end;
 
 function TPDFString.Kind: TPDFObjectKind; begin Result := TPDFObjectKind.String_; end;
@@ -578,6 +585,7 @@ end;
 function TPDFString.Clone: TPDFObject;
 begin
   Result := TPDFString.Create(FBytes, FIsHex);
+  TPDFString(Result).FSourceOffset := FSourceOffset;
 end;
 
 function TPDFString.ToDebugString: string;
@@ -1029,6 +1037,30 @@ begin
   // Step 3: apply filter chain
   try
     FDecodedData := TPDFFilterPipeline.Decode(Raw, Filters, ObjParms);
+
+    // Step 4: undo PNG predictor when /DecodeParms requests it (common in
+    // XRef streams: /Predictor 12). The filter pipeline cannot inspect
+    // TPDFDictionary params (circular dependency), so it is undone here.
+    for var I := 0 to High(Parms) do
+    begin
+      if Parms[I] = nil then Continue;
+      if not (SameText(Filters[I], 'FlateDecode') or
+              SameText(Filters[I], 'LZWDecode')) then Continue;
+      var Pred := Integer(Parms[I].GetAsInteger('Predictor', 1));
+      if Pred < 10 then Continue;  // 1 = ninguno, 2 = TIFF (no soportado aquí)
+      var InS  := TBytesStream.Create(FDecodedData);
+      var OutS := TBytesStream.Create;
+      try
+        UndoPNGPredictor(InS, OutS,
+          Integer(Parms[I].GetAsInteger('Columns', 1)),
+          Integer(Parms[I].GetAsInteger('Colors', 1)),
+          Integer(Parms[I].GetAsInteger('BitsPerComponent', 8)));
+        FDecodedData := Copy(OutS.Bytes, 0, OutS.Size);
+      finally
+        InS.Free;
+        OutS.Free;
+      end;
+    end;
   except
     FDecodedData := Raw;  // fall back to raw on filter error
   end;

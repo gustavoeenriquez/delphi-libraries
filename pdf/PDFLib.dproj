@@ -62,6 +62,7 @@
     <DCCReference Include="Src\Core\uPDF.PageOperations.pas"/>
     <DCCReference Include="Src\Core\uPDF.PageCopy.pas"/>
     <DCCReference Include="Src\Core\uPDF.TextSearch.pas"/>
+    <DCCReference Include="Src\Core\uPDF.Redaction.pas"/>
     <DCCReference Include="Src\Core\uPDF.Watermark.pas"/>
     <DCCReference Include="Src\Core\uPDF.TOC.pas"/>
     <DCCReference Include="Src\Core\uPDF.Signatures.pas"/>

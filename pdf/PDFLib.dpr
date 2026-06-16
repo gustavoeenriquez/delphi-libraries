@@ -34,6 +34,7 @@ uses
   uPDF.PageOperations  in 'Src\Core\uPDF.PageOperations.pas',
   uPDF.PageCopy        in 'Src\Core\uPDF.PageCopy.pas',
   uPDF.TextSearch      in 'Src\Core\uPDF.TextSearch.pas',
+  uPDF.Redaction       in 'Src\Core\uPDF.Redaction.pas',
   uPDF.Watermark       in 'Src\Core\uPDF.Watermark.pas',
   uPDF.TOC             in 'Src\Core\uPDF.TOC.pas',
   uPDF.Signatures         in 'Src\Core\uPDF.Signatures.pas',

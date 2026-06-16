@@ -68,6 +68,12 @@ type
     Width:     Single;  // in text-space units (before scaling)
     X, Y:      Single;  // text-space position
     GlyphMatrix: TPDFMatrix; // text rendering matrix for this glyph
+    // ---- Source mapping (for content-stream redaction) ----
+    StringOffset: Int64;     // SourceOffset of the operand string token this
+                             // glyph came from (-1 if unknown / not from lexer)
+    GlyphIndex:   Integer;   // 0-based index of this glyph within that operand
+    CodeByteLen:  Integer;   // bytes consumed for this glyph code (1 simple, 2 Type0)
+    Font:         TPDFFont;  // active font (may be nil)
   end;
 
   // -------------------------------------------------------------------------
@@ -259,8 +265,9 @@ type
 
     // ---- Internal helpers ----
     function  ArgsAsNumbers(const AArgs: TArray<TPDFObject>): TArray<Single>;
-    procedure ShowString(const ABytes: RawByteString);
-    procedure EmitGlyph(ACharCode: Integer; AGlyphWidth: Single);
+    procedure ShowString(const ABytes: RawByteString; AStringOffset: Int64 = -1);
+    procedure EmitGlyph(ACharCode: Integer; AGlyphWidth: Single;
+      AStringOffset: Int64; AGlyphIndex, ACodeByteLen: Integer);
     procedure ApplyExtGState(ADict: TPDFDictionary);
     procedure SetColorFromArgs(const AArgs: TArray<TPDFObject>;
       AIsStroke: Boolean; const ACSName: string);
@@ -541,9 +548,17 @@ begin
         TPDFTokenKind.Real:
           Args.Add(TPDFReal.Create(Tok.RealVal));
         TPDFTokenKind.LiteralString:
-          Args.Add(TPDFString.Create(Tok.RawData, False));
+        begin
+          var SObj := TPDFString.Create(Tok.RawData, False);
+          SObj.SourceOffset := Tok.Offset;
+          Args.Add(SObj);
+        end;
         TPDFTokenKind.HexString:
-          Args.Add(TPDFString.Create(Tok.RawData, True));
+        begin
+          var SObj := TPDFString.Create(Tok.RawData, True);
+          SObj.SourceOffset := Tok.Offset;
+          Args.Add(SObj);
+        end;
         TPDFTokenKind.Name:
           Args.Add(TPDFName.Create(Tok.Value));
         TPDFTokenKind.ArrayOpen:
@@ -557,8 +572,18 @@ begin
             case ATok.Kind of
               TPDFTokenKind.Integer: Arr.Add(TPDFInteger.Create(ATok.IntVal));
               TPDFTokenKind.Real:    Arr.Add(TPDFReal.Create(ATok.RealVal));
-              TPDFTokenKind.LiteralString: Arr.Add(TPDFString.Create(ATok.RawData, False));
-              TPDFTokenKind.HexString:     Arr.Add(TPDFString.Create(ATok.RawData, True));
+              TPDFTokenKind.LiteralString:
+                begin
+                  var AS1 := TPDFString.Create(ATok.RawData, False);
+                  AS1.SourceOffset := ATok.Offset;
+                  Arr.Add(AS1);
+                end;
+              TPDFTokenKind.HexString:
+                begin
+                  var AS2 := TPDFString.Create(ATok.RawData, True);
+                  AS2.SourceOffset := ATok.Offset;
+                  Arr.Add(AS2);
+                end;
               TPDFTokenKind.Name:          Arr.Add(TPDFName.Create(ATok.Value));
             end;
           end;
@@ -1159,31 +1184,38 @@ end;
 // Text showing
 // =========================================================================
 
-procedure TPDFContentStreamProcessor.ShowString(const ABytes: RawByteString);
+procedure TPDFContentStreamProcessor.ShowString(const ABytes: RawByteString;
+  AStringOffset: Int64);
 var
   I: Integer;
+  GlyphIdx: Integer;   // 0-based index of the glyph within this operand
 begin
   var Font := FGS.Current.Text.Font;
   var GS   := FGS.Current;
   I := 1;
+  GlyphIdx := 0;
   while I <= Length(ABytes) do
   begin
     var CharCode: Integer;
+    var CodeLen:  Integer;
     // For multi-byte CID fonts (Type0), read 2 bytes; otherwise 1
     if (Font <> nil) and (Font.FontType = TPDFFontType.Type0) then
     begin
       if I + 1 <= Length(ABytes) then
       begin
         CharCode := (Ord(ABytes[I]) shl 8) or Ord(ABytes[I+1]);
+        CodeLen  := 2;
         Inc(I, 2);
       end else
       begin
         CharCode := Ord(ABytes[I]);
+        CodeLen  := 1;
         Inc(I);
       end;
     end else
     begin
       CharCode := Ord(ABytes[I]);
+      CodeLen  := 1;
       Inc(I);
     end;
 
@@ -1193,7 +1225,8 @@ begin
     else
       GlyphWidth := 1000;
 
-    EmitGlyph(CharCode, GlyphWidth);
+    EmitGlyph(CharCode, GlyphWidth, AStringOffset, GlyphIdx, CodeLen);
+    Inc(GlyphIdx);
 
     // Advance text position
     var TS := GS.Text;
@@ -1206,7 +1239,8 @@ begin
   end;
 end;
 
-procedure TPDFContentStreamProcessor.EmitGlyph(ACharCode: Integer; AGlyphWidth: Single);
+procedure TPDFContentStreamProcessor.EmitGlyph(ACharCode: Integer; AGlyphWidth: Single;
+  AStringOffset: Int64; AGlyphIndex, ACodeByteLen: Integer);
 begin
   if not Assigned(FOnPaintGlyph) then Exit;
 
@@ -1220,6 +1254,11 @@ begin
   if Font <> nil then
     Glyph.Unicode := Font.CharCodeToUnicode(ACharCode);
   Glyph.Width  := AGlyphWidth;
+  // Source mapping for redaction
+  Glyph.StringOffset := AStringOffset;
+  Glyph.GlyphIndex   := AGlyphIndex;
+  Glyph.CodeByteLen  := ACodeByteLen;
+  Glyph.Font         := Font;
 
   // Text rendering matrix = [fontSize*Th 0 0 fontSize Th*Ts 0] × Tm × CTM
   var FS := TS.FontSize;
@@ -1239,7 +1278,7 @@ end;
 procedure TPDFContentStreamProcessor.Op_Tj(const A: TArray<TPDFObject>);
 begin
   if (Length(A) >= 1) and A[0].IsString then
-    ShowString(A[0].AsString);
+    ShowString(A[0].AsString, (A[0] as TPDFString).SourceOffset);
 end;
 
 procedure TPDFContentStreamProcessor.Op_TJUC(const A: TArray<TPDFObject>);
@@ -1250,7 +1289,7 @@ begin
   begin
     var Item := Arr.Items(I);
     if Item.IsString then
-      ShowString(Item.AsString)
+      ShowString(Item.AsString, (Item as TPDFString).SourceOffset)
     else if Item.IsNumber then
     begin
       // Negative = move right; positive = move left (kerning adjust in 1/1000 em)

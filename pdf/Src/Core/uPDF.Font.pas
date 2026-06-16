@@ -102,6 +102,15 @@ type
     // Font program bytes (for Skia typeface loading)
     function  FontBytes: TBytes; virtual;
 
+    // Reverse-encode a Unicode char to its byte code(s) in this font's
+    // codespace. Used by content-stream redaction to substitute a glyph
+    // (e.g. 'X') keeping the SAME code byte-length so the surrounding
+    // operand layout/offsets stay stable. ACodeByteLen is the byte width of
+    // the code being replaced (1 for simple fonts, 2 for Type0/CID).
+    // Returns False if no code in the font maps to AUnicode at that width.
+    function  TryEncodeChar(const AUnicode: string; ACodeByteLen: Integer;
+      out ACode: TBytes): Boolean;
+
     property  Name:        string read FName;
     property  FontType:    TPDFFontType read FFontType;
     property  Descriptor:  TPDFFontDescriptor read FDescriptor;
@@ -293,6 +302,46 @@ begin
   if Length(FDescriptor.FontFile2) > 0 then Result := FDescriptor.FontFile2
   else if Length(FDescriptor.FontFile3) > 0 then Result := FDescriptor.FontFile3
   else Result := FDescriptor.FontFile;
+end;
+
+function TPDFFont.TryEncodeChar(const AUnicode: string; ACodeByteLen: Integer;
+  out ACode: TBytes): Boolean;
+var
+  C:    Integer;
+  Pair: TPair<Integer, string>;
+begin
+  Result := False;
+  SetLength(ACode, 0);
+  if AUnicode = '' then Exit;
+
+  if ACodeByteLen >= 2 then
+  begin
+    // Type0 / CID (2-byte codes): find a code whose ToUnicode maps to AUnicode.
+    // We can only reuse a CID/code the document already maps to this char; if
+    // the char never appears, fail so the caller can fall back (e.g. raster).
+    if FToUnicode <> nil then
+      for Pair in FToUnicode do
+        if (Pair.Value = AUnicode) and (Pair.Key >= 0) and (Pair.Key <= $FFFF) then
+        begin
+          SetLength(ACode, 2);
+          ACode[0] := Byte((Pair.Key shr 8) and $FF);
+          ACode[1] := Byte(Pair.Key and $FF);
+          Exit(True);
+        end;
+    Exit(False);
+  end;
+
+  // Simple font (1-byte codes): scan 0..255 for a code that decodes to AUnicode.
+  // CharCodeToUnicode is virtual (ToUnicode → Differences → standard/Latin-1),
+  // so for a normally-encoded font 'X' resolves to code $58.
+  for C := 0 to 255 do
+    if CharCodeToUnicode(C) = AUnicode then
+    begin
+      SetLength(ACode, 1);
+      ACode[0] := Byte(C);
+      Exit(True);
+    end;
+  Result := False;
 end;
 
 // =========================================================================

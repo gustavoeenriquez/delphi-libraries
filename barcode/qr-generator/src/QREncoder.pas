@@ -84,22 +84,6 @@ begin
   Result := ((AValue shr AIndex) and 1) <> 0;
 end;
 
-function QRMaskFunction(AMaskIdx, AX, AY: Integer): Integer;
-begin
-  case AMaskIdx of
-    0: Result := (AX + AY) mod 2;
-    1: Result := AY mod 2;
-    2: Result := AX mod 3;
-    3: Result := (AX + AY) mod 3;
-    4: Result := (AX div 3 + AY div 2) mod 2;
-    5: Result := (AX * AY) mod 2 + (AX * AY) mod 3;
-    6: Result := ((AX * AY) mod 2 + (AX * AY) mod 3) mod 2;
-    7: Result := ((AX + AY) mod 2 + (AX * AY) mod 3) mod 2;
-  else
-    raise EQRError.Create('Indice de mascara invalido');
-  end;
-end;
-
 { TQRCode }
 
 constructor TQRCode.Create(AVersion: Integer; AEcl: TQRErrorLevel; const ADataCodewords: TBytes; AMask: Integer);

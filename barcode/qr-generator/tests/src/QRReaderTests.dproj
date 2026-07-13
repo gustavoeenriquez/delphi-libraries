@@ -42,6 +42,17 @@
     <DCCReference Include="..\..\src\QRBCH.pas"/>
     <DCCReference Include="..\..\src\QRReedSolomon.pas"/>
     <DCCReference Include="..\..\src\QRReedSolomonDecoder.pas"/>
+    <DCCReference Include="..\..\src\QRBitStreamDecoder.pas"/>
+    <DCCReference Include="..\..\src\QRMatrixDecoder.pas"/>
+    <DCCReference Include="..\..\src\QRGrayImage.pas"/>
+    <DCCReference Include="..\..\src\QRBinarizer.pas"/>
+    <DCCReference Include="..\..\src\QRFinderPatternFinder.pas"/>
+    <DCCReference Include="..\..\src\QRAlignmentPatternFinder.pas"/>
+    <DCCReference Include="..\..\src\QRPerspectiveTransform.pas"/>
+    <DCCReference Include="..\..\src\QRReader.pas"/>
+    <DCCReference Include="..\..\src\QRImageLoader.pas"/>
+    <DCCReference Include="..\..\src\QRImageBMP.pas"/>
+    <DCCReference Include="..\..\src\QRImagePNG.pas"/>
     <DCCReference Include="..\..\src\QRSegment.pas"/>
     <DCCReference Include="..\..\src\QREncoder.pas"/>
   </ItemGroup>

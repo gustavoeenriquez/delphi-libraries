@@ -23,7 +23,7 @@
 interface
 
 uses
-  SysUtils, QRTypes;
+  SysUtils, Math, QRTypes;
 
 // Codifica: 15 bits listos para colocar en el simbolo (ya incluye el XOR con 0x5412).
 function QRComputeFormatBits(AEcl: TQRErrorLevel; AMask: Integer): Integer;
@@ -35,8 +35,18 @@ function QRComputeVersionBits(AVersion: Integer): Integer;
 // Devuelve False si la distancia de Hamming al mejor candidato supera 3 (dato ilegible).
 function QRDecodeFormatBits(ABits: Integer; out AEcl: TQRErrorLevel; out AMask: Integer): Boolean;
 
+// Igual que QRDecodeFormatBits pero evaluando las DOS copias que el simbolo
+// almacena a la vez (como ZXing FormatInformation.decodeFormatInformation):
+// por cada uno de los 32 candidatos validos se toma la menor distancia entre
+// ambas copias, maximizando la tolerancia a ruido/oclusion parcial.
+function QRDecodeFormatBitsBest(ABits1, ABits2: Integer; out AEcl: TQRErrorLevel; out AMask: Integer): Boolean;
+
 // Decodifica 18 bits de version info. Devuelve False si no hay candidato a distancia <= 3.
 function QRDecodeVersionBits(ABits: Integer; out AVersion: Integer): Boolean;
+
+// Igual que QRDecodeVersionBits pero evaluando las dos copias (arriba-derecha
+// y abajo-izquierda) que el simbolo almacena.
+function QRDecodeVersionBitsBest(ABits1, ABits2: Integer; out AVersion: Integer): Boolean;
 
 // Distancia de Hamming entre dos enteros interpretados como bitstrings de ANumBits.
 function QRHammingDistance(A, B: Integer; ANumBits: Integer): Integer;
@@ -103,6 +113,33 @@ begin
   AMask := BestMask;
 end;
 
+function QRDecodeFormatBitsBest(ABits1, ABits2: Integer; out AEcl: TQRErrorLevel; out AMask: Integer): Boolean;
+var
+  Ecl: TQRErrorLevel;
+  Mask, Candidate, Dist, BestDist: Integer;
+  BestEcl: TQRErrorLevel;
+  BestMask: Integer;
+begin
+  BestDist := 16;
+  BestEcl := qeMedium;
+  BestMask := 0;
+  for Ecl := Low(TQRErrorLevel) to High(TQRErrorLevel) do
+    for Mask := 0 to 7 do
+    begin
+      Candidate := QRComputeFormatBits(Ecl, Mask);
+      Dist := Min(QRHammingDistance(ABits1, Candidate, 15), QRHammingDistance(ABits2, Candidate, 15));
+      if Dist < BestDist then
+      begin
+        BestDist := Dist;
+        BestEcl := Ecl;
+        BestMask := Mask;
+      end;
+    end;
+  Result := BestDist <= 3;
+  AEcl := BestEcl;
+  AMask := BestMask;
+end;
+
 function QRDecodeVersionBits(ABits: Integer; out AVersion: Integer): Boolean;
 var
   V, Candidate, Dist, BestDist, BestVersion: Integer;
@@ -113,6 +150,26 @@ begin
   begin
     Candidate := QRComputeVersionBits(V);
     Dist := QRHammingDistance(ABits, Candidate, 18);
+    if Dist < BestDist then
+    begin
+      BestDist := Dist;
+      BestVersion := V;
+    end;
+  end;
+  Result := BestDist <= 3;
+  AVersion := BestVersion;
+end;
+
+function QRDecodeVersionBitsBest(ABits1, ABits2: Integer; out AVersion: Integer): Boolean;
+var
+  V, Candidate, Dist, BestDist, BestVersion: Integer;
+begin
+  BestDist := 19;
+  BestVersion := 7;
+  for V := 7 to 40 do
+  begin
+    Candidate := QRComputeVersionBits(V);
+    Dist := Min(QRHammingDistance(ABits1, Candidate, 18), QRHammingDistance(ABits2, Candidate, 18));
     if Dist < BestDist then
     begin
       BestDist := Dist;

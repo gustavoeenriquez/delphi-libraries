@@ -33,6 +33,12 @@ type
   TQRBoolRow   = array of Boolean;
   TQRModuleGrid = array of TQRBoolRow;
 
+  // Punto 2D de precision simple, usado por el pipeline de vision (deteccion
+  // de patrones, transformacion de perspectiva).
+  TQRPointF = record
+    X, Y: Single;
+  end;
+
   // Buffer de bits de longitud variable, empaquetado MSB-first (igual que
   // qrcodegen.c: appendBitsToBuffer). Usado para ensamblar segmentos y el
   // stream de datos final antes de aplicar Reed-Solomon.
@@ -97,6 +103,11 @@ function QRGetAlignmentPatternPositions(AVersion: Integer): TArray<Integer>;
 // Indicador de modo (4 bits) y ancho del campo "character count" segun version.
 function QRModeBits(AMode: TQRMode): Byte;
 function QRModeCharCountBits(AMode: TQRMode; AVersion: Integer): Integer;
+
+// Las 8 funciones de mascara (ISO/IEC 18004 Table 10). Compartida entre
+// QREncoder (ApplyMask) y QRMatrixDecoder (unmask, misma operacion XOR
+// auto-inversa) para que ambos usen exactamente la misma definicion.
+function QRMaskFunction(AMaskIdx, AX, AY: Integer): Integer;
 
 implementation
 
@@ -179,6 +190,22 @@ begin
     qmEci:          Result := 0;
   else
     Result := 0;
+  end;
+end;
+
+function QRMaskFunction(AMaskIdx, AX, AY: Integer): Integer;
+begin
+  case AMaskIdx of
+    0: Result := (AX + AY) mod 2;
+    1: Result := AY mod 2;
+    2: Result := AX mod 3;
+    3: Result := (AX + AY) mod 3;
+    4: Result := (AX div 3 + AY div 2) mod 2;
+    5: Result := (AX * AY) mod 2 + (AX * AY) mod 3;
+    6: Result := ((AX * AY) mod 2 + (AX * AY) mod 3) mod 2;
+    7: Result := ((AX + AY) mod 2 + (AX * AY) mod 3) mod 2;
+  else
+    raise EQRError.Create('Indice de mascara invalido');
   end;
 end;
 

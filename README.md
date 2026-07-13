@@ -20,6 +20,7 @@ Everything compiles with stock Delphi on Windows, Linux, and any RTL-supported p
 | [crypto/](./crypto/) | 🚧 Planned | ChaCha20-Poly1305, Argon2id, X25519 |
 | [imaging/](./imaging/) | 🚧 Planned | QOI, TGA, WebP lossless |
 | [formats/](./formats/) | 🚧 Planned | TOML, resampler, FFT |
+| [barcode/](./barcode/) | ✅ Active | QR Code generator + reader (v1-40, ECC L/M/Q/H, todos los modos, salida BMP/SVG/PNG, lectura desde foto con perspectiva/rotación) |
 
 ---
 
@@ -324,6 +325,8 @@ https://creativecommons.org/publicdomain/zero/1.0/
 | Library | Origin | License |
 |---|---|---|
 | `audio/mp3-decoder` | Translated from [minimp3](https://github.com/lieff/minimp3) | CC0 1.0 |
+| `barcode/qr-generator` (encoder) | Algorithm translated from [QR Code generator library](https://github.com/nayuki/QR-Code-generator) (Project Nayuki) | CC0 1.0 (see MIT notice in [barcode/qr-generator/README.md](./barcode/qr-generator/README.md)) |
+| `barcode/qr-generator` (reader) | Algorithm translated from [ZXing](https://github.com/zxing/zxing) | CC0 1.0 (see Apache 2.0 notice in [barcode/qr-generator/README.md](./barcode/qr-generator/README.md)) |
 | All other libraries | Written from scratch against public standards | CC0 1.0 |
 
 ---

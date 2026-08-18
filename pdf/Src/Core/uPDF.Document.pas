@@ -964,10 +964,65 @@ begin
   Result := BuildContentStream;
 end;
 
+// Cuenta el balance de operadores q/Q (saves - restores) fuera de strings
+// literales (...) y hex <...>. Un stream bien formado balancea a 0, pero los
+// PDF de escáner suelen emitir una matriz 'cm' global y hasta 'q' sin cerrar.
+function ContentGraphicsBalance(const ABytes: TBytes): Integer;
+var
+  I, L:      Integer;
+  InParen:   Integer;
+  InHex:     Boolean;
+  C, Prev, Next: Byte;
+  function IsDelim(B: Byte): Boolean;
+  begin
+    Result := B in [0, 9, 10, 12, 13, 32, Ord('('), Ord(')'), Ord('<'),
+                    Ord('>'), Ord('['), Ord(']'), Ord('{'), Ord('}'),
+                    Ord('/'), Ord('%')];
+  end;
+begin
+  Result  := 0;
+  InParen := 0;
+  InHex   := False;
+  L := Length(ABytes);
+  for I := 0 to L - 1 do
+  begin
+    C := ABytes[I];
+    if InParen > 0 then
+    begin
+      if (C = Ord('\')) then Continue
+      else if (I > 0) and (ABytes[I - 1] = Ord('\')) then Continue
+      else if C = Ord('(') then Inc(InParen)
+      else if C = Ord(')') then Dec(InParen);
+      Continue;
+    end;
+    if InHex then
+    begin
+      if C = Ord('>') then InHex := False;
+      Continue;
+    end;
+    case C of
+      Ord('('): begin Inc(InParen); Continue; end;
+      Ord('<'): begin InHex := True; Continue; end;
+    end;
+    if (C = Ord('q')) or (C = Ord('Q')) then
+    begin
+      if I > 0 then Prev := ABytes[I - 1] else Prev := 32;
+      if I < L - 1 then Next := ABytes[I + 1] else Next := 32;
+      // solo cuenta como operador si está delimitado por ambos lados
+      if IsDelim(Prev) and IsDelim(Next) then
+        if C = Ord('q') then Inc(Result) else Dec(Result);
+    end;
+  end;
+  if Result < 0 then Result := 0;   // underflow: los visores lo ignoran
+end;
+
 procedure TPDFPage.AppendContent(const AOperators: TBytes);
 var
   Current:   TBytes;
   MergedLen: Integer;
+  Balance:   Integer;
+  Prefix, Suffix: TBytes;
+  K: Integer;
 begin
   if Length(AOperators) = 0 then Exit;
 
@@ -976,7 +1031,24 @@ begin
   if Length(FPendingContentOverride) > 0 then
     Current := FPendingContentOverride
   else
+  begin
     Current := BuildContentStream;
+    // Aislar el estado gráfico del contenido ORIGINAL antes del primer
+    // append: muchos PDF de escáner dejan una CTM activa ('0.36 cm' global,
+    // sin q/Q) y todo operador anexado heredaría esa escala — las cajas de
+    // redacción se dibujaban a ~1/3 de su posición. Se envuelve el contenido
+    // en q ... Q (con Q extra por cada 'q' que el original dejó sin cerrar).
+    if Length(Current) > 0 then
+    begin
+      Balance := ContentGraphicsBalance(Current);
+      Prefix  := TEncoding.ANSI.GetBytes('q'#10);
+      Suffix  := TEncoding.ANSI.GetBytes(#10'Q');
+      for K := 1 to Balance do
+        Suffix := Suffix + TEncoding.ANSI.GetBytes(' Q');
+      Suffix := Suffix + TEncoding.ANSI.GetBytes(#10);
+      Current := Prefix + Current + Suffix;
+    end;
+  end;
 
   if Length(Current) = 0 then
   begin

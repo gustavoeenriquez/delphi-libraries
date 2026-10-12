@@ -55,6 +55,17 @@ type
     class function ScrubPageTextLayer(ADoc: TPDFDocument; APageIndex: Integer;
       const ABoxes: TArray<TRectF>; const AReplacement: string;
       out ACount: Integer): Boolean; static;
+
+    // Igual que ScrubPageTextLayer, pero QUITA los glifos en vez de cambiarlos
+    // por una letra: cada tramo borrado se sustituye por un ajuste de TJ con su
+    // avance exacto (ancho del glifo + Tc + Tw), así el texto que sigue en el
+    // renglón queda en su sitio. Con la 'X' el renglón se desplazaba: la 'X'
+    // no mide lo mismo que la letra que reemplaza, y lo siguiente se corría
+    // (incluso bajo el recuadro vecino). Un Tj tocado se reescribe como TJ.
+    // Devuelve False y deja la página INTACTA si no puede hacerlo con
+    // seguridad (operadores ' y ", tamaño de letra 0): el llamador rasteriza.
+    class function RemovePageTextLayer(ADoc: TPDFDocument; APageIndex: Integer;
+      const ABoxes: TArray<TRectF>; out ACount: Integer): Boolean; static;
   end;
 
 implementation
@@ -268,6 +279,224 @@ begin
     Result := True;
   finally
     RCache.Free;
+    Targets.Free;
+  end;
+end;
+
+type
+  // Glifos a quitar de un operando, con su avance (milésimas de unidad de texto).
+  TOperandRemove = class
+    CodeByteLen: Integer;
+    Adv:         TDictionary<Integer, Double>;   // índice de glifo -> avance
+    constructor Create;
+    destructor  Destroy; override;
+  end;
+
+constructor TOperandRemove.Create;
+begin
+  inherited Create;
+  Adv := TDictionary<Integer, Double>.Create;
+end;
+
+destructor TOperandRemove.Destroy;
+begin
+  Adv.Free;
+  inherited;
+end;
+
+// Elementos de TJ para un operando con glifos quitados: tramos hex conservados
+// y, en lugar de cada tramo quitado, -avance (un número positivo en TJ mueve a
+// la izquierda; negativo, a la derecha).
+function OperandToTJItems(const ADecoded: RawByteString; AInfo: TOperandRemove): string;
+var
+  SB, Run: TStringBuilder;
+  CodeLen, Total, I, J: Integer;
+  Skip: Double;
+
+  procedure FlushRun;
+  begin
+    if Run.Length > 0 then
+    begin
+      SB.Append('<').Append(Run.ToString).Append('> ');
+      Run.Clear;
+    end;
+  end;
+
+  procedure FlushSkip;
+  begin
+    if Skip <> 0 then
+    begin
+      SB.Append(FormatFloat('0.###', -Skip, TFormatSettings.Invariant)).Append(' ');
+      Skip := 0;
+    end;
+  end;
+
+begin
+  CodeLen := Max(1, AInfo.CodeByteLen);
+  Total := Length(ADecoded) div CodeLen;
+  SB  := TStringBuilder.Create;
+  Run := TStringBuilder.Create;
+  try
+    Skip := 0;
+    for I := 0 to Total - 1 do
+      if AInfo.Adv.ContainsKey(I) then
+      begin
+        FlushRun;
+        Skip := Skip + AInfo.Adv[I];
+      end
+      else
+      begin
+        FlushSkip;
+        for J := 0 to CodeLen - 1 do
+          Run.Append(IntToHex(Ord(ADecoded[I * CodeLen + J + 1]), 2));
+      end;
+    for J := Total * CodeLen to Length(ADecoded) - 1 do
+      Run.Append(IntToHex(Ord(ADecoded[J + 1]), 2));
+    FlushSkip;
+    FlushRun;
+    Result := SB.ToString.TrimRight;
+  finally
+    Run.Free;
+    SB.Free;
+  end;
+end;
+
+class function TPDFRedactor.RemovePageTextLayer(ADoc: TPDFDocument;
+  APageIndex: Integer; const ABoxes: TArray<TRectF>; out ACount: Integer): Boolean;
+var
+  Page:    TPDFPage;
+  Data:    TBytes;
+  Res:     IPDFResources;
+  Proc:    TPDFContentStreamProcessor;
+  Targets: TObjectDictionary<Int64, TOperandRemove>;
+  PageW, PageH: Single;
+  Offs:    TList<Int64>;
+  LexStream: TBytesStream;
+  Lexer:   TPDFLexer;
+  Outp:    TBytesStream;
+  LastPos: Int64;
+  Bad:     Boolean;
+begin
+  ACount := 0;
+  if (ADoc = nil) or (APageIndex < 0) or (APageIndex >= ADoc.PageCount) then
+    Exit(False);
+  Page  := ADoc.Pages[APageIndex];
+  PageW := Page.Width;
+  PageH := Page.Height;
+  if (PageW <= 0) or (PageH <= 0) then Exit(True);
+  Data := Page.ContentStreamBytes;
+  if Length(Data) = 0 then Exit(True);
+
+  Targets := TObjectDictionary<Int64, TOperandRemove>.Create([doOwnsValues]);
+  try
+    // -------- Pass 1: glifos a quitar (mismo criterio de centro que Scrub) ----
+    Bad := False;
+    Res  := TPDFPageResources.Create(Page);
+    Proc := TPDFContentStreamProcessor.Create;
+    try
+      Proc.OnPaintGlyph :=
+        procedure(const G: TPDFGlyphInfo; const St: TPDFGraphicsState)
+        var
+          FS, W, CX, CY, NX, NY, A: Single;
+          B: TRectF;
+          Inside: Boolean;
+          Info: TOperandRemove;
+        begin
+          if G.StringOffset < 0 then Exit;
+          FS := St.Text.FontSize;
+          W  := G.Width / 1000.0 * FS;
+          CX := G.X + W * 0.5;
+          CY := G.Y + FS * 0.35;
+          NX := CX / PageW;
+          NY := (PageH - CY) / PageH;
+          Inside := False;
+          for B in ABoxes do
+            if (NX >= B.Left) and (NX <= B.Right) and
+               (NY >= B.Top)  and (NY <= B.Bottom) then
+            begin
+              Inside := True;
+              Break;
+            end;
+          if not Inside then Exit;
+          if FS = 0 then
+          begin
+            Bad := True;   // sin tamaño no se puede expresar el avance en TJ
+            Exit;
+          end;
+          // avance en milésimas: ancho + Tc (+ Tw si es el espacio de 1 byte)
+          A := G.Width + St.Text.CharSpacing * 1000.0 / FS;
+          if (G.CodeByteLen = 1) and (G.CharCode = 32) then
+            A := A + St.Text.WordSpacing * 1000.0 / FS;
+          if not Targets.TryGetValue(G.StringOffset, Info) then
+          begin
+            Info := TOperandRemove.Create;
+            Info.CodeByteLen := G.CodeByteLen;
+            Targets.Add(G.StringOffset, Info);
+          end;
+          Info.Adv.AddOrSetValue(G.GlyphIndex, A);
+        end;
+      Proc.Process(Data, Res, Page.Document.Resolver);
+    finally
+      Proc.Free;
+    end;
+    if Bad then Exit(False);
+    if Targets.Count = 0 then Exit(True);
+
+    // -------- Pass 2: reescribir; todo o nada --------
+    Offs := TList<Int64>.Create;
+    LexStream := TBytesStream.Create(Data);
+    Lexer := TPDFLexer.Create(LexStream, False);
+    Outp  := TBytesStream.Create;
+    try
+      for var K in Targets.Keys do
+        Offs.Add(K);
+      Offs.Sort;
+      LastPos := 0;
+      for var O in Offs do
+      begin
+        if O < LastPos then Exit(False);
+        if O > LastPos then
+          Outp.Write(Data[LastPos], O - LastPos);
+        Lexer.SeekTo(O);
+        var Tok := Lexer.NextToken;
+        var EndOff := Lexer.Position;
+        var Nxt := Lexer.NextToken;
+        var NxtEnd := Lexer.Position;
+        var Info := Targets[O];
+        var Items := OperandToTJItems(Tok.RawData, Info);
+        var NewOp: string;
+        if (Nxt.Kind = TPDFTokenKind.Keyword) and (Nxt.Value = 'Tj') then
+        begin
+          // "<op> Tj" -> "[items] TJ"
+          NewOp := '[' + Items + '] TJ';
+          LastPos := NxtEnd;
+        end
+        else if Nxt.Kind in [TPDFTokenKind.Integer, TPDFTokenKind.Real,
+                             TPDFTokenKind.LiteralString, TPDFTokenKind.HexString,
+                             TPDFTokenKind.ArrayClose] then
+        begin
+          // dentro de un arreglo de TJ: los elementos van tal cual
+          NewOp := Items;
+          LastPos := EndOff;
+        end
+        else
+          Exit(False);   // operadores ' y " (u otros): página intacta
+        var NB := TEncoding.ASCII.GetBytes(NewOp);
+        if Length(NB) > 0 then
+          Outp.Write(NB[0], Length(NB));
+        Inc(ACount, Info.Adv.Count);
+      end;
+      if Length(Data) > LastPos then
+        Outp.Write(Data[LastPos], Length(Data) - LastPos);
+      Page.SetContent(Copy(Outp.Bytes, 0, Outp.Size));
+    finally
+      Outp.Free;
+      Lexer.Free;
+      LexStream.Free;
+      Offs.Free;
+    end;
+    Result := True;
+  finally
     Targets.Free;
   end;
 end;

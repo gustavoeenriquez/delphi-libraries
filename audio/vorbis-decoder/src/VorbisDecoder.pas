@@ -3,24 +3,22 @@ unit VorbisDecoder;
 {
   VorbisDecoder.pas - Vorbis I audio packet decode
 
-  Full Vorbis I decode pipeline (spec section 4.3):
-    1. Read mode number; for long blocks read prev/next window flags
-    2. Decode floor curves for each channel
-    3. Decode residue vectors for each channel
-    4. Apply inverse M/S channel decoupling
-    5. Apply floor × residue in spectral domain
-    6. Apply inverse MDCT (N/4-point complex FFT method)
-    7. Apply window function and overlap-add with previous block
-    8. Return center N/2 samples from the previous block
+  Decode pipeline for one audio packet (spec section 4.3):
+    1. Packet type bit, mode number, long-block prev/next window flags
+    2. Window boundaries (left/right overlap regions) from the block flags
+    3. Floor 1 decode per channel (unused floor => zero channel)
+    4. Residue decode per submap (channels re-enabled by coupling)
+    5. Inverse channel coupling (square polar), in reverse coupling order
+    6. Floor curve synthesis multiplied into the residue spectrum
+    7. Inverse MDCT (DCT-IV via N/4-point complex FFT)
+    8. Overlap-add of the left slope with the saved right slope of the
+       previous block; output [left_start, right_start); save [right_start,
+       right_end) for the next packet (same bookkeeping as stb_vorbis)
 
-  Window switching (spec section 4.3.2):
-    Long blocks can have mixed left/right window widths when adjacent to
-    short blocks. This implementation correctly handles all four window
-    transition cases (LL, LS, SL, SS).
+  The IMDCT implements y[n] = sum_k X[k] cos(2*pi/N * (n + 1/2 + N/4) * (k + 1/2))
+  with no extra scaling (the Vorbis window is power complementary).
 
-  MDCT:
-    The inverse type-IV DCT is factored as pre-rotation + N/4-pt complex
-    FFT + post-rotation + unfolding into the N-point output.
+  Reference: Vorbis I specification; stb_vorbis (public domain).
 
   License: CC0 1.0 Universal (Public Domain)
   https://creativecommons.org/publicdomain/zero/1.0/
@@ -40,7 +38,30 @@ uses
   VorbisResidue,
   VorbisSetup;
 
-// Apply inverse M/S channel decoupling (exported for unit testing).
+type
+  // Precomputed tables for an N-point IMDCT (N = block size)
+  TVorbisIMDCTPlan = record
+    N, M, H   : Integer;            // block size, N/2, N/4
+    PreCos    : TArray<Single>;     // exp(-i*pi*j/M)
+    PreSin    : TArray<Single>;
+    PostCos   : TArray<Single>;     // exp(-i*pi*(j+1/4)/M)
+    PostSin   : TArray<Single>;
+    BitRev    : TArray<Integer>;    // H-point bit reversal
+    TwCos     : TArray<Single>;     // exp(-2*pi*i*k/H), k < H/2
+    TwSin     : TArray<Single>;
+    // scratch
+    Re, Im    : TArray<Single>;
+    D         : TArray<Single>;
+  end;
+
+// Build the IMDCT plan for block size N (power of two, >= 8).
+procedure VorbisIMDCTInit(var P: TVorbisIMDCTPlan; N: Integer);
+
+// Inverse MDCT: X = N/2 coefficients, Y = N output samples.
+procedure VorbisIMDCT(var P: TVorbisIMDCTPlan; X: PSingle; Y: PSingle);
+
+// Inverse square-polar channel coupling (spec 4.3.6), exported for tests.
+// Steps are undone in reverse order.
 procedure DecoupleChannels(
   const Coupling : TArray<TVorbisMappingCoupling>;
   CoupCount      : Integer;
@@ -48,36 +69,31 @@ procedure DecoupleChannels(
   N              : Integer
 );
 
-// Apply Vorbis window function to one channel's MDCT output (exported for testing).
-procedure ApplyWindow(
-  Buf          : PSingle;
-  N            : Integer;
-  N0           : Integer;
-  N1           : Integer;
-  IsLong       : Boolean;
-  PrevIsLong   : Boolean;
-  NextIsLong   : Boolean
-);
+// Vorbis window rising slope of length L: w[j] = sin(pi/2 * sin^2(pi*(j+0.5)/(2L)))
+function VorbisWindowSlope(L: Integer): TArray<Single>;
 
 type
   TVorbisDecoder = class
   private
     FSetup       : TVorbisSetup;
-    FPrevBuf     : TArray<TArray<Single>>;  // per channel, BlockSize1 samples
-    FPrevN       : Integer;     // block size of previous frame (0 = first)
-    FPrevIsLong  : Boolean;     // was the previous block long?
     FReady       : Boolean;
     FHeaderCount : Integer;
-
-    procedure IMDCT(Input: PSingle; N: Integer; Output: PSingle);
-
+    // Per-channel working buffers
+    FSpectrum    : TArray<TArray<Single>>;   // N1/2 floats
+    FBlock       : TArray<TArray<Single>>;   // N1 floats (IMDCT output)
+    FPrev        : TArray<TArray<Single>>;   // saved right slope, N1/2 floats
+    FPrevLen     : Integer;                  // valid floats in FPrev (0 = none)
+    FFinalY      : TArray<TArray<Integer>>;
+    FStep2       : TArray<TArray<Boolean>>;
+    FPlan0, FPlan1: TVorbisIMDCTPlan;
+    FSlope0, FSlope1: TArray<Single>;        // slopes of length N0/2 and N1/2
+    procedure PrepareBuffers;
     function DecodeAudioPacket(
       Data    : PByte;
       DataLen : Integer;
       out Buffer  : TAudioBuffer;
       out Samples : Integer
     ): TVorbisDecodeResult;
-
   public
     constructor Create;
     destructor  Destroy; override;
@@ -92,6 +108,9 @@ type
       out Samples : Integer
     ): TVorbisDecodeResult;
 
+    // Drop overlap state (e.g. after a seek); the next packet yields no output.
+    procedure Reset;
+
     property VSetup    : TVorbisSetup read FSetup;
     property Ready     : Boolean      read FReady;
     property Channels  : Byte         read FSetup.Ident.Channels;
@@ -101,108 +120,120 @@ type
 implementation
 
 // ---------------------------------------------------------------------------
-// MDCT (type-IV DCT inverse) — N/4-point complex FFT method
+// IMDCT
 // ---------------------------------------------------------------------------
-//
-// Input:  N/2 spectral coefficients X[k], k = 0..N/2-1
-// Output: N time samples x[n], n = 0..N-1
-//
-// Algorithm (Malvar / Odaka-Nishitani):
-//   1. Pre-rotate: form complex array A[k] of length N/4
-//   2. Apply N/4-pt inverse DFT (= forward FFT with sign flip)
-//   3. Post-rotate and unfold to N output samples
 
-procedure TVorbisDecoder.IMDCT(Input: PSingle; N: Integer; Output: PSingle);
+procedure VorbisIMDCTInit(var P: TVorbisIMDCTPlan; N: Integer);
 var
-  N2, N4  : Integer;
-  K       : Integer;
-  Ar, Ai  : TArray<Single>;
-  Angle   : Double;
-  Cs, Sn  : Double;
-  // FFT
-  Len, Step, J, I : Integer;
-  Wr, Wi, Ur, Ui, Tr, Ti: Single;
-  Tmp     : Single;
+  J, K, Bits, R, V: Integer;
 begin
-  N2 := N shr 1;
-  N4 := N shr 2;
-
-  SetLength(Ar, N4);
-  SetLength(Ai, N4);
-
-  // Pre-rotate: A[k] = X[2k] * e^(-j*pi*(k+1/8)/N/2) + ...
-  // Using the Malvar formulation:
-  // A[k] = (X[N/2-1-2k] + j*X[2k]) * e^(-j*pi*(4k+1)/(2N))
-  for K := 0 to N4 - 1 do
+  P.N := N;
+  P.M := N shr 1;
+  P.H := N shr 2;
+  SetLength(P.PreCos,  P.H); SetLength(P.PreSin,  P.H);
+  SetLength(P.PostCos, P.H); SetLength(P.PostSin, P.H);
+  for J := 0 to P.H - 1 do
   begin
-    Angle := Pi * (4.0 * K + 1) / (2.0 * N);
-    Cs := Cos(Angle);
-    Sn := Sin(Angle);
-    Ar[K] := Input[N2 - 1 - 2*K] * Cs - Input[2*K] * Sn;
-    Ai[K] := Input[N2 - 1 - 2*K] * Sn + Input[2*K] * Cs;
+    P.PreCos[J]  :=  Cos(Pi * J / P.M);
+    P.PreSin[J]  := -Sin(Pi * J / P.M);
+    P.PostCos[J] :=  Cos(Pi * (J + 0.25) / P.M);
+    P.PostSin[J] := -Sin(Pi * (J + 0.25) / P.M);
   end;
-
-  // Bit-reverse permutation for N4-point FFT
-  J := 0;
-  for I := 0 to N4 - 2 do
+  // bit reversal
+  Bits := 0;
+  while (1 shl Bits) < P.H do Inc(Bits);
+  SetLength(P.BitRev, P.H);
+  for J := 0 to P.H - 1 do
   begin
-    if I < J then
+    R := 0; V := J;
+    for K := 0 to Bits - 1 do
     begin
-      Tmp := Ar[I]; Ar[I] := Ar[J]; Ar[J] := Tmp;
-      Tmp := Ai[I]; Ai[I] := Ai[J]; Ai[J] := Tmp;
+      R := (R shl 1) or (V and 1);
+      V := V shr 1;
     end;
-    var Bit := N4 shr 1;
-    while (J and Bit) <> 0 do begin J := J xor Bit; Bit := Bit shr 1; end;
-    J := J xor Bit;
+    P.BitRev[J] := R;
+  end;
+  SetLength(P.TwCos, Max(P.H shr 1, 1));
+  SetLength(P.TwSin, Max(P.H shr 1, 1));
+  for K := 0 to (P.H shr 1) - 1 do
+  begin
+    P.TwCos[K] :=  Cos(2 * Pi * K / P.H);
+    P.TwSin[K] := -Sin(2 * Pi * K / P.H);
+  end;
+  SetLength(P.Re, P.H);
+  SetLength(P.Im, P.H);
+  SetLength(P.D,  P.M);
+end;
+
+procedure VorbisIMDCT(var P: TVorbisIMDCTPlan; X: PSingle; Y: PSingle);
+var
+  J, K, I       : Integer;
+  A, B, C, S    : Single;
+  Len, Half, Step: Integer;
+  Wr, Wi, Tr, Ti: Single;
+  Ur, Ui        : Single;
+  M, H, N4      : Integer;
+begin
+  M := P.M; H := P.H; N4 := P.H;
+
+  // Pre-twiddle: t[j] = (X[2j] + i X[M-1-2j]) * exp(-i pi j / M), stored bit-reversed
+  for J := 0 to H - 1 do
+  begin
+    A := X[2 * J];
+    B := X[M - 1 - 2 * J];
+    C := P.PreCos[J];
+    S := P.PreSin[J];
+    P.Re[P.BitRev[J]] := A * C - B * S;
+    P.Im[P.BitRev[J]] := A * S + B * C;
   end;
 
-  // Cooley-Tukey DIT FFT (forward, so twiddle = e^(-j*2*pi*k/N))
-  Len := 1;
-  while Len < N4 do
+  // In-place iterative radix-2 DIT FFT (forward)
+  Len := 2;
+  while Len <= H do
   begin
-    Step := Len * 2;
-    for K := 0 to Len - 1 do
+    Half := Len shr 1;
+    Step := H div Len;
+    I := 0;
+    while I < H do
     begin
-      Angle := -Pi * K / Len;
-      Wr := Cos(Angle);
-      Wi := Sin(Angle);
-      I := K;
-      while I < N4 do
+      for K := 0 to Half - 1 do
       begin
-        Ur := Ar[I];    Ui := Ai[I];
-        Tr := Ar[I+Len]; Ti := Ai[I+Len];
-        Ar[I+Len] := Ur - (Wr*Tr - Wi*Ti);
-        Ai[I+Len] := Ui - (Wr*Ti + Wi*Tr);
-        Ar[I]     := Ur + (Wr*Tr - Wi*Ti);
-        Ai[I]     := Ui + (Wr*Ti + Wi*Tr);
-        Inc(I, Step);
+        Wr := P.TwCos[K * Step];
+        Wi := P.TwSin[K * Step];
+        Tr := P.Re[I + K + Half] * Wr - P.Im[I + K + Half] * Wi;
+        Ti := P.Re[I + K + Half] * Wi + P.Im[I + K + Half] * Wr;
+        P.Re[I + K + Half] := P.Re[I + K] - Tr;
+        P.Im[I + K + Half] := P.Im[I + K] - Ti;
+        P.Re[I + K] := P.Re[I + K] + Tr;
+        P.Im[I + K] := P.Im[I + K] + Ti;
       end;
+      Inc(I, Len);
     end;
-    Len := Step;
+    Len := Len shl 1;
   end;
 
-  // Post-rotate and unfold to N-point output:
-  // out[N/4+K]         =  Re(A[K]) * cos + Im(A[K]) * sin
-  // out[N/4-1-K]       = -Re(A[K]) * sin + Im(A[K]) * cos  (mirrored)
-  // out[N/4*3+K]       = -(same as above but negated)
-  // out[N-1 - (N/4+K)] = -(same as above)
-  for K := 0 to N4 - 1 do
+  // Post-twiddle and DCT-IV unpack: d[2j] = Re u, d[M-1-2j] = -Im u
+  for J := 0 to H - 1 do
   begin
-    Angle := Pi * (4.0 * K + 1) / (2.0 * N);
-    Cs := Cos(Angle);
-    Sn := Sin(Angle);
-    Tr := (Ar[K] * Cs + Ai[K] * Sn) * (1.0 / N4);
-    Ti := (Ar[K] * Sn - Ai[K] * Cs) * (1.0 / N4);
-    // Unfold
-    Output[N4 + K]         :=  Tr;
-    Output[N4 - 1 - K]     :=  Ti;
-    Output[N4*3 + K]       := -Ti;
-    Output[N - 1 - K - N4] := -Tr;
+    C := P.PostCos[J];
+    S := P.PostSin[J];
+    Ur := P.Re[J] * C - P.Im[J] * S;
+    Ui := P.Re[J] * S + P.Im[J] * C;
+    P.D[2 * J]         := Ur;
+    P.D[M - 1 - 2 * J] := -Ui;
   end;
+
+  // IMDCT from DCT-IV (N outputs)
+  for J := 0 to N4 - 1 do
+    Y[J] := P.D[J + N4];
+  for J := N4 to 3 * N4 - 1 do
+    Y[J] := -P.D[3 * N4 - 1 - J];
+  for J := 3 * N4 to P.N - 1 do
+    Y[J] := -P.D[J - 3 * N4];
 end;
 
 // ---------------------------------------------------------------------------
-// Channel M/S decoupling (spec section 4.3.9)
+// Coupling and window
 // ---------------------------------------------------------------------------
 
 procedure DecoupleChannels(
@@ -212,11 +243,12 @@ procedure DecoupleChannels(
   N              : Integer
 );
 var
-  K, I : Integer;
-  M, A : Single;
-  MC, AC: Integer;
+  K, I   : Integer;
+  M, A   : Single;
+  M2, A2 : Single;
+  MC, AC : Integer;
 begin
-  for K := 0 to CoupCount - 1 do
+  for K := CoupCount - 1 downto 0 do
   begin
     MC := Coupling[K].Magnitude;
     AC := Coupling[K].Angle;
@@ -226,92 +258,84 @@ begin
       A := Spectra[AC][I];
       if M > 0 then
       begin
-        if A > 0 then begin Spectra[MC][I] := M;     Spectra[AC][I] := M - A; end
-        else           begin Spectra[MC][I] := M + A; Spectra[AC][I] := M;     end;
+        if A > 0 then begin M2 := M;     A2 := M - A; end
+        else          begin A2 := M;     M2 := M + A; end;
       end
       else
       begin
-        if A > 0 then begin Spectra[MC][I] := M;     Spectra[AC][I] := M - A; end
-        else           begin Spectra[MC][I] := M + A; Spectra[AC][I] := M;     end;
+        if A > 0 then begin M2 := M;     A2 := M + A; end
+        else          begin A2 := M;     M2 := M - A; end;
       end;
+      Spectra[MC][I] := M2;
+      Spectra[AC][I] := A2;
     end;
   end;
 end;
 
-// ---------------------------------------------------------------------------
-// Apply window function (in-place), with asymmetric slope support
-// ---------------------------------------------------------------------------
-
-// Vorbis window slope: w(n) = sin(pi/2 * sin^2(pi*(n+0.5)/n_w))
-function WinSlope(N, I: Integer): Single; inline;
+function VorbisWindowSlope(L: Integer): TArray<Single>;
 var
-  S: Single;
+  J : Integer;
+  S : Double;
 begin
-  S := Sin(Pi * (I + 0.5) / N);
-  Result := Sin(Pi / 2.0 * S * S);
-end;
-
-// Apply windowing to one channel's MDCT output.
-// For short blocks: symmetric window using N.
-// For long blocks: left and right slopes may use different widths
-//   (determined by prev and next block flags).
-procedure ApplyWindow(
-  Buf          : PSingle;
-  N            : Integer;    // current block size
-  N0           : Integer;    // short block size
-  N1           : Integer;    // long block size
-  IsLong       : Boolean;
-  PrevIsLong   : Boolean;
-  NextIsLong   : Boolean
-);
-var
-  I           : Integer;
-  N4          : Integer;
-  N0h, N1h    : Integer;  // half block sizes
-  // Left slope parameters
-  LW          : Integer;  // slope width
-  LStart      : Integer;  // where the slope starts in the window
-  // Right slope parameters
-  RW          : Integer;
-  RStart      : Integer;
-begin
-  N4   := N shr 2;
-  N0h  := N0 shr 1;
-  N1h  := N1 shr 1;
-
-  if not IsLong then
+  SetLength(Result, L);
+  for J := 0 to L - 1 do
   begin
-    // Short block: full symmetric window
-    for I := 0 to N - 1 do
-      Buf[I] := Buf[I] * WinSlope(N, I);
-  end
-  else
-  begin
-    // Long block: handle mixed windows
-    // Left slope
-    if PrevIsLong then begin LW := N1h; LStart := 0;           end
-    else               begin LW := N0h; LStart := N4 - N0h div 2; end;
-    // Right slope (mirror)
-    if NextIsLong then begin RW := N1h; RStart := N - N1h;     end
-    else               begin RW := N0h; RStart := N - N4 - N0h div 2; end;
-
-    // Zero before left slope
-    for I := 0 to LStart - 1 do Buf[I] := 0.0;
-    // Left slope: rising from 0 to 1
-    for I := 0 to LW - 1 do
-      Buf[LStart + I] := Buf[LStart + I] * WinSlope(LW * 2, I);
-    // Flat section = 1 (no change needed)
-    // Right slope: falling from 1 to 0
-    for I := 0 to RW - 1 do
-      Buf[RStart + I] := Buf[RStart + I] * WinSlope(RW * 2, RW - 1 - I);
-    // Zero after right slope
-    for I := RStart + RW to N - 1 do Buf[I] := 0.0;
+    S := Sin(Pi * (J + 0.5) / (2.0 * L));
+    Result[J] := Sin(Pi / 2.0 * S * S);
   end;
 end;
 
 // ---------------------------------------------------------------------------
-// DecodeAudioPacket
+// TVorbisDecoder
 // ---------------------------------------------------------------------------
+
+constructor TVorbisDecoder.Create;
+begin
+  inherited Create;
+  FHeaderCount := 0;
+  FReady       := False;
+  FPrevLen     := 0;
+end;
+
+destructor TVorbisDecoder.Destroy;
+begin
+  inherited Destroy;
+end;
+
+procedure TVorbisDecoder.Reset;
+begin
+  FPrevLen := 0;
+end;
+
+procedure TVorbisDecoder.PrepareBuffers;
+var
+  Ch, NumCh, N1, MaxValues, F: Integer;
+begin
+  NumCh := FSetup.Ident.Channels;
+  N1    := FSetup.Ident.BlockSize1;
+  SetLength(FSpectrum, NumCh);
+  SetLength(FBlock,    NumCh);
+  SetLength(FPrev,     NumCh);
+  SetLength(FFinalY,   NumCh);
+  SetLength(FStep2,    NumCh);
+  MaxValues := 2;
+  for F := 0 to FSetup.FloorCount - 1 do
+    if FSetup.Floors[F].Floor1.XListCount > MaxValues then
+      MaxValues := FSetup.Floors[F].Floor1.XListCount;
+  for Ch := 0 to NumCh - 1 do
+  begin
+    SetLength(FSpectrum[Ch], N1 shr 1);
+    SetLength(FBlock[Ch],    N1);
+    SetLength(FPrev[Ch],     N1 shr 1);
+    SetLength(FFinalY[Ch],   MaxValues);
+    SetLength(FStep2[Ch],    MaxValues);
+  end;
+  VorbisIMDCTInit(FPlan0, FSetup.Ident.BlockSize0);
+  VorbisIMDCTInit(FPlan1, FSetup.Ident.BlockSize1);
+  FSlope0 := VorbisWindowSlope(FSetup.Ident.BlockSize0 shr 1);
+  FSlope1 := VorbisWindowSlope(FSetup.Ident.BlockSize1 shr 1);
+  FPrevLen := 0;
+end;
 
 function TVorbisDecoder.DecodeAudioPacket(
   Data    : PByte;
@@ -322,202 +346,188 @@ function TVorbisDecoder.DecodeAudioPacket(
 var
   Br          : TAudioBitReader;
   ModeNum     : Integer;
-  ModeIsLong  : Boolean;
-  PrevWinFlag : Boolean;
-  NextWinFlag : Boolean;
-  N, N2       : Integer;
-  Ch          : Integer;
-  NumCh       : Integer;
-  MapIdx      : Integer;
-  FloorOutput : TArray<TArray<Single>>;
-  FloorActive : TArray<Boolean>;
-  Spectrum    : TArray<TArray<Single>>;
-  MDCTOut     : TArray<TArray<Single>>;
-  DoNotDecode : TArray<Boolean>;
-  ResOutputs  : TArray<PSingle>;
-  SmDoNot     : TArray<Boolean>;
-  I, K, SM    : Integer;
+  IsLong      : Boolean;
+  PrevFlag, NextFlag: Integer;
+  N, N0, N2   : Integer;
+  WindowCenter: Integer;
+  LeftStart, LeftEnd, RightStart, RightEnd: Integer;
+  Ch, NumCh   : Integer;
+  Map         : TVorbisMapping;
+  FloorIdx    : Integer;
+  ZeroCh      : TArray<Boolean>;
+  ReallyZero  : TArray<Boolean>;
+  I, J, K, SM : Integer;
+  SmCh        : Integer;
+  SmChannels  : TArray<Integer>;
+  DoNot       : TArray<Boolean>;
+  Outputs     : TArray<PSingle>;
+  HadPrev     : Boolean;
+  L           : Integer;
+  W           : TArray<Single>;
+  V           : Single;
 begin
-  Result := vdrCorrupted;
+  Result  := vdrCorrupted;
   Samples := 0;
   Buffer  := nil;
 
   BrInit(Br, Data, DataLen, boLSBFirst);
+  if DataLen <= 0 then Exit;
 
-  // Bit 0 of audio packet is always 0
+  // Packet type bit must be 0 for audio
   if BrRead(Br, 1) <> 0 then Exit(vdrCorrupted);
 
   NumCh := FSetup.Ident.Channels;
+  N0    := FSetup.Ident.BlockSize0;
 
-  // Mode number
   ModeNum := BrRead(Br, VorbisILog(FSetup.ModeCount - 1));
   if ModeNum >= FSetup.ModeCount then Exit(vdrCorrupted);
 
-  ModeIsLong := FSetup.Modes[ModeNum].BlockFlag;
-  N  := IfThen(ModeIsLong, FSetup.Ident.BlockSize1, FSetup.Ident.BlockSize0);
+  IsLong := FSetup.Modes[ModeNum].BlockFlag;
+  if IsLong then
+  begin
+    N := FSetup.Ident.BlockSize1;
+    PrevFlag := BrRead(Br, 1);
+    NextFlag := BrRead(Br, 1);
+  end
+  else
+  begin
+    N := N0;
+    PrevFlag := 0;
+    NextFlag := 0;
+  end;
   N2 := N shr 1;
 
-  // For long blocks: read prev/next window flags (spec section 4.3.2)
-  PrevWinFlag := ModeIsLong;  // default: same-size transition
-  NextWinFlag := ModeIsLong;
-  if ModeIsLong then
+  // ---- Window boundaries (spec 4.3.1 / stb_vorbis vorbis_decode_initial) ----
+  WindowCenter := N shr 1;
+  if IsLong and (PrevFlag = 0) then
   begin
-    PrevWinFlag := BrRead(Br, 1) <> 0;
-    NextWinFlag := BrRead(Br, 1) <> 0;
+    LeftStart := (N - N0) shr 2;
+    LeftEnd   := (N + N0) shr 2;
+  end
+  else
+  begin
+    LeftStart := 0;
+    LeftEnd   := WindowCenter;
+  end;
+  if IsLong and (NextFlag = 0) then
+  begin
+    RightStart := (N * 3 - N0) shr 2;
+    RightEnd   := (N * 3 + N0) shr 2;
+  end
+  else
+  begin
+    RightStart := WindowCenter;
+    RightEnd   := N;
   end;
 
-  MapIdx := FSetup.Modes[ModeNum].Mapping;
-  var Map := FSetup.Mappings[MapIdx];
+  Map := FSetup.Mappings[FSetup.Modes[ModeNum].Mapping];
 
-  // Allocate per-channel arrays
-  SetLength(FloorOutput, NumCh);
-  SetLength(FloorActive, NumCh);
-  SetLength(Spectrum, NumCh);
-  SetLength(MDCTOut,  NumCh);
-  SetLength(DoNotDecode, NumCh);
+  // ---- Floors ----
+  SetLength(ZeroCh, NumCh);
+  SetLength(ReallyZero, NumCh);
   for Ch := 0 to NumCh - 1 do
   begin
-    SetLength(FloorOutput[Ch], N2);
-    SetLength(Spectrum[Ch], N2);
-    SetLength(MDCTOut[Ch], N);
-    DoNotDecode[Ch] := False;
-    FillChar(Spectrum[Ch][0], N2 * SizeOf(Single), 0);
-    FillChar(MDCTOut[Ch][0],  N  * SizeOf(Single), 0);
+    FloorIdx := Map.SubMapFloor[Map.Mux[Ch]];
+    if FSetup.Floors[FloorIdx].FloorType <> VORBIS_FLOOR_TYPE_1 then
+      Exit(vdrError);  // floor 0 not supported
+    ZeroCh[Ch] := not VorbisFloor1Decode(FSetup.Floors[FloorIdx].Floor1,
+      FSetup.Codebooks, Br, FFinalY[Ch], FStep2[Ch]);
+    ReallyZero[Ch] := ZeroCh[Ch];
   end;
 
-  // ---- Floor decode ----
-  for Ch := 0 to NumCh - 1 do
-  begin
-    var SubMap   := Map.Mux[Ch];
-    var FloorIdx := Map.SubMapFloor[SubMap];
-    var Floor    := FSetup.Floors[FloorIdx];
+  // Re-enable coupled channels when either side is active
+  for I := 0 to Map.Couplings - 1 do
+    if (not ZeroCh[Map.CouplingList[I].Magnitude]) or
+       (not ZeroCh[Map.CouplingList[I].Angle]) then
+    begin
+      ZeroCh[Map.CouplingList[I].Magnitude] := False;
+      ZeroCh[Map.CouplingList[I].Angle]     := False;
+    end;
 
-    if Floor.FloorType = VORBIS_FLOOR_TYPE_1 then
-      FloorActive[Ch] := VorbisDecodeFloor1(Floor.Floor1,
-        FSetup.Codebooks, Br, N2, @FloorOutput[Ch][0])
-    else
-      FloorActive[Ch] := VorbisDecodeFloor0(Floor.Floor0,
-        FSetup.Codebooks, Br, N2, Integer(FSetup.Ident.SampleRate), @FloorOutput[Ch][0]);
-
-    DoNotDecode[Ch] := not FloorActive[Ch];
-  end;
-
-  // ---- Residue decode (per submap) ----
+  // ---- Residues, per submap ----
   for SM := 0 to Map.SubMaps - 1 do
   begin
-    var SmChannels: TArray<Integer>;
-    var SmCh: Integer := 0;
+    SmCh := 0;
+    SetLength(SmChannels, NumCh);
     for Ch := 0 to NumCh - 1 do
       if Map.Mux[Ch] = SM then
       begin
-        SetLength(SmChannels, SmCh + 1);
         SmChannels[SmCh] := Ch;
         Inc(SmCh);
       end;
     if SmCh = 0 then Continue;
-
-    var ResIdx := Map.SubMapResidue[SM];
-    var Res    := FSetup.Residues[ResIdx];
-
-    SetLength(ResOutputs, SmCh);
-    SetLength(SmDoNot, SmCh);
+    SetLength(DoNot, SmCh);
+    SetLength(Outputs, SmCh);
     for K := 0 to SmCh - 1 do
     begin
-      ResOutputs[K] := @Spectrum[SmChannels[K]][0];
-      SmDoNot[K]    := DoNotDecode[SmChannels[K]];
+      DoNot[K]   := ZeroCh[SmChannels[K]];
+      Outputs[K] := @FSpectrum[SmChannels[K]][0];
     end;
-
-    VorbisDecodeResidue(Res, FSetup.Codebooks, Br, SmCh, SmDoNot, ResOutputs, N2);
+    VorbisDecodeResidue(FSetup.Residues[Map.SubMapResidue[SM]], FSetup.Codebooks,
+      Br, SmCh, DoNot, Outputs, N2);
   end;
 
-  // ---- Inverse channel coupling ----
+  // ---- Inverse coupling ----
   if Map.Couplings > 0 then
-    DecoupleChannels(Map.CouplingList, Map.Couplings, Spectrum, N2);
+    DecoupleChannels(Map.CouplingList, Map.Couplings, FSpectrum, N2);
 
-  // ---- Floor × Residue ----
+  // ---- Floor curve synthesis and multiply ----
   for Ch := 0 to NumCh - 1 do
-    if FloorActive[Ch] then
-      for I := 0 to N2 - 1 do
-        Spectrum[Ch][I] := Spectrum[Ch][I] * FloorOutput[Ch][I];
+  begin
+    if ReallyZero[Ch] then
+      FillChar(FSpectrum[Ch][0], N2 * SizeOf(Single), 0)
+    else
+    begin
+      FloorIdx := Map.SubMapFloor[Map.Mux[Ch]];
+      VorbisFloor1Render(FSetup.Floors[FloorIdx].Floor1, FFinalY[Ch], FStep2[Ch],
+        N2, @FSpectrum[Ch][0]);
+    end;
+  end;
 
   // ---- IMDCT ----
   for Ch := 0 to NumCh - 1 do
-    IMDCT(@Spectrum[Ch][0], N, @MDCTOut[Ch][0]);
+    if IsLong then VorbisIMDCT(FPlan1, @FSpectrum[Ch][0], @FBlock[Ch][0])
+    else           VorbisIMDCT(FPlan0, @FSpectrum[Ch][0], @FBlock[Ch][0]);
 
-  // ---- Window ----
-  for Ch := 0 to NumCh - 1 do
-    ApplyWindow(@MDCTOut[Ch][0], N,
-      FSetup.Ident.BlockSize0, FSetup.Ident.BlockSize1,
-      ModeIsLong, PrevWinFlag, NextWinFlag);
-
-  // ---- Overlap-add and output ----
-  if FPrevN = 0 then
+  // ---- Overlap-add with the previous block's right slope ----
+  HadPrev := FPrevLen > 0;
+  if HadPrev then
   begin
-    // First audio frame: no output yet; store current block
+    L := Min(FPrevLen, LeftEnd - LeftStart);
+    if L = Length(FSlope0) then W := FSlope0
+    else if L = Length(FSlope1) then W := FSlope1
+    else W := VorbisWindowSlope(L);
     for Ch := 0 to NumCh - 1 do
-    begin
-      SetLength(FPrevBuf[Ch], N);
-      Move(MDCTOut[Ch][0], FPrevBuf[Ch][0], N * SizeOf(Single));
-    end;
-    FPrevN      := N;
-    FPrevIsLong := ModeIsLong;
+      for J := 0 to L - 1 do
+        FBlock[Ch][LeftStart + J] :=
+          FBlock[Ch][LeftStart + J] * W[J] + FPrev[Ch][J] * W[L - 1 - J];
+  end;
+
+  // Save the right slope (unwindowed) for the next packet
+  FPrevLen := RightEnd - RightStart;
+  for Ch := 0 to NumCh - 1 do
+    Move(FBlock[Ch][RightStart], FPrev[Ch][0], FPrevLen * SizeOf(Single));
+
+  if not HadPrev then
+  begin
+    // First packet after headers/reset: overlap data missing, no output
     Samples := 0;
-    Buffer  := nil;
-    Result  := vdrOK;
-    Exit;
+    Exit(vdrOK);
   end;
 
-  // Output: center of previous block = left half (N_prev/2 samples)
-  var PrevN   := FPrevN;
-  var OutN    := PrevN shr 1;         // samples to output from previous block center
-  var OverLen := Min(OutN, N shr 1);  // overlap region
-
-  Buffer := AudioBufferCreate(NumCh, OutN);
-  Samples := OutN;
-
+  // ---- Output [LeftStart, RightStart) ----
+  Samples := RightStart - LeftStart;
+  Buffer  := AudioBufferCreate(NumCh, Samples);
   for Ch := 0 to NumCh - 1 do
-  begin
-    for I := 0 to OutN - 1 do
+    for I := 0 to Samples - 1 do
     begin
-      var Samp: Single := FPrevBuf[Ch][PrevN div 2 + I];
-      if I < OverLen then
-        Samp := Samp + MDCTOut[Ch][I];
-      // Normalize and clamp
-      if Samp >  1.0 then Samp :=  1.0
-      else if Samp < -1.0 then Samp := -1.0;
-      Buffer[Ch][I] := Samp;
+      V := FBlock[Ch][LeftStart + I];
+      if V > 1.0 then V := 1.0
+      else if V < -1.0 then V := -1.0;
+      Buffer[Ch][I] := V;
     end;
-  end;
-
-  // Store current block for next frame
-  for Ch := 0 to NumCh - 1 do
-  begin
-    if Length(FPrevBuf[Ch]) < N then
-      SetLength(FPrevBuf[Ch], N);
-    Move(MDCTOut[Ch][0], FPrevBuf[Ch][0], N * SizeOf(Single));
-  end;
-  FPrevN      := N;
-  FPrevIsLong := ModeIsLong;
 
   Result := vdrOK;
-end;
-
-// ---------------------------------------------------------------------------
-// Constructor / Destructor
-// ---------------------------------------------------------------------------
-
-constructor TVorbisDecoder.Create;
-begin
-  inherited Create;
-  FHeaderCount := 0;
-  FReady       := False;
-  FPrevN       := 0;
-  FPrevIsLong  := False;
-end;
-
-destructor TVorbisDecoder.Destroy;
-begin
-  inherited Destroy;
 end;
 
 // ---------------------------------------------------------------------------
@@ -542,7 +552,6 @@ begin
     case FHeaderCount of
       0: begin
            if not VorbisParseIdent(Data, DataLen, FSetup) then Exit(vdrError);
-           SetLength(FPrevBuf, FSetup.Ident.Channels);
            Inc(FHeaderCount);
            Exit(vdrHeader);
          end;
@@ -554,6 +563,7 @@ begin
       2: begin
            if not VorbisParseSetup(Data, DataLen, FSetup) then Exit(vdrError);
            Inc(FHeaderCount);
+           PrepareBuffers;
            FReady := True;
            Exit(vdrHeader);
          end;

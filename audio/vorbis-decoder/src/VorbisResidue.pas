@@ -1,22 +1,18 @@
 unit VorbisResidue;
 
 {
-  VorbisResidue.pas - Vorbis residue decode (types 0, 1, and 2)
+  VorbisResidue.pas - Vorbis residue decode, formats 0, 1 and 2 (spec section 8.6)
 
-  Residue decoding recovers the spectral residual signal after floor removal.
-  Spec reference: Vorbis I spec section 8.
+  All three formats share one decode loop (8.6.2):
+    for each pass 0..7
+      for each group of classwords_per_codeword partitions
+        pass 0: read one classification codeword per decoded channel
+        decode each partition of the group with residue_books[class][pass]
 
-  Three residue types share the same decode structure but differ in how
-  the decoded values are placed into output vectors:
+  Format 2 interleaves all channels of the submap into a single vector of
+  length ch * n/2, decodes it like format 1, then de-interleaves (8.6.4).
 
-    Type 0: values interleave within a partition (class-based VQ)
-    Type 1: values are sequential (no interleave)
-    Type 2: channels are interleaved before partition decode, then de-interleaved
-
-  All types use the same multi-pass approach:
-    - Pass 0..7 (up to 8 passes)
-    - For each pass: classify all partitions using class_book, then decode
-      each active partition using the per-class/per-pass book
+  Reference: Vorbis I spec; stb_vorbis decode_residue (public domain).
 
   License: CC0 1.0 Universal (Public Domain)
   https://creativecommons.org/publicdomain/zero/1.0/
@@ -33,213 +29,183 @@ uses
   VorbisTypes,
   VorbisCodebook;
 
-// Decode residue for one or more channels.
-// Res: the residue configuration from setup.
-// CBs: all codebooks.
-// Br: the packet bit reader.
-// Channels: number of channels to decode into (may be 1 for type 0/1, or 2 for coupled type 2).
-// DoNotDecode: boolean per channel — if True, skip that channel's output.
-// Output: array of Channels pointers, each pointing to N floats (N = block spectral lines).
-// N: number of spectral lines (block_size/2).
+// Decode the residue of one submap.
+//   Ch          : number of channels in this submap
+//   DoNotDecode : per-channel flag (floor unused and not re-enabled by coupling)
+//   Outputs     : per-channel spectrum buffers, N2 floats each; decoded channels
+//                 are zeroed first, skipped channels are left untouched
+//   N2          : blocksize / 2
 procedure VorbisDecodeResidue(
-  const Res      : TVorbisResidue;
-  const CBs      : TArray<TVorbisCodebook>;
-  var Br         : TAudioBitReader;
-  Channels       : Integer;
+  const Res        : TVorbisResidue;
+  var CBs          : TArray<TVorbisCodebook>;
+  var Br           : TAudioBitReader;
+  Ch               : Integer;
   const DoNotDecode: TArray<Boolean>;
-  const Output   : TArray<PSingle>;
-  N              : Integer
+  const Outputs    : TArray<PSingle>;
+  N2               : Integer
 );
 
 implementation
 
-// ---------------------------------------------------------------------------
-// Residue decode
-// ---------------------------------------------------------------------------
+// Decode one partition into Target[Offset..Offset+PartSize) (spec 8.6.3 / 8.6.4).
+// Limit bounds writes (actual vector size).
+function DecodePartition(var Book: TVorbisCodebook; var Br: TAudioBitReader;
+  Target: PSingle; Offset, PartSize, Limit, RType: Integer): Boolean;
+var
+  Dim, Step, K, D, Sym: Integer;
+  Row: PSingle;
+begin
+  Result := False;
+  Dim := Book.Dimensions;
+  if (Dim <= 0) or (Length(Book.VQValues) = 0) then Exit;
 
-procedure VorbisDecodeResidue(
-  const Res      : TVorbisResidue;
-  const CBs      : TArray<TVorbisCodebook>;
-  var Br         : TAudioBitReader;
-  Channels       : Integer;
+  if RType = VORBIS_RESIDUE_TYPE_0 then
+  begin
+    Step := PartSize div Dim;
+    for K := 0 to Step - 1 do
+    begin
+      Sym := VorbisCodebookDecode(Book, Br);
+      if Sym < 0 then Exit;
+      Row := VorbisCodebookVQRow(Book, Sym);
+      for D := 0 to Dim - 1 do
+        if Offset + K + D * Step < Limit then
+          Target[Offset + K + D * Step] := Target[Offset + K + D * Step] + Row[D];
+    end;
+  end
+  else
+  begin
+    K := 0;
+    while K < PartSize do
+    begin
+      Sym := VorbisCodebookDecode(Book, Br);
+      if Sym < 0 then Exit;
+      Row := VorbisCodebookVQRow(Book, Sym);
+      for D := 0 to Dim - 1 do
+        if Offset + K + D < Limit then
+          Target[Offset + K + D] := Target[Offset + K + D] + Row[D];
+      Inc(K, Dim);
+    end;
+  end;
+  Result := True;
+end;
+
+// Generic loop over Ch vectors of ActualSize floats (formats 0/1, or the
+// single interleaved vector of format 2).
+procedure DecodeVectors(
+  const Res        : TVorbisResidue;
+  var CBs          : TArray<TVorbisCodebook>;
+  var Br           : TAudioBitReader;
+  Ch               : Integer;
   const DoNotDecode: TArray<Boolean>;
-  const Output   : TArray<PSingle>;
-  N              : Integer
+  const Vectors    : TArray<PSingle>;
+  ActualSize       : Integer;
+  RType            : Integer
 );
 var
-  PassIdx     : Integer;
-  PartIdx     : Integer;
-  PartCount   : Integer;
-  ChIdx       : Integer;
-  ClassBook   : Integer;
-  PartClass   : TArray<TArray<Integer>>;  // PartClass[ch][part] = class index
-  ResBegin    : Integer;
-  ResEnd      : Integer;
-  PartSize    : Integer;
-  Classifications: Integer;
-  I           : Integer;
-  ClassVal    : Integer;
-  BookIdx     : Integer;
-  VecBuf      : TArray<Single>;
-  // For type 2: interleaved buffer
-  Interleaved : TArray<Single>;
-  IntN        : Integer;
-  // Stage count
-  PassCount   : Integer;
+  LimitBegin, LimitEnd, NRead, PartRead: Integer;
+  ClassWords   : Integer;
+  Classif      : TArray<TArray<Integer>>;
+  Pass, PCount : Integer;
+  I, J, Temp   : Integer;
+  C, B, Offset : Integer;
 begin
-  ResBegin    := Res.Begin_;
-  ResEnd      := Res.End_;
-  if ResEnd > N then ResEnd := N;
-  PartSize    := Res.PartitionSize;
-  Classifications := Res.Classifications;
-  ClassBook   := Res.ClassBook;
-  PassCount   := Res.StageCount;
+  if Res.PartitionSize <= 0 then Exit;
+  LimitBegin := Min(Integer(Res.Begin_), ActualSize);
+  LimitEnd   := Min(Integer(Res.End_),   ActualSize);
+  NRead      := LimitEnd - LimitBegin;
+  if NRead <= 0 then Exit;
+  PartRead   := NRead div Res.PartitionSize;
+  if PartRead <= 0 then Exit;
 
-  if PartSize <= 0 then Exit;
-  if ResEnd <= ResBegin then Exit;
+  ClassWords := CBs[Res.ClassBook].Dimensions;
+  if ClassWords <= 0 then Exit;
 
-  PartCount := (ResEnd - ResBegin) div PartSize;
-  if PartCount <= 0 then Exit;
+  SetLength(Classif, Ch);
+  for J := 0 to Ch - 1 do
+    SetLength(Classif[J], PartRead + ClassWords);
 
-  // Allocate partition class arrays
-  SetLength(PartClass, Channels);
-  for ChIdx := 0 to Channels - 1 do
-    SetLength(PartClass[ChIdx], PartCount);
-
-  SetLength(VecBuf, CBs[0].Dimensions + 1);  // sized below per book
-
-  // For type 2: build interleaved residue vector, decode it, then scatter
-  if Res.ResType = VORBIS_RESIDUE_TYPE_2 then
+  for Pass := 0 to 7 do
   begin
-    IntN := N * Channels;
-    SetLength(Interleaved, IntN);
-    for I := 0 to IntN - 1 do Interleaved[I] := 0.0;
-  end;
-
-  // ---- Pass 0: classify all partitions ----
-  // For each channel, read partition classes using class_book
-  // The class_book gives Classifications^(partition_count / CB.Dimensions) entries
-  // per read, covering multiple partitions at once.
-
-  var ClassbookDim := CBs[ClassBook].Dimensions;
-  var PartsPerRead := ClassbookDim;  // number of partitions per codebook entry
-
-  for ChIdx := 0 to Channels - 1 do
-  begin
-    if (Res.ResType < VORBIS_RESIDUE_TYPE_2) and DoNotDecode[ChIdx] then Continue;
-
-    var PartRead := 0;
-    while PartRead < PartCount do
+    PCount := 0;
+    while PCount < PartRead do
     begin
-      ClassVal := VorbisCodebookDecode(CBs[ClassBook], Br);
-      if ClassVal < 0 then
+      if Pass = 0 then
+        for J := 0 to Ch - 1 do
+          if not DoNotDecode[J] then
+          begin
+            Temp := VorbisCodebookDecode(CBs[Res.ClassBook], Br);
+            if Temp < 0 then Exit;  // end of packet: stop, keep what we have
+            for I := ClassWords - 1 downto 0 do
+            begin
+              Classif[J][I + PCount] := Temp mod Res.Classifications;
+              Temp := Temp div Res.Classifications;
+            end;
+          end;
+      I := 0;
+      while (I < ClassWords) and (PCount < PartRead) do
       begin
-        // Truncated packet — fill remaining with class 0
-        while PartRead < PartCount do
-        begin
-          PartClass[ChIdx][PartRead] := 0;
-          Inc(PartRead);
-        end;
-        Break;
+        for J := 0 to Ch - 1 do
+          if not DoNotDecode[J] then
+          begin
+            C := Classif[J][PCount];
+            B := Res.Books[C][Pass];
+            if B >= 0 then
+            begin
+              Offset := Integer(Res.Begin_) + PCount * Res.PartitionSize;
+              if not DecodePartition(CBs[B], Br, Vectors[J], Offset,
+                                     Res.PartitionSize, ActualSize, RType) then
+                Exit;
+            end;
+          end;
+        Inc(I);
+        Inc(PCount);
       end;
-      // Extract per-partition class indices from ClassVal
-      // (class book encodes multiple partition classes in one codeword)
-      var Temp := ClassVal;
-      var K: Integer;
-      for K := PartRead + PartsPerRead - 1 downto PartRead do
-      begin
-        if K < PartCount then
-          PartClass[ChIdx][K] := Temp mod Classifications;
-        Temp := Temp div Classifications;
-      end;
-      Inc(PartRead, PartsPerRead);
     end;
   end;
+end;
 
-  // ---- Passes 0..7: decode residue values ----
-  for PassIdx := 0 to PassCount - 1 do
+procedure VorbisDecodeResidue(
+  const Res        : TVorbisResidue;
+  var CBs          : TArray<TVorbisCodebook>;
+  var Br           : TAudioBitReader;
+  Ch               : Integer;
+  const DoNotDecode: TArray<Boolean>;
+  const Outputs    : TArray<PSingle>;
+  N2               : Integer
+);
+var
+  J, I       : Integer;
+  AnyDecode  : Boolean;
+  Merged     : TArray<Single>;
+  MergedPtr  : TArray<PSingle>;
+  MergedFlag : TArray<Boolean>;
+begin
+  for J := 0 to Ch - 1 do
+    if not DoNotDecode[J] then
+      FillChar(Outputs[J]^, N2 * SizeOf(Single), 0);
+
+  if Res.ResType <> VORBIS_RESIDUE_TYPE_2 then
   begin
-    for ChIdx := 0 to Channels - 1 do
-    begin
-      if (Res.ResType < VORBIS_RESIDUE_TYPE_2) and DoNotDecode[ChIdx] then Continue;
-
-      for PartIdx := 0 to PartCount - 1 do
-      begin
-        var Cls := PartClass[ChIdx][PartIdx];
-        BookIdx := Res.Books[Cls][PassIdx];
-        if BookIdx < 0 then Continue;  // no book for this pass/class
-
-        var Offset := ResBegin + PartIdx * PartSize;
-        var CBook  := CBs[BookIdx];
-        SetLength(VecBuf, CBook.Dimensions);
-
-        case Res.ResType of
-          VORBIS_RESIDUE_TYPE_0:
-          begin
-            // Decode VQ vectors; each vector dimension interleaves within partition
-            // step = PartSize / Dimensions
-            var Steps := PartSize div CBook.Dimensions;
-            var Step: Integer;
-            for Step := 0 to Steps - 1 do
-            begin
-              if not VorbisCodebookDecodeVQ(CBook, Br, @VecBuf[0]) then Break;
-              for I := 0 to CBook.Dimensions - 1 do
-              begin
-                var Pos := Offset + Step + I * Steps;
-                if (Pos >= ResBegin) and (Pos < ResEnd) then
-                  Output[ChIdx][Pos] := Output[ChIdx][Pos] + VecBuf[I];
-              end;
-            end;
-          end;
-
-          VORBIS_RESIDUE_TYPE_1:
-          begin
-            // Sequential: decode VQ vectors; place consecutively
-            var Pos := Offset;
-            while Pos < Offset + PartSize do
-            begin
-              if not VorbisCodebookDecodeVQ(CBook, Br, @VecBuf[0]) then Break;
-              for I := 0 to CBook.Dimensions - 1 do
-              begin
-                if (Pos + I >= ResBegin) and (Pos + I < ResEnd) then
-                  Output[ChIdx][Pos + I] := Output[ChIdx][Pos + I] + VecBuf[I];
-              end;
-              Inc(Pos, CBook.Dimensions);
-            end;
-          end;
-
-          VORBIS_RESIDUE_TYPE_2:
-          begin
-            // Interleaved: decode as if it were type 1 on the merged vector
-            // ChIdx here is always 0 (we pass a single merged vector)
-            var Pos := Offset;
-            while Pos < Offset + PartSize do
-            begin
-              if not VorbisCodebookDecodeVQ(CBook, Br, @VecBuf[0]) then Break;
-              for I := 0 to CBook.Dimensions - 1 do
-              begin
-                if (Pos + I < IntN) then
-                  Interleaved[Pos + I] := Interleaved[Pos + I] + VecBuf[I];
-              end;
-              Inc(Pos, CBook.Dimensions);
-            end;
-          end;
-        end; // case
-      end; // PartIdx
-    end; // ChIdx
-  end; // PassIdx
-
-  // ---- Type 2: de-interleave ----
-  if Res.ResType = VORBIS_RESIDUE_TYPE_2 then
-  begin
-    for I := 0 to IntN - 1 do
-    begin
-      ChIdx := I mod Channels;
-      var LineIdx := I div Channels;
-      if (LineIdx < N) and not DoNotDecode[ChIdx] then
-        Output[ChIdx][LineIdx] := Output[ChIdx][LineIdx] + Interleaved[I];
-    end;
+    DecodeVectors(Res, CBs, Br, Ch, DoNotDecode, Outputs, N2, Res.ResType);
+    Exit;
   end;
+
+  // Format 2: all channels interleaved into one vector of Ch * N2 values.
+  AnyDecode := False;
+  for J := 0 to Ch - 1 do
+    if not DoNotDecode[J] then AnyDecode := True;
+  if not AnyDecode then Exit;
+
+  SetLength(Merged, Ch * N2);
+  FillChar(Merged[0], Ch * N2 * SizeOf(Single), 0);
+  SetLength(MergedPtr, 1);  MergedPtr[0]  := @Merged[0];
+  SetLength(MergedFlag, 1); MergedFlag[0] := False;
+  DecodeVectors(Res, CBs, Br, 1, MergedFlag, MergedPtr, Ch * N2, VORBIS_RESIDUE_TYPE_1);
+
+  for I := 0 to N2 - 1 do
+    for J := 0 to Ch - 1 do
+      if not DoNotDecode[J] then
+        Outputs[J][I] := Merged[I * Ch + J];
 end;
 
 end.

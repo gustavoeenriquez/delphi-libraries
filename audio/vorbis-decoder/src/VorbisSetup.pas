@@ -1,4 +1,4 @@
-unit VorbisSetup;
+﻿unit VorbisSetup;
 
 {
   VorbisSetup.pas - Vorbis header packet parsing
@@ -300,6 +300,7 @@ begin
 
     if FType = VORBIS_FLOOR_TYPE_0 then
     begin
+      // Floor 0 is parsed for completeness but not supported for decode.
       F.Floor0.Order          := BrRead(Br, 8);
       F.Floor0.Rate           := BrRead(Br, 16);
       F.Floor0.BarkMapSize    := BrRead(Br, 16);
@@ -349,7 +350,7 @@ begin
 
       SetLength(F.Floor1.XList, XListCount);
       F.Floor1.XList[0] := 0;
-      F.Floor1.XList[1] := BlockSize1 div 2;  // n/2 of longest block
+      F.Floor1.XList[1] := 1 shl F.Floor1.RangeBits;  // spec 7.2.2
 
       var XIdx: Integer := 2;
       for J := 0 to Partitions - 1 do
@@ -363,8 +364,25 @@ begin
       end;
       F.Floor1.XListCount := XListCount;
 
-      // Precompute sorted index
+      // Precompute sorted index and low/high neighbours (spec 9.2.3, 9.2.4)
       SortFloor1X(F.Floor1);
+      SetLength(F.Floor1.LowNeighbor,  XListCount);
+      SetLength(F.Floor1.HighNeighbor, XListCount);
+      for J := 2 to XListCount - 1 do
+      begin
+        var Lo := -1;
+        var Hi := -1;
+        for K := 0 to J - 1 do
+        begin
+          if (F.Floor1.XList[K] < F.Floor1.XList[J]) and
+             ((Lo < 0) or (F.Floor1.XList[K] > F.Floor1.XList[Lo])) then Lo := K;
+          if (F.Floor1.XList[K] > F.Floor1.XList[J]) and
+             ((Hi < 0) or (F.Floor1.XList[K] < F.Floor1.XList[Hi])) then Hi := K;
+        end;
+        if (Lo < 0) or (Hi < 0) then Exit;  // X values must be bracketed by 0 and 1 shl RangeBits
+        F.Floor1.LowNeighbor[J]  := Lo;
+        F.Floor1.HighNeighbor[J] := Hi;
+      end;
     end
     else
       Exit; // unknown floor type
@@ -401,18 +419,21 @@ begin
     Res.Classifications := BrRead(Br, 6) + 1;
     Res.ClassBook    := BrRead(Br, 8);
 
-    // For each classification: cascade bitmask + book indices
-    MaxPass := 0;
+    // Cascade bitmasks for all classifications first, then the books (spec 8.6.1)
+    var Cascade: array[0..63] of Integer;
     for J := 0 to Res.Classifications - 1 do
     begin
       var HighBits: Integer := 0;
       var LowBits : Integer := BrRead(Br, 3);
       if BrRead(Br, 1) <> 0 then
         HighBits := BrRead(Br, 5);
-      var Cascade: Integer := (HighBits shl 3) or LowBits;
+      Cascade[J] := (HighBits shl 3) or LowBits;
+    end;
+    MaxPass := 0;
+    for J := 0 to Res.Classifications - 1 do
       for K := 0 to 7 do
       begin
-        if (Cascade and (1 shl K)) <> 0 then
+        if (Cascade[J] and (1 shl K)) <> 0 then
         begin
           Res.Books[J][K] := BrRead(Br, 8);
           if K + 1 > MaxPass then MaxPass := K + 1;
@@ -420,7 +441,6 @@ begin
         else
           Res.Books[J][K] := -1;
       end;
-    end;
     Res.StageCount := MaxPass;
     Residues[I] := Res;
   end;

@@ -1,4 +1,4 @@
-unit VorbisTypes;
+﻿unit VorbisTypes;
 
 {
   VorbisTypes.pas - Vorbis I codec types and constants
@@ -61,6 +61,7 @@ const
 
   // Codebook lookup types
   VORBIS_LOOKUP_NONE       = 0;
+  VORBIS_FAST_BITS   = 10;  // Huffman fast-table width (bits)
   VORBIS_LOOKUP_TYPE1      = 1;  // implicit VQ, dimensions computed from sqrt
   VORBIS_LOOKUP_TYPE2      = 2;  // explicit VQ, entry_count * dimensions values
 
@@ -74,20 +75,27 @@ type
     Dimensions      : Integer;       // vector dimension
     Entries         : Integer;       // total codeword entries
     Lengths         : TArray<Byte>;  // Huffman length per entry (0 = unused)
-    // Huffman decode table (canonical huffman)
-    HuffSymbols     : TArray<Integer>;  // symbol at each decode position
+    // Huffman codewords, assigned per spec section 3.2.1 (first available leaf).
+    // Codewords[i] holds the codeword in stream order: bit 0 = first bit read.
+    Codewords       : TArray<Cardinal>;
     HuffMinLen      : Integer;
     HuffMaxLen      : Integer;
+    // Fast lookup: FastTable[next VORBIS_FAST_BITS bits] = entry or -1
+    FastTable       : TArray<Integer>;
+    // Long codes (> VORBIS_FAST_BITS): MSB-aligned codewords sorted ascending
+    SortedCodes     : TArray<Cardinal>;
+    SortedSyms      : TArray<Integer>;
+    SortedCount     : Integer;
     // Lookup table (VQ or scalar multipliers)
     LookupType      : Integer;
     MinValue        : Single;
     DeltaValue      : Single;
     ValueBits       : Integer;       // bits per multiplicand
     SequenceP       : Boolean;       // additive sequence flag
-    Multiplicands   : TArray<Single>; // decoded float VQ values
-    // Flat decode table for fast lookup
-    // Table[code_len - HuffMinLen][code_bits] -> symbol or -1
-    DecodeTable     : TArray<TArray<Integer>>;
+    Lookup1Count    : Integer;       // lookup1_values (type 1 only)
+    Multiplicands   : TArray<Single>; // raw multiplicands scaled: Min + Delta * raw
+    // Fully expanded VQ vectors: VQValues[entry * Dimensions + d]
+    VQValues        : TArray<Single>;
   end;
 
 // ---------------------------------------------------------------------------
@@ -129,6 +137,9 @@ type
     XListCount      : Integer;
     // Sorted index list (argsort of XList)
     XSorted         : TArray<Integer>;
+    // Low/high neighbour index per X-list position (spec 9.2.3/9.2.4)
+    LowNeighbor     : TArray<Integer>;
+    HighNeighbor    : TArray<Integer>;
   end;
 
   TVorbisFloor = record
@@ -279,11 +290,11 @@ var
   Exponent : Integer;
 begin
   // Vorbis float32: bit31=sign, bits[30..21]=exponent, bits[20..0]=mantissa
-  // value = mantissa * 2^(exponent - 788 - 21)
+  // value = mantissa * 2^(exponent - 788)   (spec 9.2.2 float32_unpack)
   Mantissa := Int64(V and $1FFFFF);
   Exponent := Integer((V and $7FE00000) shr 21);
   if (V and $80000000) <> 0 then Mantissa := -Mantissa;
-  Result := Mantissa * Power(2.0, Exponent - 788 - 21);
+  Result := Mantissa * Power(2.0, Exponent - 788);
 end;
 
 function VorbisLookup1Values(Entries, Dimensions: Integer): Integer;

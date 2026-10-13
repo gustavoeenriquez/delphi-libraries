@@ -1,25 +1,15 @@
 unit VorbisCodebook;
 
 {
-  VorbisCodebook.pas - Vorbis codebook decode (Huffman + VQ)
+  VorbisCodebook.pas - Vorbis codebook: Huffman codeword assignment, decode and VQ lookup
 
-  Implements section 3 of the Vorbis I spec:
-    - Canonical Huffman decode from bit lengths
-    - Lookup type 1 (implicit VQ: dimensions indexed combinatorially)
-    - Lookup type 2 (explicit VQ: multiplicands stored per entry)
-    - VorbisCodebookDecode -> one integer codeword index
-    - VorbisCodebookDecodeVQ -> one float VQ vector
+  Codeword assignment follows the Vorbis I spec section 3.2.1: entries are
+  processed in order and each receives the lowest available leaf of its
+  length (this is NOT canonical Huffman ordering by length).
 
-  Huffman flat-table approach (LSB-first):
-    The stream uses LSB-first packing. Reading N bits with BrReadLSB gives
-    an integer where bit 0 of the stream is bit 0 of the result. Therefore
-    the canonical codeword value directly indexes the flat lookup table —
-    no bit reversal is needed.
-
-    For a codeword with value C and length L:
-      - Fill table entries C, C+2^L, C+2*2^L, ... < 2^MaxLen
-      - Each entry stores (symbol, actual_len)
-    On decode: read MaxLen bits, look up table, put back (MaxLen-actual_len) bits.
+  Decode uses a fast table for codes up to VORBIS_FAST_BITS bits and a
+  binary search over MSB-aligned sorted codewords for longer codes, the
+  same scheme as stb_vorbis (public domain, nothings/stb).
 
   License: CC0 1.0 Universal (Public Domain)
   https://creativecommons.org/publicdomain/zero/1.0/
@@ -35,137 +25,207 @@ uses
   AudioBitReader,
   VorbisTypes;
 
-// Build Huffman decode structures from the bit-length array already stored in CB.
-// Must be called once after filling CB.Lengths, CB.LookupType, CB.MinValue,
-// CB.DeltaValue, CB.ValueBits, CB.SequenceP, and CB.Multiplicands (raw ints as Single).
-// Returns False if the codebook is invalid.
+// Build the decode tables and VQ vectors. Lengths, Entries, Dimensions,
+// LookupType and the raw Multiplicands must already be filled.
+// Returns False if the length set is over-subscribed (invalid stream).
 function VorbisCodebookInit(var CB: TVorbisCodebook): Boolean;
 
-// Decode one codeword index from the bit stream.  Returns -1 on error.
+// Decode one codeword (entry index). Returns -1 on end of packet / bad code.
 function VorbisCodebookDecode(var CB: TVorbisCodebook;
   var Br: TAudioBitReader): Integer;
 
-// Decode one VQ vector into Output[0..CB.Dimensions-1].  Returns False on error.
+// Decode one VQ vector into Output[0..CB.Dimensions-1]. Returns False on error.
 function VorbisCodebookDecodeVQ(var CB: TVorbisCodebook;
   var Br: TAudioBitReader; Output: PSingle): Boolean;
 
+// Pointer to the expanded VQ vector of an entry (Dimensions floats).
+function VorbisCodebookVQRow(const CB: TVorbisCodebook; Entry: Integer): PSingle; inline;
+
+// Reverse all 32 bits.
+function BitReverse32(V: Cardinal): Cardinal;
+
 implementation
 
+function BitReverse32(V: Cardinal): Cardinal;
+begin
+  V := ((V and $AAAAAAAA) shr 1) or ((V and $55555555) shl 1);
+  V := ((V and $CCCCCCCC) shr 2) or ((V and $33333333) shl 2);
+  V := ((V and $F0F0F0F0) shr 4) or ((V and $0F0F0F0F) shl 4);
+  V := ((V and $FF00FF00) shr 8) or ((V and $00FF00FF) shl 8);
+  Result := (V shr 16) or (V shl 16);
+end;
+
 // ---------------------------------------------------------------------------
-// Canonical Huffman table build (LSB-first, no bit reversal)
+// Codeword assignment (spec 3.2.1, same algorithm as stb_vorbis compute_codewords)
 // ---------------------------------------------------------------------------
+
+function ComputeCodewords(var CB: TVorbisCodebook): Boolean;
+var
+  Available : array[0..32] of Cardinal;
+  I, K, Z, Y: Integer;
+  Res       : Cardinal;
+  N         : Integer;
+begin
+  N := CB.Entries;
+  SetLength(CB.Codewords, N);
+  FillChar(Available, SizeOf(Available), 0);
+
+  // First used entry gets codeword 0
+  K := 0;
+  while (K < N) and (CB.Lengths[K] = 0) do Inc(K);
+  if K = N then Exit(True);  // no used entries (allowed, never decoded)
+
+  CB.Codewords[K] := 0;
+  for I := 1 to CB.Lengths[K] do
+    Available[I] := Cardinal(1) shl (32 - I);
+
+  for I := K + 1 to N - 1 do
+  begin
+    Z := CB.Lengths[I];
+    if Z = 0 then Continue;
+    // Lowest available leaf at depth <= Z
+    while (Z > 0) and (Available[Z] = 0) do Dec(Z);
+    if Z = 0 then Exit(False);  // over-subscribed
+    Res := Available[Z];
+    Available[Z] := 0;
+    CB.Codewords[I] := BitReverse32(Res);  // stream order: first bit = bit 0
+    // Propagate the remaining sub-leaves down to length Z+1..Len
+    if Z <> CB.Lengths[I] then
+      for Y := CB.Lengths[I] downto Z + 1 do
+        Available[Y] := Res + (Cardinal(1) shl (32 - Y));
+  end;
+  Result := True;
+end;
+
+procedure QuickSortCodes(var Codes: TArray<Cardinal>; var Syms: TArray<Integer>; L, R: Integer);
+var
+  I, J  : Integer;
+  P     : Cardinal;
+  TC    : Cardinal;
+  TS    : Integer;
+begin
+  while L < R do
+  begin
+    I := L; J := R; P := Codes[(L + R) shr 1];
+    repeat
+      while Codes[I] < P do Inc(I);
+      while Codes[J] > P do Dec(J);
+      if I <= J then
+      begin
+        TC := Codes[I]; Codes[I] := Codes[J]; Codes[J] := TC;
+        TS := Syms[I];  Syms[I]  := Syms[J];  Syms[J]  := TS;
+        Inc(I); Dec(J);
+      end;
+    until I > J;
+    if J - L < R - I then
+    begin
+      QuickSortCodes(Codes, Syms, L, J);
+      L := I;
+    end
+    else
+    begin
+      QuickSortCodes(Codes, Syms, I, R);
+      R := J;
+    end;
+  end;
+end;
 
 function VorbisCodebookInit(var CB: TVorbisCodebook): Boolean;
 var
-  EntryCount  : Integer;
-  I, L, S     : Integer;
-  MaxLen      : Integer;
-  Code        : Cardinal;
-  PrevLen     : Integer;
-  TableSize   : Integer;
-  Step        : Integer;
-  J           : Integer;
-  // Sorted list of (symbol, length) pairs
-  SortedSym   : TArray<Integer>;
-  SortedLen   : TArray<Integer>;
-  Codewords   : TArray<Cardinal>;
-  MultCount   : Integer;
+  I, D, E     : Integer;
+  FastSize    : Integer;
+  Z           : Cardinal;
+  LongCount   : Integer;
+  Last        : Single;
+  Off, Divisor: Integer;
 begin
   Result := False;
-  EntryCount := CB.Entries;
-  if EntryCount <= 0 then Exit;
+  if CB.Entries <= 0 then Exit;
+  if Length(CB.Lengths) < CB.Entries then Exit;
 
-  // Find MaxLen; count used entries
-  MaxLen := 0;
-  for I := 0 to EntryCount - 1 do
-    if CB.Lengths[I] > MaxLen then MaxLen := CB.Lengths[I];
+  CB.HuffMinLen := 0;
+  CB.HuffMaxLen := 0;
+  for I := 0 to CB.Entries - 1 do
+    if CB.Lengths[I] > 0 then
+    begin
+      if CB.Lengths[I] > 32 then Exit;
+      if (CB.HuffMinLen = 0) or (CB.Lengths[I] < CB.HuffMinLen) then
+        CB.HuffMinLen := CB.Lengths[I];
+      if CB.Lengths[I] > CB.HuffMaxLen then CB.HuffMaxLen := CB.Lengths[I];
+    end;
 
-  if MaxLen = 0 then Exit;
-  if MaxLen > 24 then Exit;  // safety cap (practical max ~24 in real Vorbis files)
+  if not ComputeCodewords(CB) then Exit;
 
-  CB.HuffMinLen := 32;
-  CB.HuffMaxLen := MaxLen;
-  for I := 0 to EntryCount - 1 do
-    if (CB.Lengths[I] > 0) and (CB.Lengths[I] < CB.HuffMinLen) then
-      CB.HuffMinLen := CB.Lengths[I];
-
-  // Build sorted list: by (length ASC, symbol ASC)
-  SetLength(SortedSym, EntryCount);
-  SetLength(SortedLen, EntryCount);
-  S := 0;
-  for L := 1 to MaxLen do
-    for I := 0 to EntryCount - 1 do
-      if CB.Lengths[I] = L then
+  // ---- Fast table ----
+  FastSize := 1 shl VORBIS_FAST_BITS;
+  SetLength(CB.FastTable, FastSize);
+  for I := 0 to FastSize - 1 do CB.FastTable[I] := -1;
+  LongCount := 0;
+  for I := 0 to CB.Entries - 1 do
+  begin
+    if CB.Lengths[I] = 0 then Continue;
+    if CB.Lengths[I] <= VORBIS_FAST_BITS then
+    begin
+      Z := CB.Codewords[I];
+      while Z < Cardinal(FastSize) do
       begin
-        SortedSym[S] := I;
-        SortedLen[S] := L;
-        Inc(S);
+        CB.FastTable[Z] := I;
+        Inc(Z, Cardinal(1) shl CB.Lengths[I]);
       end;
-  // S = number of used entries
+    end
+    else
+      Inc(LongCount);
+  end;
 
-  // Assign canonical codewords (ascending within each length)
-  SetLength(Codewords, S);
-  Code := 0;
-  PrevLen := 0;
-  for I := 0 to S - 1 do
-  begin
-    L := SortedLen[I];
-    if L <> PrevLen then
+  // ---- Sorted long codes (MSB-aligned) ----
+  CB.SortedCount := LongCount;
+  SetLength(CB.SortedCodes, LongCount);
+  SetLength(CB.SortedSyms,  LongCount);
+  D := 0;
+  for I := 0 to CB.Entries - 1 do
+    if CB.Lengths[I] > VORBIS_FAST_BITS then
     begin
-      Code := Code shl (L - PrevLen);
-      PrevLen := L;
+      CB.SortedCodes[D] := BitReverse32(CB.Codewords[I]);
+      CB.SortedSyms[D]  := I;
+      Inc(D);
     end;
-    Codewords[I] := Code;
-    Inc(Code);
-  end;
+  if LongCount > 1 then
+    QuickSortCodes(CB.SortedCodes, CB.SortedSyms, 0, LongCount - 1);
 
-  // Build flat lookup table of size 2^MaxLen
-  // For LSB-first: canonical code value C of length L occupies entries
-  //   C, C + 2^L, C + 2*(2^L), ... < 2^MaxLen
-  // because the first L bits of the read integer are exactly C.
-  TableSize := 1 shl MaxLen;
-  SetLength(CB.HuffSymbols, TableSize);
-  // Reuse DecodeTable[0] = symbols, DecodeTable[1] = lengths
-  SetLength(CB.DecodeTable, 2);
-  SetLength(CB.DecodeTable[0], TableSize);
-  SetLength(CB.DecodeTable[1], TableSize);
-  for I := 0 to TableSize - 1 do
-  begin
-    CB.DecodeTable[0][I] := -1;
-    CB.DecodeTable[1][I] := 0;
-  end;
-
-  for I := 0 to S - 1 do
-  begin
-    L := SortedLen[I];
-    Step := 1 shl L;
-    J := Integer(Codewords[I]);
-    while J < TableSize do
-    begin
-      // Longer codes override shorter codes at shared entries (LSB-first table)
-      CB.DecodeTable[0][J] := SortedSym[I];
-      CB.DecodeTable[1][J] := L;
-      Inc(J, Step);
-    end;
-  end;
-
-  // ---- Build VQ multiplicands ----
-  if CB.LookupType = VORBIS_LOOKUP_NONE then
-  begin
-    Result := True;
-    Exit;
-  end;
+  // ---- VQ vectors ----
+  CB.VQValues := nil;
+  if CB.LookupType = VORBIS_LOOKUP_NONE then Exit(True);
+  if CB.Dimensions <= 0 then Exit;
 
   if CB.LookupType = VORBIS_LOOKUP_TYPE1 then
-    MultCount := VorbisLookup1Values(EntryCount, CB.Dimensions)
-  else // TYPE2
-    MultCount := EntryCount * CB.Dimensions;
+    CB.Lookup1Count := VorbisLookup1Values(CB.Entries, CB.Dimensions)
+  else
+    CB.Lookup1Count := 0;
 
-  // Convert raw integer multiplicands (stored as Single) to float values
-  // Value[i] = MinValue + DeltaValue * raw[i]
-  for I := 0 to MultCount - 1 do
+  // Multiplicands arrive as raw integers stored in Single; scale them.
+  for I := 0 to High(CB.Multiplicands) do
     CB.Multiplicands[I] := CB.MinValue + CB.DeltaValue * CB.Multiplicands[I];
 
+  SetLength(CB.VQValues, CB.Entries * CB.Dimensions);
+  for E := 0 to CB.Entries - 1 do
+  begin
+    Last := 0.0;
+    Divisor := 1;
+    for D := 0 to CB.Dimensions - 1 do
+    begin
+      if CB.LookupType = VORBIS_LOOKUP_TYPE1 then
+      begin
+        if CB.Lookup1Count <= 0 then Exit;
+        Off := (E div Divisor) mod CB.Lookup1Count;
+        Divisor := Divisor * CB.Lookup1Count;
+      end
+      else
+        Off := E * CB.Dimensions + D;
+      if Off >= Length(CB.Multiplicands) then Exit;
+      CB.VQValues[E * CB.Dimensions + D] := CB.Multiplicands[Off] + Last;
+      if CB.SequenceP then Last := CB.VQValues[E * CB.Dimensions + D];
+    end;
+  end;
   Result := True;
 end;
 
@@ -173,92 +233,89 @@ end;
 // Huffman decode
 // ---------------------------------------------------------------------------
 
+// Peek the next 32 bits (LSB-first) without advancing; bits past the end read as 0.
+function PeekBits32(const Br: TAudioBitReader): Cardinal;
+var
+  ByteIdx, ByteCount, B: Integer;
+  Acc: UInt64;
+begin
+  ByteIdx   := Br.Pos shr 3;
+  ByteCount := (Br.Limit + 7) shr 3;
+  Acc := 0;
+  for B := 0 to 4 do
+    if ByteIdx + B < ByteCount then
+      Acc := Acc or (UInt64(Br.Buf[ByteIdx + B]) shl (8 * B));
+  Result := Cardinal(Acc shr (Br.Pos and 7));
+end;
+
 function VorbisCodebookDecode(var CB: TVorbisCodebook;
   var Br: TAudioBitReader): Integer;
 var
-  Bits  : Cardinal;
+  Acc   : Cardinal;
   Sym   : Integer;
   Len   : Integer;
-  ML    : Integer;
+  Code  : Cardinal;
+  X, N, M: Integer;
 begin
   Result := -1;
-  ML := CB.HuffMaxLen;
-  if ML <= 0 then Exit;
+  if Br.Pos >= Br.Limit then Exit;
+  if Length(CB.FastTable) = 0 then Exit;
 
-  // Read ML bits (LSB-first); this advances Br.Pos by ML
-  Bits := BrRead(Br, ML);
+  Acc := PeekBits32(Br);
+  Sym := CB.FastTable[Acc and ((1 shl VORBIS_FAST_BITS) - 1)];
+  if Sym < 0 then
+  begin
+    if CB.SortedCount = 0 then Exit;
+    Code := BitReverse32(Acc);
+    // Largest sorted code <= Code
+    X := 0; N := CB.SortedCount;
+    while N > 1 do
+    begin
+      M := X + (N shr 1);
+      if CB.SortedCodes[M] <= Code then
+      begin
+        X := M;
+        N := N - (N shr 1);
+      end
+      else
+        N := N shr 1;
+    end;
+    Sym := CB.SortedSyms[X];
+    Len := CB.Lengths[Sym];
+    // Verify prefix match
+    if (Code shr (32 - Len)) <> (CB.SortedCodes[X] shr (32 - Len)) then Exit;
+  end
+  else
+    Len := CB.Lengths[Sym];
 
-  // Bounds check: if Pos overshot Limit, packet is exhausted
-  if Br.Pos > Br.Limit then Exit;
-
-  Sym := CB.DecodeTable[0][Bits];
-  Len := CB.DecodeTable[1][Bits];
-
-  if (Sym < 0) or (Len <= 0) then Exit; // unassigned code
-
-  // We read ML bits but only consumed Len; put back the rest
-  Dec(Br.Pos, ML - Len);
-
+  if Br.Pos + Len > Br.Limit then Exit;  // truncated packet
+  Inc(Br.Pos, Len);
   Result := Sym;
 end;
 
 // ---------------------------------------------------------------------------
-// VQ vector decode
+// VQ
 // ---------------------------------------------------------------------------
+
+function VorbisCodebookVQRow(const CB: TVorbisCodebook; Entry: Integer): PSingle;
+begin
+  Result := @CB.VQValues[Entry * CB.Dimensions];
+end;
 
 function VorbisCodebookDecodeVQ(var CB: TVorbisCodebook;
   var Br: TAudioBitReader; Output: PSingle): Boolean;
 var
-  Sym     : Integer;
-  I       : Integer;
-  Acc     : Single;
-  Base    : Integer;
-  Lookup  : Integer;
-  Div_    : Integer;
+  Sym, I: Integer;
+  Row   : PSingle;
 begin
   Result := False;
   if CB.LookupType = VORBIS_LOOKUP_NONE then Exit;
-
+  if Length(CB.VQValues) = 0 then Exit;
   Sym := VorbisCodebookDecode(CB, Br);
   if Sym < 0 then Exit;
-
-  if CB.LookupType = VORBIS_LOOKUP_TYPE2 then
-  begin
-    // Direct: entry Sym starts at Sym * Dimensions
-    Base := Sym * CB.Dimensions;
-    if CB.SequenceP then
-    begin
-      Acc := 0;
-      for I := 0 to CB.Dimensions - 1 do
-      begin
-        Acc := Acc + CB.Multiplicands[Base + I];
-        Output[I] := Acc;
-      end;
-    end
-    else
-      for I := 0 to CB.Dimensions - 1 do
-        Output[I] := CB.Multiplicands[Base + I];
-  end
-  else // LOOKUP_TYPE1: implicit VQ
-  begin
-    // Enumerate dimensions from symbol index via modular indexing
-    Lookup := VorbisLookup1Values(CB.Entries, CB.Dimensions);
-    Div_ := 1;
-    Acc := 0;
-    for I := CB.Dimensions - 1 downto 0 do
-    begin
-      var Off: Integer := (Sym div Div_) mod Lookup;
-      if CB.SequenceP then
-      begin
-        Acc := Acc + CB.Multiplicands[Off];
-        Output[I] := Acc;
-      end
-      else
-        Output[I] := CB.Multiplicands[Off];
-      Div_ := Div_ * Lookup;
-    end;
-  end;
-
+  Row := VorbisCodebookVQRow(CB, Sym);
+  for I := 0 to CB.Dimensions - 1 do
+    Output[I] := Row[I];
   Result := True;
 end;
 

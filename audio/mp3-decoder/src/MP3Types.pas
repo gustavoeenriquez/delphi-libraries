@@ -1,4 +1,4 @@
-unit MP3Types;
+﻿unit MP3Types;
 
 {
   MP3Types.pas - Types and constants for minimp3-faithful MP3 decoder

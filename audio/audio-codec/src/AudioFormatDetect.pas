@@ -1,4 +1,4 @@
-unit AudioFormatDetect;
+﻿unit AudioFormatDetect;
 
 {
   AudioFormatDetect.pas - Detect audio format from stream magic bytes

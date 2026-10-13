@@ -1,4 +1,4 @@
-unit MP3Huffman;
+﻿unit MP3Huffman;
 
 {
   MP3Huffman.pas - Huffman decoding for MP3 Layer III

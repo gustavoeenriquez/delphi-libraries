@@ -77,9 +77,9 @@ begin
     Crc := Byte(I);
     for J := 0 to 7 do
       if (Crc and $80) <> 0 then
-        Crc := (Crc shl 1) xor $07
+        Crc := Byte((Crc shl 1) xor $07)
       else
-        Crc := Crc shl 1;
+        Crc := Byte(Crc shl 1);
     Table8[I] := Crc;
   end;
 end;
@@ -95,9 +95,9 @@ begin
     Crc := Word(I shl 8);
     for J := 0 to 7 do
       if (Crc and $8000) <> 0 then
-        Crc := (Crc shl 1) xor $8005
+        Crc := Word((Crc shl 1) xor $8005)
       else
-        Crc := Crc shl 1;
+        Crc := Word(Crc shl 1);
     Table16[I] := Crc;
   end;
 end;
@@ -113,9 +113,9 @@ begin
     Crc := Cardinal(I) shl 24;
     for J := 0 to 7 do
       if (Crc and $80000000) <> 0 then
-        Crc := (Crc shl 1) xor $04C11DB7
+        Crc := Cardinal((Crc shl 1) xor $04C11DB7)
       else
-        Crc := Crc shl 1;
+        Crc := Cardinal(Crc shl 1);
     Table32Ogg[I] := Crc;
   end;
 end;
@@ -161,7 +161,7 @@ var
 begin
   for I := 0 to Len - 1 do
   begin
-    Crc := (Crc shl 8) xor Table16[(Crc shr 8) xor Data^];
+    Crc := Word((Crc shl 8) xor Table16[(Crc shr 8) xor Data^]);
     Inc(Data);
   end;
   Result := Crc;
@@ -187,7 +187,7 @@ var
 begin
   for I := 0 to Len - 1 do
   begin
-    Crc := (Crc shl 8) xor Table32Ogg[(Crc shr 24) xor Data^];
+    Crc := Cardinal((Crc shl 8) xor Table32Ogg[(Crc shr 24) xor Data^]);
     Inc(Data);
   end;
   Result := Crc;

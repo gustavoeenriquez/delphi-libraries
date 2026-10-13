@@ -1,4 +1,4 @@
-unit MP3ScaleFactors;
+﻿unit MP3ScaleFactors;
 
 {
   MP3ScaleFactors.pas - Scale factor decode for MP3 Layer III

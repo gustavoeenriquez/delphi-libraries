@@ -1,4 +1,4 @@
-unit MP3Frame;
+﻿unit MP3Frame;
 
 {
   MP3Frame.pas - MP3 frame header and side information parser

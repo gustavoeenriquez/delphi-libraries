@@ -1,4 +1,4 @@
-unit MP3BitStream;
+﻿unit MP3BitStream;
 
 {
   MP3BitStream.pas - Bit-level stream reader for MP3 decoding

@@ -1,4 +1,4 @@
-unit MP3Layer3;
+﻿unit MP3Layer3;
 
 {$POINTERMATH ON}
 

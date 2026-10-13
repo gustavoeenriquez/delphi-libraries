@@ -20,10 +20,11 @@
     end;
 
   Supported formats:
-    WAV   — via TWAVReader (PCM 8/16/24/32, float 32/64, EXTENSIBLE)
-    FLAC  — via TFLACStreamDecoder (lossless, all valid stream configurations)
+    WAV    — via TWAVReader (PCM 8/16/24/32, float 32/64, EXTENSIBLE)
+    FLAC   — via TFLACStreamDecoder (lossless, all valid stream configurations)
     Vorbis — via OggPageReader + TVorbisDecoder (Ogg Vorbis I)
-    Opus  — via TOpusDecoder (Ogg Opus / RFC 7845)
+    Opus   — via TOpusDecoder (Ogg Opus / RFC 7845)
+    MP3    — via TMP3StreamDecoder (MPEG-1/2/2.5 Layer III)
 
   Factory functions:
     CreateAudioDecoder(Stream, OwnsStream)  — from TStream
@@ -143,7 +144,8 @@ uses
   FLACStreamEncoder,
   VorbisTypes,
   VorbisDecoder,
-  OpusDecoder;
+  OpusDecoder,
+  MP3StreamDecoder;
 
 // ===========================================================================
 // WAV adapter
@@ -278,6 +280,7 @@ type
     FReader  : TOggPageReader;
     FDecoder : TVorbisDecoder;
     FInfo    : TAudioInfo;
+    FTotalOut: Int64;   // samples delivered so far (for EOS granule trimming)
   public
     constructor Create(AStream: TStream; OwnsStream: Boolean);
     destructor  Destroy; override;
@@ -299,6 +302,7 @@ begin
   FReader  := TOggPageReader.Create(AStream, OwnsStream);
   FDecoder := TVorbisDecoder.Create;
   FInfo.Format := afVorbis;
+  FTotalOut := 0;
 
   // Eagerly consume the three Vorbis header packets so the decoder is ready
   // and TAudioInfo is populated immediately after construction.
@@ -352,7 +356,24 @@ begin
 
     case VRes of
       vdrOK:
-        if Samples > 0 then Exit(adrOK);
+        if Samples > 0 then
+        begin
+          // The granule position of the EOS page is the total sample count of
+          // the stream: trim the encoder padding of the final packets.
+          if Pkt.IsEOS and (Pkt.GranulePos >= 0) and
+             (FTotalOut + Samples > Pkt.GranulePos) then
+          begin
+            Samples := Integer(Pkt.GranulePos - FTotalOut);
+            if Samples <= 0 then
+            begin
+              Buffer := nil;
+              Exit(adrEndOfStream);
+            end;
+            AudioBufferResize(Buffer, Samples);
+          end;
+          Inc(FTotalOut, Samples);
+          Exit(adrOK);
+        end;
         // else: empty packet (first audio frame produces no output); continue
       vdrHeader:
         ; // late header; ignore
@@ -399,7 +420,7 @@ begin
   FDecoder         := TOpusDecoder.Create(AStream, OwnsStream);
   FInfo.Format     := afOpus;
   FInfo.SampleRate := 48000;  // Opus always outputs 48kHz
-  FInfo.Channels   := 0;      // updated on first successful Decode
+  FInfo.Channels   := FDecoder.Channels;  // headers are parsed by the constructor
   FInfo.BitDepth   := 0;
   FInfo.IsFloat    := True;
   FInfo.DurationMs := -1;
@@ -588,6 +609,57 @@ begin
 end;
 
 // ===========================================================================
+// MP3 adapter
+// ===========================================================================
+
+type
+  TMP3DecoderAdapter = class(TInterfacedObject, IAudioDecoder)
+  private
+    FDecoder : TMP3StreamDecoder;
+    FInfo    : TAudioInfo;
+  public
+    constructor Create(AStream: TStream; OwnsStream: Boolean);
+    destructor  Destroy; override;
+    function Decode(out Buffer: TAudioBuffer): TAudioDecodeResult;
+    function GetInfo: TAudioInfo;
+    function GetReady: Boolean;
+  end;
+
+constructor TMP3DecoderAdapter.Create(AStream: TStream; OwnsStream: Boolean);
+begin
+  inherited Create;
+  FDecoder         := TMP3StreamDecoder.Create(AStream, OwnsStream);
+  FInfo.Format     := afMP3;
+  FInfo.SampleRate := FDecoder.SampleRate;
+  FInfo.Channels   := FDecoder.Channels;
+  FInfo.BitDepth   := 0;
+  FInfo.IsFloat    := True;
+  FInfo.DurationMs := -1;
+  FInfo.BitRate    := 0;
+end;
+
+destructor TMP3DecoderAdapter.Destroy;
+begin
+  FDecoder.Free;
+  inherited Destroy;
+end;
+
+function TMP3DecoderAdapter.Decode(out Buffer: TAudioBuffer): TAudioDecodeResult;
+begin
+  Result := FDecoder.Decode(Buffer);
+end;
+
+function TMP3DecoderAdapter.GetInfo: TAudioInfo;
+begin
+  Result := FInfo;
+end;
+
+function TMP3DecoderAdapter.GetReady: Boolean;
+begin
+  Result := FDecoder.Ready;
+end;
+
+// ===========================================================================
 // Encoder factory
 // ===========================================================================
 
@@ -643,8 +715,9 @@ begin
       Result := TVorbisOggAdapter.Create(AStream, OwnsStream);
     afOpus:
       Result := TOpusDecoderAdapter.Create(AStream, OwnsStream);
+    afMP3:
+      Result := TMP3DecoderAdapter.Create(AStream, OwnsStream);
   else
-    // afMP3 and afUnknown: not supported yet
     if OwnsStream then
       AStream.Free;
   end;

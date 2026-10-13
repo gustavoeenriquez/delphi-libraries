@@ -100,6 +100,13 @@ type
   // Expand 4-bit samples to 8-bit
   function ExpandBits4To8(const AData: TBytes; AWidth, AHeight: Integer): TBytes;
 
+  // Wrap raw CCITT-encoded data in a minimal TIFF container (pure Pascal,
+  // cross-platform). Useful both for WIC decoding on Windows and for sending
+  // scanned page images to OCR services that accept TIFF.
+  // AK = K from /DecodeParms (<0 = G4, >0 = G3 2D, 0 = G3 1D).
+  function BuildCCITTTIFF(const AData: TBytes; AW, AH, AK: Integer;
+    ABlackIs1: Boolean): TBytes;
+
 implementation
 
 {$IFDEF MSWINDOWS}
@@ -108,12 +115,10 @@ uses
 {$ENDIF}
 
 // =========================================================================
-// CCITT helpers (Windows-only, via WIC)
+// CCITT helpers (TIFF wrap is cross-platform; WIC decode is Windows-only)
 // =========================================================================
 
-{$IFDEF MSWINDOWS}
-
-// Wrap raw CCITT-encoded data in a minimal TIFF container so WIC can decode it.
+// Wrap raw CCITT-encoded data in a minimal TIFF container.
 function BuildCCITTTIFF(const AData: TBytes; AW, AH, AK: Integer;
   ABlackIs1: Boolean): TBytes;
 var
@@ -160,6 +165,8 @@ begin
     S.Free;
   end;
 end;
+
+{$IFDEF MSWINDOWS}
 
 // Decode a TIFF-wrapped CCITT stream to AW×AH 8bpp grayscale using WIC.
 // Returns empty on failure.

@@ -1,622 +1,624 @@
 unit OpusCelt;
 
 {
-  OpusCelt.pas - CELT (Constrained Energy Lapped Transform) decoder
+  OpusCelt.pas - CELT decoder (RFC 6716 section 4.3), 48 kHz / 960 mode
 
-  CELT is the wideband/fullband audio codec used by Opus for music and
-  non-voice signals. It uses:
+  Port of libopus 1.5.2 celt/celt_decoder.c (float build) without the
+  pitch-based packet loss concealment: lost frames use the noise-based
+  concealment path only. Copyright (c) 2007-2011 Xiph.Org Foundation,
+  Jean-Marc Valin, Timothy B. Terriberry; BSD license.
 
-    - Overlapping MDCT with 50% overlap (120 samples at 48kHz)
-    - 21 frequency bands (Bark-scale ERB)
-    - Two-stage energy coding: coarse (pitch-based log-energy) + fine (per-band)
-    - PVQ (Pyramid Vector Quantization): allocates bits per band then decodes
-      a unit-norm vector via combinatorial numbering
-    - Stereo: joint coding via intensity stereo or M/S (mid-side)
-    - Transients: half-block size for attack transients
-    - Post-filter (pitch pre-filter) for low-bitrate scenarios
+  Output: planar float at 48 kHz, nominal range [-1, 1].
 
-  Spec reference: RFC 6716 sections 4.3 and appendix A
-
-  This implementation covers the CELT decoder for mono and stereo.
-
-  License: CC0 1.0 Universal (Public Domain)
+  License of this unit: CC0 1.0 Universal (Public Domain)
   https://creativecommons.org/publicdomain/zero/1.0/
 }
 
 {$POINTERMATH ON}
+{$Q-}{$R-}
 
 interface
 
 uses
   SysUtils, Math,
-  OpusTypes,
-  OpusRangeDecoder;
+  OpusEntDec,
+  OpusCeltTables,
+  OpusCeltMath,
+  OpusCeltBands;
 
-// CELT band limits (in bins at 48kHz for N=960, i.e., 20ms)
 const
-  // ERB bands: bin start positions for 21 bands at frame size 960
-  CELT_BANDS_960: array[0..21] of Integer = (
-    0, 1, 2, 3, 4, 5, 6, 7, 8, 10, 12, 14, 16, 20, 24, 28, 34,
-    40, 48, 60, 78, 100
-  );
-  // Same pattern scaled for smaller frames
-  CELT_NUM_BANDS = 21;
+  CELT_DECODE_BUFFER_SIZE = 2048;
+  CELT_SIG_SCALE          = 32768.0;
+  CELT_FRAME_120          = 120;
 
 type
-  TCeltDecodeState = record
-    // MDCT overlap buffer: 2 * overlap samples per channel
-    Overlap      : TArray<TArray<Single>>;  // [channel][sample]
-    OverlapN     : Integer;
-    // Previous pitch filter state
-    PostFilterPeriod  : Integer;
-    PostFilterGainQ8  : Integer;
-    // Previous frame energy (log domain)
-    LogEnergy    : array[0..1, 0..CELT_NUM_BANDS - 1] of Single;
-    // Silence flag from previous frame
-    PrevSilence  : Boolean;
+  PEcDec = ^TEcDec;
+
+  TCeltDecoder = class
+  private
+    FChannels       : Integer;   // output channels (CC)
+    FStreamChannels : Integer;   // coded channels (C)
+    FStart, FEnd    : Integer;
+    FDisableInv     : Boolean;
+    FRng            : Cardinal;
+    FError          : Integer;
+    FLossDuration   : Integer;
+    FSkipPlc        : Boolean;
+    FPostfilterPeriod, FPostfilterPeriodOld: Integer;
+    FPostfilterGain, FPostfilterGainOld: Single;
+    FPostfilterTapset, FPostfilterTapsetOld: Integer;
+    FPrefilterAndFold: Boolean;
+    FPreemphMemD    : array[0..1] of Single;
+    FDecodeMem      : array[0..1] of TArray<Single>;   // DECODE_BUFFER_SIZE + overlap
+    FOldEBands      : TArray<Single>;   // 2 * nbEBands
+    FOldLogE        : TArray<Single>;
+    FOldLogE2       : TArray<Single>;
+    FBackgroundLogE : TArray<Single>;
+    FMdct           : TCeltMdct;
+    FFreq           : TArray<Single>;
+    FX              : TArray<Single>;
+    procedure Synthesis(X: PSingle; OutSyn: array of PSingle; OldBandE: PSingle;
+      StartB, EffEnd, C, CC: Integer; IsTransient: Boolean; LM: Integer; Silence: Boolean);
+    procedure Deemphasis(InSyn: array of PSingle; const Pcm: array of PSingle; N, C: Integer);
+    procedure PrefilterAndFold(N: Integer);
+    procedure DecodeLost(N, LM: Integer);
+  public
+    constructor Create(AChannels: Integer);
+    procedure Reset;
+    // Decode one CELT frame of FrameSize samples (120/240/480/960) into
+    // Pcm[ch][0..FrameSize-1]. Data = nil or Len <= 1 runs concealment.
+    // ExtDec: range decoder already positioned (hybrid mode), or nil.
+    // Returns the number of samples per channel, or a negative error code.
+    function Decode(Data: PByte; Len: Integer; const Pcm: array of PSingle;
+      FrameSize: Integer; ExtDec: PEcDec): Integer;
+    property StartBand     : Integer read FStart write FStart;
+    property EndBand       : Integer read FEnd write FEnd;
+    property StreamChannels: Integer read FStreamChannels write FStreamChannels;
+    property DisableInv    : Boolean read FDisableInv write FDisableInv;
+    property FinalRange    : Cardinal read FRng;
+    property Channels      : Integer read FChannels;
   end;
-
-// Initialize CELT decode state.
-procedure CeltDecodeStateInit(var State: TCeltDecodeState; Channels: Integer);
-
-// Decode one CELT frame.
-// Rd: range decoder positioned at start of CELT data.
-// State: persistent state (updated).
-// Channels: 1 or 2.
-// FrameSize: samples (120, 240, 480, or 960 at 48kHz).
-// Output: [channel][sample] array, pre-allocated.
-// Returns False on decode error.
-function CeltDecodeFrame(
-  var Rd        : TOpusRangeDecoder;
-  var State     : TCeltDecodeState;
-  Channels      : Integer;
-  FrameSize     : Integer;
-  const Output  : TArray<TArray<Single>>
-): Boolean;
-
-// PVQ combinatorial number C(N, K) — used by tests.
-function PVQ_C(N, K: Integer): Int64;
-
-// CELT MDCT (N/4-point complex FFT, Malvar pre/post-rotation) — used by tests.
-procedure CeltIMDCT(Input: PSingle; N: Integer; Output: PSingle);
 
 implementation
 
-// ---------------------------------------------------------------------------
-// Band limits for current frame size
-// ---------------------------------------------------------------------------
-
-function GetBandLimits(FrameSize: Integer; Band: Integer): Integer;
-var
-  Scale : Integer;
-begin
-  // Scale the 960-sample band limits to the current frame size
-  Scale := 960 div FrameSize;
-  if Scale < 1 then Scale := 1;
-  if Band <= CELT_NUM_BANDS then
-    Result := CELT_BANDS_960[Band] * FrameSize div 960
-  else
-    Result := FrameSize div 2;
-end;
-
-// ---------------------------------------------------------------------------
-// ICDF tables for CELT
-// ---------------------------------------------------------------------------
-
 const
-  // Silence flag
-  CELT_SILENCE_ICDF: array[0..1] of Byte = (255, 0);
-  // Post-filter flag
-  CELT_POSTFILTER_ICDF: array[0..1] of Byte = (128, 0);
-  // Transient flag
-  CELT_TRANSIENT_ICDF: array[0..1] of Byte = (128, 0);
-  // Intra-frame energy prediction flag
-  CELT_INTRA_ICDF: array[0..1] of Byte = (128, 0);
-  // Number of CELT blocks (anti-collapse)
-  CELT_ANTICOLLAPSE_ICDF: array[0..1] of Byte = (128, 0);
-  // Stereo: dual-stereo ICDF
-  CELT_DUALSTEREO_ICDF: array[0..1] of Byte = (128, 0);
-  // Energy predictor table (coarse energy ICDF, per-band — simplified)
-  CELT_ENERGY_ICDF: array[0..3] of Byte = (200, 150, 80, 0);
+  TF_SELECT_TABLE: array[0..3, 0..7] of ShortInt = (
+    (0, -1, 0, -1,    0, -1, 0, -1),
+    (0, -1, 0, -2,    1,  0, 1, -1),
+    (0, -2, 0, -3,    2,  0, 1, -1),
+    (0, -2, 0, -3,    3,  0, 1, -1));
+  TRIM_ICDF  : array[0..10] of Byte = (126, 124, 119, 109, 87, 41, 19, 9, 4, 2, 0);
+  SPREAD_ICDF: array[0..3] of Byte = (25, 23, 2, 0);
+  TAPSET_ICDF: array[0..2] of Byte = (2, 1, 0);
 
-// ---------------------------------------------------------------------------
-// Coarse energy decode (RFC 6716 §4.3.2.1)
-// ---------------------------------------------------------------------------
-
-// Decode coarse energy (log-domain) for all bands.
-// Updates State.LogEnergy.
-procedure CeltDecodeCoarseEnergy(
-  var Rd      : TOpusRangeDecoder;
-  var State   : TCeltDecodeState;
-  Channels    : Integer;
-  FrameSize   : Integer;
-  Intra       : Boolean
-);
+constructor TCeltDecoder.Create(AChannels: Integer);
 var
-  Ch, Band : Integer;
-  Q        : Single;
-  Prediction: Single;
+  C: Integer;
 begin
-  for Band := 0 to CELT_NUM_BANDS - 1 do
+  inherited Create;
+  FChannels := AChannels;
+  FStreamChannels := AChannels;
+  FStart := 0;
+  FEnd := CELT_NB_EBANDS;
+  FDisableInv := AChannels = 1;
+  for C := 0 to 1 do
+    SetLength(FDecodeMem[C], CELT_DECODE_BUFFER_SIZE + CELT_OVERLAP_SIZE);
+  SetLength(FOldEBands, 2 * CELT_NB_EBANDS);
+  SetLength(FOldLogE, 2 * CELT_NB_EBANDS);
+  SetLength(FOldLogE2, 2 * CELT_NB_EBANDS);
+  SetLength(FBackgroundLogE, 2 * CELT_NB_EBANDS);
+  SetLength(FFreq, CELT_SHORT_MDCT shl CELT_MAX_LM);
+  SetLength(FX, 2 * (CELT_SHORT_MDCT shl CELT_MAX_LM));
+  FMdct.Init(2 * (CELT_SHORT_MDCT shl CELT_MAX_LM), CELT_MAX_LM);
+  Reset;
+end;
+
+procedure TCeltDecoder.Reset;
+var
+  I, C: Integer;
+begin
+  FRng := 0;
+  FError := 0;
+  FLossDuration := 0;
+  FSkipPlc := True;
+  FPostfilterPeriod := 0;
+  FPostfilterPeriodOld := 0;
+  FPostfilterGain := 0;
+  FPostfilterGainOld := 0;
+  FPostfilterTapset := 0;
+  FPostfilterTapsetOld := 0;
+  FPrefilterAndFold := False;
+  FPreemphMemD[0] := 0;
+  FPreemphMemD[1] := 0;
+  for C := 0 to 1 do
+    FillChar(FDecodeMem[C][0], Length(FDecodeMem[C]) * SizeOf(Single), 0);
+  for I := 0 to 2 * CELT_NB_EBANDS - 1 do
   begin
-    for Ch := 0 to Channels - 1 do
+    FOldEBands[I] := 0;
+    FOldLogE[I] := -28.0;
+    FOldLogE2[I] := -28.0;
+    FBackgroundLogE[I] := 0;
+  end;
+end;
+
+// ---------------------------------------------------------------------------
+
+procedure TCeltDecoder.Deemphasis(InSyn: array of PSingle; const Pcm: array of PSingle; N, C: Integer);
+var
+  Ch, J: Integer;
+  M, Tmp: Single;
+  X, Y: PSingle;
+begin
+  for Ch := 0 to C - 1 do
+  begin
+    M := FPreemphMemD[Ch];
+    X := InSyn[Ch];
+    Y := Pcm[Ch];
+    for J := 0 to N - 1 do
     begin
-      // Decode correction to predicted energy
-      var Sym: Integer := RdDecodeICDF(Rd, CELT_ENERGY_ICDF, 8);
-      // Map symbol to dB correction: [-6, -3, +3, +6] dB (simplified)
-      case Sym of
-        0: Q := -6.0;
-        1: Q := -3.0;
-        2: Q :=  3.0;
-        else Q :=  6.0;
+      Tmp := X[J] + 1e-30 + M;
+      M := CELT_PREEMPH * Tmp;
+      Y[J] := Tmp * (1.0 / CELT_SIG_SCALE);
+    end;
+    FPreemphMemD[Ch] := M;
+  end;
+end;
+
+procedure TCeltDecoder.Synthesis(X: PSingle; OutSyn: array of PSingle; OldBandE: PSingle;
+  StartB, EffEnd, C, CC: Integer; IsTransient: Boolean; LM: Integer; Silence: Boolean);
+var
+  Ch, I, B, BB, NB, N, Shift, M: Integer;
+  Freq, Freq2: PSingle;
+  Tmp2: TArray<Single>;
+begin
+  N := CELT_SHORT_MDCT shl LM;
+  M := 1 shl LM;
+  Freq := @FFreq[0];
+  if IsTransient then
+  begin
+    BB := M;
+    NB := CELT_SHORT_MDCT;
+    Shift := CELT_MAX_LM;
+  end
+  else
+  begin
+    BB := 1;
+    NB := CELT_SHORT_MDCT shl LM;
+    Shift := CELT_MAX_LM - LM;
+  end;
+  if (CC = 2) and (C = 1) then
+  begin
+    DenormaliseBands(X, Freq, OldBandE, StartB, EffEnd, M, 1, Silence);
+    SetLength(Tmp2, N);
+    Freq2 := @Tmp2[0];
+    Move(Freq^, Freq2^, N * SizeOf(Single));
+    for B := 0 to BB - 1 do
+      FMdct.Backward(Freq2 + B, OutSyn[0] + NB * B, @CELT_WINDOW120[0], CELT_OVERLAP_SIZE, Shift, BB);
+    for B := 0 to BB - 1 do
+      FMdct.Backward(Freq + B, OutSyn[1] + NB * B, @CELT_WINDOW120[0], CELT_OVERLAP_SIZE, Shift, BB);
+  end
+  else if (CC = 1) and (C = 2) then
+  begin
+    SetLength(Tmp2, N);
+    Freq2 := @Tmp2[0];
+    DenormaliseBands(X, Freq, OldBandE, StartB, EffEnd, M, 1, Silence);
+    DenormaliseBands(X + N, Freq2, OldBandE + CELT_NB_EBANDS, StartB, EffEnd, M, 1, Silence);
+    for I := 0 to N - 1 do
+      Freq[I] := 0.5 * Freq[I] + 0.5 * Freq2[I];
+    for B := 0 to BB - 1 do
+      FMdct.Backward(Freq + B, OutSyn[0] + NB * B, @CELT_WINDOW120[0], CELT_OVERLAP_SIZE, Shift, BB);
+  end
+  else
+  begin
+    for Ch := 0 to CC - 1 do
+    begin
+      DenormaliseBands(X + Ch * N, Freq, OldBandE + Ch * CELT_NB_EBANDS, StartB, EffEnd, M, 1, Silence);
+      for B := 0 to BB - 1 do
+        FMdct.Backward(Freq + B, OutSyn[Ch] + NB * B, @CELT_WINDOW120[0], CELT_OVERLAP_SIZE, Shift, BB);
+    end;
+  end;
+  for Ch := 0 to CC - 1 do
+    for I := 0 to N - 1 do
+    begin
+      if OutSyn[Ch][I] > 300000000.0 then OutSyn[Ch][I] := 300000000.0
+      else if OutSyn[Ch][I] < -300000000.0 then OutSyn[Ch][I] := -300000000.0;
+    end;
+end;
+
+procedure TfDecode(StartB, EndB: Integer; IsTransient: Boolean; var TfRes: TIntArray;
+  LM: Integer; var Rd: TEcDec);
+var
+  I, Curr, TfSelect, TfSelectRsv, TfChanged, Logp: Integer;
+  Budget, Tell: Cardinal;
+  IsT: Integer;
+begin
+  IsT := Ord(IsTransient);
+  Budget := Rd.Storage * 8;
+  Tell := EcTell(Rd);
+  if IsTransient then Logp := 2 else Logp := 4;
+  TfSelectRsv := Ord((LM > 0) and (Tell + Cardinal(Logp) + 1 <= Budget));
+  Budget := Budget - Cardinal(TfSelectRsv);
+  TfChanged := 0;
+  Curr := 0;
+  for I := StartB to EndB - 1 do
+  begin
+    if Tell + Cardinal(Logp) <= Budget then
+    begin
+      Curr := Curr xor EcDecBitLogp(Rd, Logp);
+      Tell := EcTell(Rd);
+      TfChanged := TfChanged or Curr;
+    end;
+    TfRes[I] := Curr;
+    if IsTransient then Logp := 4 else Logp := 5;
+  end;
+  TfSelect := 0;
+  if (TfSelectRsv <> 0) and
+     (TF_SELECT_TABLE[LM][4 * IsT + 0 + TfChanged] <> TF_SELECT_TABLE[LM][4 * IsT + 2 + TfChanged]) then
+    TfSelect := EcDecBitLogp(Rd, 1);
+  for I := StartB to EndB - 1 do
+    TfRes[I] := TF_SELECT_TABLE[LM][4 * IsT + 2 * TfSelect + TfRes[I]];
+end;
+
+procedure TCeltDecoder.PrefilterAndFold(N: Integer);
+var
+  C, I: Integer;
+  Etmp: array[0..CELT_OVERLAP_SIZE - 1] of Single;
+  Mem: PSingle;
+begin
+  for C := 0 to FChannels - 1 do
+  begin
+    Mem := @FDecodeMem[C][0];
+    CombFilter(@Etmp[0], Mem + (CELT_DECODE_BUFFER_SIZE - N),
+      FPostfilterPeriodOld, FPostfilterPeriod, CELT_OVERLAP_SIZE,
+      -FPostfilterGainOld, -FPostfilterGain,
+      FPostfilterTapsetOld, FPostfilterTapset, nil, 0);
+    for I := 0 to (CELT_OVERLAP_SIZE div 2) - 1 do
+      Mem[CELT_DECODE_BUFFER_SIZE - N + I] :=
+        CELT_WINDOW120[I] * Etmp[CELT_OVERLAP_SIZE - 1 - I] +
+        CELT_WINDOW120[CELT_OVERLAP_SIZE - I - 1] * Etmp[I];
+  end;
+end;
+
+procedure TCeltDecoder.DecodeLost(N, LM: Integer);
+var
+  C, I, J, BOffs, BLen: Integer;
+  OutSyn: array[0..1] of PSingle;
+  EffEnd: Integer;
+  Decay : Single;
+  Seed  : Cardinal;
+  X     : PSingle;
+begin
+  // Noise-based concealment (libopus uses pitch-based PLC for short losses;
+  // this port always uses the noise path).
+  EffEnd := Max(FStart, Min(FEnd, CELT_NB_EBANDS));
+  for C := 0 to FChannels - 1 do
+  begin
+    Move(FDecodeMem[C][N], FDecodeMem[C][0], (CELT_DECODE_BUFFER_SIZE - N + CELT_OVERLAP_SIZE) * SizeOf(Single));
+    OutSyn[C] := @FDecodeMem[C][CELT_DECODE_BUFFER_SIZE - N];
+  end;
+  if FPrefilterAndFold then
+    PrefilterAndFold(N);
+  if FLossDuration = 0 then Decay := 1.5 else Decay := 0.5;
+  for C := 0 to FChannels - 1 do
+    for I := FStart to FEnd - 1 do
+      FOldEBands[C * CELT_NB_EBANDS + I] :=
+        Max(FBackgroundLogE[C * CELT_NB_EBANDS + I], FOldEBands[C * CELT_NB_EBANDS + I] - Decay);
+  Seed := FRng;
+  X := @FX[0];
+  for C := 0 to FChannels - 1 do
+    for I := FStart to EffEnd - 1 do
+    begin
+      BOffs := N * C + (CELT_EBANDS[I] shl LM);
+      BLen := (CELT_EBANDS[I + 1] - CELT_EBANDS[I]) shl LM;
+      for J := 0 to BLen - 1 do
+      begin
+        Seed := CeltLcgRand(Seed);
+        X[BOffs + J] := Integer(Seed) div (1 shl 20);
+        if Integer(Seed) < 0 then
+          X[BOffs + J] := -((-Integer(Seed) + (1 shl 20) - 1) shr 20);
       end;
-
-      // Temporal prediction: use previous log-energy with decay
-      if Intra then
-        Prediction := 0.0
-      else
-        Prediction := State.LogEnergy[Ch][Band] * 0.9;
-
-      State.LogEnergy[Ch][Band] := Prediction + Q;
+      RenormaliseVector(X + BOffs, BLen, 1.0);
     end;
-  end;
+  FRng := Seed;
+  Synthesis(X, OutSyn, @FOldEBands[0], FStart, EffEnd, FChannels, FChannels, False, LM, False);
+  FPrefilterAndFold := False;
+  FSkipPlc := True;
+  FLossDuration := Min(10000, FLossDuration + (1 shl LM));
 end;
 
-// ---------------------------------------------------------------------------
-// Fine energy decode (RFC 6716 §4.3.2.2)
-// ---------------------------------------------------------------------------
-
-procedure CeltDecodeFineEnergy(
-  var Rd      : TOpusRangeDecoder;
-  var State   : TCeltDecodeState;
-  Channels    : Integer;
-  const FineBits: TArray<Integer>  // bits allocated per band for fine energy
-);
+function TCeltDecoder.Decode(Data: PByte; Len: Integer; const Pcm: array of PSingle;
+  FrameSize: Integer; ExtDec: PEcDec): Integer;
 var
-  Ch, Band : Integer;
-  Bits     : Integer;
-  Raw      : Cardinal;
-  Corr     : Single;
+  LocalDec     : TEcDec;
+  Rd          : PEcDec;
+  C, I, N, M, LM: Integer;
+  CC, SC       : Integer;
+  OutSyn       : array[0..1] of PSingle;
+  EffEnd       : Integer;
+  TotalBits, Tell: Integer;
+  Silence      : Boolean;
+  PostfilterGain: Single;
+  PostfilterPitch, PostfilterTapset: Integer;
+  Qg, Octave   : Integer;
+  IsTransient  : Boolean;
+  ShortBlocks  : Integer;
+  IntraEner    : Integer;
+  Safety       : Single;
+  Missing      : Integer;
+  Slope, E0, E1, E2: Single;
+  TfRes        : TIntArray;
+  SpreadDecision: Integer;
+  Cap, Offsets : TIntArray;
+  DynallocLogp, DynallocLoopLogp: Integer;
+  Width, Quanta, Boost, Flag: Integer;
+  TellFrac     : Integer;
+  FineQuant, Pulses, FinePriority: TIntArray;
+  AllocTrim    : Integer;
+  Bits, Balance: Integer;
+  AntiCollapseRsv, AntiCollapseOn: Integer;
+  Intensity, DualStereo, CodedBands: Integer;
+  CollapseMasks: TArray<Byte>;
+  X            : PSingle;
+  Y            : PSingle;
+  MaxBackgroundIncrease: Single;
 begin
-  for Band := 0 to CELT_NUM_BANDS - 1 do
+  Result := -1;
+  CC := FChannels;
+  SC := FStreamChannels;
+  LM := 0;
+  while LM <= CELT_MAX_LM do
   begin
-    for Ch := 0 to Channels - 1 do
-    begin
-      Bits := FineBits[Band];
-      if Bits <= 0 then Continue;
-      // Decode Bits-bit raw integer
-      Raw  := RdDecodeUInt(Rd, Cardinal(1) shl Bits);
-      // Convert to log-energy correction in [−0.5, +0.5) dB/bit
-      Corr := (Integer(Raw) - (1 shl (Bits - 1))) / (1 shl Bits);
-      State.LogEnergy[Ch][Band] := State.LogEnergy[Ch][Band] + Corr;
-    end;
+    if (CELT_SHORT_MDCT shl LM) = FrameSize then Break;
+    Inc(LM);
   end;
-end;
+  if LM > CELT_MAX_LM then Exit(-1);
+  M := 1 shl LM;
+  if (Len < 0) or (Len > 1275) then Exit(-1);
+  N := M * CELT_SHORT_MDCT;
+  for C := 0 to CC - 1 do
+    OutSyn[C] := @FDecodeMem[C][CELT_DECODE_BUFFER_SIZE - N];
+  EffEnd := Min(FEnd, CELT_NB_EBANDS);
 
-// ---------------------------------------------------------------------------
-// PVQ (Pyramid Vector Quantization) decode (RFC 6716 §4.3.3)
-// ---------------------------------------------------------------------------
-
-// Combinatorial number: C(n, k) for PVQ indexing
-function PVQ_C(N, K: Integer): Int64;
-var
-  I  : Integer;
-  Num, Den: Int64;
-begin
-  if K > N then Exit(0);
-  if K = 0 then Exit(1);
-  Num := 1; Den := 1;
-  for I := 1 to K do
+  if (Data = nil) or (Len <= 1) then
   begin
-    Num := Num * (N - I + 1);
-    Den := Den * I;
-  end;
-  Result := Num div Den;
-end;
-
-// Decode a PVQ vector: N dimensions, K pulses.
-// Uses the combinatorial unranking algorithm from RFC 6716 §4.3.3.1.
-// Output: float vector, not normalized (raw pulse vector).
-procedure PVQDecode(
-  var Rd  : TOpusRangeDecoder;
-  N, K    : Integer;
-  Output  : PSingle
-);
-var
-  I, J  : Integer;
-  Index : Int64;
-  Total : Int64;
-  Sign_ : Integer;
-  Pulses: TArray<Integer>;
-begin
-  if (N <= 0) or (K <= 0) then
-  begin
-    for I := 0 to N - 1 do Output[I] := 0.0;
-    Exit;
+    DecodeLost(N, LM);
+    Deemphasis(OutSyn, Pcm, N, CC);
+    Exit(FrameSize);
   end;
 
-  SetLength(Pulses, N);
-  for I := 0 to N - 1 do Pulses[I] := 0;
+  if FLossDuration = 0 then FSkipPlc := False;
 
-  // Decode the index
-  Total := PVQ_C(N + K - 1, K);
-  if Total <= 0 then Total := 1;
-  Index := RdDecodeUInt(Rd, Cardinal(Min(Total, Cardinal($7FFFFFFF))));
-
-  // Unrank: reconstruct pulse distribution from index
-  var Remaining := K;
-  for I := 0 to N - 1 do
+  if ExtDec = nil then
   begin
-    J := 0;
-    while (J < Remaining) do
-    begin
-      var C: Int64 := PVQ_C(N - I - 1 + Remaining - J - 1, Remaining - J - 1);
-      if Index < C then Break;
-      Dec(Index, C);
-      Inc(J);
-    end;
-    Pulses[I] := J;
-    Dec(Remaining, J);
-    if Remaining <= 0 then Break;
-  end;
+    EcDecInit(LocalDec, Data, Len);
+    Rd := @LocalDec;
+  end
+  else
+    Rd := ExtDec;
 
-  // Decode sign bits and build float vector
-  for I := 0 to N - 1 do
-  begin
-    if Pulses[I] > 0 then
-    begin
-      Sign_ := 1;
-      if RdDecodeBit(Rd) then Sign_ := -1;
-      Output[I] := Pulses[I] * Sign_;
-    end
-    else
-      Output[I] := 0.0;
-  end;
-end;
+  if SC = 1 then
+    for I := 0 to CELT_NB_EBANDS - 1 do
+      FOldEBands[I] := Max(FOldEBands[I], FOldEBands[CELT_NB_EBANDS + I]);
 
-// ---------------------------------------------------------------------------
-// Band decode (spectral coefficients per band via PVQ)
-// ---------------------------------------------------------------------------
-
-procedure CeltDecodeBands(
-  var Rd      : TOpusRangeDecoder;
-  var State   : TCeltDecodeState;
-  Channels    : Integer;
-  FrameSize   : Integer;
-  const BandBits: TArray<Integer>  // bits per band
-);
-var
-  Band, Ch  : Integer;
-  BinStart  : Integer;
-  BinEnd    : Integer;
-  BinCount  : Integer;
-  K         : Integer;
-  BandEnergy: Single;
-  NormFactor: Single;
-  I         : Integer;
-  // Per-band coefficient buffers
-  CoeffBuf  : TArray<TArray<Single>>;
-begin
-  SetLength(CoeffBuf, Channels);
-  for Ch := 0 to Channels - 1 do
-    SetLength(CoeffBuf[Ch], FrameSize div 2);
-
-  for Band := 0 to CELT_NUM_BANDS - 1 do
-  begin
-    BinStart := GetBandLimits(FrameSize, Band);
-    BinEnd   := GetBandLimits(FrameSize, Band + 1);
-    BinCount := BinEnd - BinStart;
-    if BinCount <= 0 then Continue;
-
-    var Bits := BandBits[Band];
-
-    for Ch := 0 to Channels - 1 do
-    begin
-      // Compute number of pulses from bit allocation
-      // Rough formula: K ≈ 2^(bits/N - 1) × N ... simplified to K = bits div 4
-      K := Max(0, Min(Bits div 4, BinCount * 2));
-
-      if K > 0 then
-        PVQDecode(Rd, BinCount, K, @CoeffBuf[Ch][BinStart])
-      else
-        for I := BinStart to BinEnd - 1 do CoeffBuf[Ch][I] := 0.0;
-
-      // Scale by decoded energy
-      BandEnergy := Power(10.0, State.LogEnergy[Ch][Band] / 20.0);
-      // Normalize pulse vector
-      var NormSq: Single := 0.0;
-      for I := BinStart to BinEnd - 1 do
-        NormSq := NormSq + Sqr(CoeffBuf[Ch][I]);
-      if NormSq > 1e-30 then
-        NormFactor := BandEnergy / Sqrt(NormSq)
-      else
-        NormFactor := 0.0;
-
-      for I := BinStart to BinEnd - 1 do
-        CoeffBuf[Ch][I] := CoeffBuf[Ch][I] * NormFactor;
-    end;
-  end;
-
-  // Store results in State output for IMDCT
-  // (In full implementation, these would feed into the IMDCT input buffers)
-  // For now, save in overlap buffer as a proxy
-  for Ch := 0 to Channels - 1 do
-    for I := 0 to FrameSize div 2 - 1 do
-      if I < Length(State.Overlap[Ch]) then
-        State.Overlap[Ch][I] := CoeffBuf[Ch][I];
-end;
-
-// ---------------------------------------------------------------------------
-// MDCT (type-IV DCT inverse) for CELT
-// ---------------------------------------------------------------------------
-
-// 120-sample base MDCT at 48kHz (2.5ms).
-// Scales up by 2× for each doubling of frame size.
-procedure CeltIMDCT(Input: PSingle; N: Integer; Output: PSingle);
-var
-  N2, N4  : Integer;
-  K, J    : Integer;
-  Ar, Ai  : TArray<Single>;
-  TmpR, TmpI : TArray<Single>;
-  Angle   : Double;
-  Tr, Ti  : Single;
-begin
-  N2 := N shr 1;
-  N4 := N shr 2;
-  if N4 = 0 then Exit;
-
-  SetLength(Ar, N4);
-  SetLength(Ai, N4);
-
-  // Pre-rotation: map N/2 real spectral inputs to N/4 complex values
-  for K := 0 to N4 - 1 do
-  begin
-    Angle := Pi * (4.0 * K + 1) / (2.0 * N);
-    Ar[K] := Input[N2 - 1 - 2*K] * Cos(Angle) - Input[2*K] * Sin(Angle);
-    Ai[K] := Input[N2 - 1 - 2*K] * Sin(Angle) + Input[2*K] * Cos(Angle);
-  end;
-
-  // N/4-point complex DFT
-  // CELT frame sizes give N4 = 30, 60, 120, 240, 480 — none are powers of 2,
-  // so the standard radix-2 FFT cannot be used here.
-  SetLength(TmpR, N4);
-  SetLength(TmpI, N4);
-  for J := 0 to N4 - 1 do
-  begin
-    TmpR[J] := 0.0;
-    TmpI[J] := 0.0;
-    for K := 0 to N4 - 1 do
-    begin
-      Angle   := -2.0 * Pi * K * J / N4;
-      TmpR[J] := TmpR[J] + Ar[K] * Cos(Angle) - Ai[K] * Sin(Angle);
-      TmpI[J] := TmpI[J] + Ar[K] * Sin(Angle) + Ai[K] * Cos(Angle);
-    end;
-  end;
-  for J := 0 to N4 - 1 do
-  begin
-    Ar[J] := TmpR[J];
-    Ai[J] := TmpI[J];
-  end;
-
-  // Post-rotate and unfold to N real outputs
-  for K := 0 to N4 - 1 do
-  begin
-    Angle := Pi * (4.0 * K + 1) / (2.0 * N);
-    Tr := (Ar[K] * Cos(Angle) + Ai[K] * Sin(Angle)) * (1.0 / N4);
-    Ti := (Ar[K] * Sin(Angle) - Ai[K] * Cos(Angle)) * (1.0 / N4);
-    Output[N4 + K]         :=  Tr;
-    Output[N4 - 1 - K]     :=  Ti;
-    Output[N4*3 + K]       := -Ti;
-    Output[N - 1 - K - N4] := -Tr;
-  end;
-end;
-
-// CELT window: raised-cosine overlap
-function CeltWindow(I, N: Integer): Single; inline;
-begin
-  // 120-sample sine^2 window
-  var S: Single := Sin(Pi * (I + 0.5) / N);
-  Result := S * S;
-end;
-
-// ---------------------------------------------------------------------------
-// Simple bit allocation (proportional to band ERB width × quality)
-// ---------------------------------------------------------------------------
-
-procedure CeltAllocateBits(
-  FrameSize   : Integer;
-  TotalBits   : Integer;
-  BandBits    : TArray<Integer>;
-  FineBits    : TArray<Integer>
-);
-var
-  Band      : Integer;
-  BinCounts : TArray<Integer>;
-  TotalBins : Integer;
-  Remaining : Integer;
-begin
-  SetLength(BinCounts, CELT_NUM_BANDS);
-  TotalBins := 0;
-  for Band := 0 to CELT_NUM_BANDS - 1 do
-  begin
-    BinCounts[Band] := GetBandLimits(FrameSize, Band + 1) - GetBandLimits(FrameSize, Band);
-    Inc(TotalBins, BinCounts[Band]);
-  end;
-  if TotalBins = 0 then TotalBins := 1;
-
-  // Proportional allocation
-  Remaining := TotalBits;
-  for Band := 0 to CELT_NUM_BANDS - 1 do
-  begin
-    BandBits[Band] := TotalBits * BinCounts[Band] div TotalBins;
-    Dec(Remaining, BandBits[Band]);
-  end;
-  // Give remainder to last band
-  if CELT_NUM_BANDS > 0 then
-    Inc(BandBits[CELT_NUM_BANDS - 1], Remaining);
-
-  // Fine energy gets 1 bit per band per channel
-  for Band := 0 to CELT_NUM_BANDS - 1 do
-    FineBits[Band] := Min(1, BandBits[Band] div 4);
-end;
-
-// ---------------------------------------------------------------------------
-// State init
-// ---------------------------------------------------------------------------
-
-procedure CeltDecodeStateInit(var State: TCeltDecodeState; Channels: Integer);
-var
-  Ch : Integer;
-begin
-  FillChar(State, SizeOf(State), 0);
-  SetLength(State.Overlap, Channels);
-  for Ch := 0 to Channels - 1 do
-    SetLength(State.Overlap[Ch], CELT_OVERLAP * 2);
-  State.OverlapN := CELT_OVERLAP;
-  State.PrevSilence := True;
-end;
-
-// ---------------------------------------------------------------------------
-// CELT frame decode
-// ---------------------------------------------------------------------------
-
-function CeltDecodeFrame(
-  var Rd        : TOpusRangeDecoder;
-  var State     : TCeltDecodeState;
-  Channels      : Integer;
-  FrameSize     : Integer;
-  const Output  : TArray<TArray<Single>>
-): Boolean;
-var
-  Ch         : Integer;
-  I          : Integer;
-  Silence    : Boolean;
-  PostFilter : Boolean;
-  HasTransient: Boolean;
-  IntraEnergy : Boolean;
-  BandBits   : TArray<Integer>;
-  FineBitsArr: TArray<Integer>;
-  MDCTIn     : TArray<TArray<Single>>;
-  MDCTOut    : TArray<TArray<Single>>;
-  Overlap    : Integer;
-begin
-  Result := False;
-  Overlap := CELT_OVERLAP;
-
-  SetLength(BandBits, CELT_NUM_BANDS);
-  SetLength(FineBitsArr, CELT_NUM_BANDS);
-  SetLength(MDCTIn, Channels);
-  SetLength(MDCTOut, Channels);
-  for Ch := 0 to Channels - 1 do
-  begin
-    SetLength(MDCTIn[Ch], FrameSize div 2);
-    SetLength(MDCTOut[Ch], FrameSize);
-    FillChar(MDCTIn[Ch][0], (FrameSize div 2) * SizeOf(Single), 0);
-    FillChar(MDCTOut[Ch][0], FrameSize * SizeOf(Single), 0);
-  end;
-
-  // ---- Silence flag ----
-  Silence := RdDecodeICDF(Rd, CELT_SILENCE_ICDF, 8) = 0;
+  TotalBits := Len * 8;
+  Tell := EcTell(Rd^);
+  if Tell >= TotalBits then Silence := True
+  else if Tell = 1 then Silence := EcDecBitLogp(Rd^, 15) <> 0
+  else Silence := False;
   if Silence then
   begin
-    for Ch := 0 to Channels - 1 do
-      for I := 0 to FrameSize - 1 do
-        Output[Ch][I] := 0.0;
-    // Drain overlap
-    for Ch := 0 to Channels - 1 do
-      for I := 0 to Overlap - 1 do
-        State.Overlap[Ch][I] := 0.0;
-    State.PrevSilence := True;
-    Exit(True);
+    Tell := Len * 8;
+    Rd^.NBitsTotal := Rd^.NBitsTotal + Tell - EcTell(Rd^);
   end;
 
-  // ---- Post-filter ----
-  PostFilter := RdDecodeICDF(Rd, CELT_POSTFILTER_ICDF, 8) = 0;
-  if PostFilter then
+  PostfilterGain := 0;
+  PostfilterPitch := 0;
+  PostfilterTapset := 0;
+  if (FStart = 0) and (Tell + 16 <= TotalBits) then
   begin
-    // Decode pitch period and gain (simplified: read but ignore)
-    var Period: Cardinal := RdDecodeUInt(Rd, 512);
-    var GainIdx: Cardinal := RdDecodeUInt(Rd, 8);
-    State.PostFilterPeriod := Period;
-    State.PostFilterGainQ8 := GainIdx;
+    if EcDecBitLogp(Rd^, 1) <> 0 then
+    begin
+      Octave := EcDecUInt(Rd^, 6);
+      PostfilterPitch := (16 shl Octave) + Integer(EcDecBits(Rd^, 4 + Octave)) - 1;
+      Qg := EcDecBits(Rd^, 3);
+      if EcTell(Rd^) + 2 <= TotalBits then
+        PostfilterTapset := EcDecIcdf(Rd^, @TAPSET_ICDF[0], 2);
+      PostfilterGain := 0.09375 * (Qg + 1);
+    end;
+    Tell := EcTell(Rd^);
   end;
 
-  // ---- Transient flag ----
-  HasTransient := (FrameSize > CELT_NB_IMDCT_SIZE) and
-                  (RdDecodeICDF(Rd, CELT_TRANSIENT_ICDF, 8) = 0);
-
-  // ---- Stereo: dual-stereo or M/S ----
-  var DualStereo := (Channels > 1) and
-                    (RdDecodeICDF(Rd, CELT_DUALSTEREO_ICDF, 8) = 0);
-
-  // ---- Intra prediction flag ----
-  IntraEnergy := RdDecodeICDF(Rd, CELT_INTRA_ICDF, 8) = 0;
-
-  // ---- Coarse energy ----
-  CeltDecodeCoarseEnergy(Rd, State, Channels, FrameSize, IntraEnergy);
-
-  // ---- Bit allocation (simplified) ----
-  var TotalBits := (Rd.DataLen - Rd.DataPos) * 8;  // rough estimate
-  CeltAllocateBits(FrameSize, TotalBits, BandBits, FineBitsArr);
-
-  // ---- Spectral coefficients ----
-  CeltDecodeBands(Rd, State, Channels, FrameSize, BandBits);
-
-  // ---- Fine energy ----
-  CeltDecodeFineEnergy(Rd, State, Channels, FineBitsArr);
-
-  // Copy spectral from overlap proxy into MDCT input
-  for Ch := 0 to Channels - 1 do
-    for I := 0 to FrameSize div 2 - 1 do
-      if I < Length(State.Overlap[Ch]) then
-        MDCTIn[Ch][I] := State.Overlap[Ch][I];
-
-  // ---- IMDCT ----
-  for Ch := 0 to Channels - 1 do
-    CeltIMDCT(@MDCTIn[Ch][0], FrameSize, @MDCTOut[Ch][0]);
-
-  // ---- Overlap-add with Hann window ----
-  for Ch := 0 to Channels - 1 do
+  if (LM > 0) and (Tell + 3 <= TotalBits) then
   begin
-    // Left half: add previous overlap
-    for I := 0 to Overlap - 1 do
-    begin
-      var W := CeltWindow(I, Overlap * 2);
-      var Samp := MDCTOut[Ch][I] * W + State.Overlap[Ch][I];
-      if Samp >  1.0 then Samp :=  1.0;
-      if Samp < -1.0 then Samp := -1.0;
-      Output[Ch][I] := Samp;
-    end;
-    // Center: flat (no overlap)
-    for I := Overlap to FrameSize - Overlap - 1 do
-    begin
-      var Samp := MDCTOut[Ch][I];
-      if Samp >  1.0 then Samp :=  1.0;
-      if Samp < -1.0 then Samp := -1.0;
-      Output[Ch][I] := Samp;
-    end;
-    // Save right overlap for next frame
-    for I := 0 to Overlap - 1 do
-    begin
-      var W := CeltWindow(Overlap - 1 - I, Overlap * 2);
-      State.Overlap[Ch][I] := MDCTOut[Ch][FrameSize - Overlap + I] * W;
-    end;
-  end;
+    IsTransient := EcDecBitLogp(Rd^, 3) <> 0;
+    Tell := EcTell(Rd^);
+  end
+  else
+    IsTransient := False;
+  if IsTransient then ShortBlocks := M else ShortBlocks := 0;
 
-  // M/S decoupling for stereo (if not dual-stereo)
-  if (Channels > 1) and not DualStereo then
+  if Tell + 3 <= TotalBits then IntraEner := EcDecBitLogp(Rd^, 3) else IntraEner := 0;
+
+  if (IntraEner = 0) and (FLossDuration <> 0) then
   begin
-    for I := 0 to FrameSize - 1 do
+    for C := 0 to 1 do
     begin
-      var M := Output[0][I];
-      var S := Output[1][I];
-      Output[0][I] := (M + S) * 0.5;
-      Output[1][I] := (M - S) * 0.5;
+      Safety := 0;
+      Missing := Min(10, FLossDuration shr LM);
+      if LM = 0 then Safety := 1.5
+      else if LM = 1 then Safety := 0.5;
+      for I := FStart to FEnd - 1 do
+      begin
+        if FOldEBands[C * CELT_NB_EBANDS + I] < Max(FOldLogE[C * CELT_NB_EBANDS + I], FOldLogE2[C * CELT_NB_EBANDS + I]) then
+        begin
+          E0 := FOldEBands[C * CELT_NB_EBANDS + I];
+          E1 := FOldLogE[C * CELT_NB_EBANDS + I];
+          E2 := FOldLogE2[C * CELT_NB_EBANDS + I];
+          Slope := Max(E1 - E0, 0.5 * (E2 - E0));
+          E0 := E0 - Max(0, (1 + Missing) * Slope);
+          FOldEBands[C * CELT_NB_EBANDS + I] := Max(-20.0, E0);
+        end
+        else
+          FOldEBands[C * CELT_NB_EBANDS + I] := Min(Min(FOldEBands[C * CELT_NB_EBANDS + I],
+            FOldLogE[C * CELT_NB_EBANDS + I]), FOldLogE2[C * CELT_NB_EBANDS + I]);
+        FOldEBands[C * CELT_NB_EBANDS + I] := FOldEBands[C * CELT_NB_EBANDS + I] - Safety;
+      end;
     end;
   end;
 
-  State.PrevSilence := False;
-  Result := not RdHasError(Rd);
+  UnquantCoarseEnergy(FStart, FEnd, @FOldEBands[0], IntraEner, Rd^, SC, LM);
+
+  SetLength(TfRes, CELT_NB_EBANDS);
+  TfDecode(FStart, FEnd, IsTransient, TfRes, LM, Rd^);
+
+  Tell := EcTell(Rd^);
+  SpreadDecision := SPREAD_NORMAL;
+  if Tell + 4 <= TotalBits then
+    SpreadDecision := EcDecIcdf(Rd^, @SPREAD_ICDF[0], 5);
+
+  InitCaps(Cap, LM, SC);
+  SetLength(Offsets, CELT_NB_EBANDS);
+  DynallocLogp := 6;
+  TotalBits := TotalBits shl BITRES;
+  TellFrac := EcTellFrac(Rd^);
+  for I := FStart to FEnd - 1 do
+  begin
+    Width := SC * (CELT_EBANDS[I + 1] - CELT_EBANDS[I]) shl LM;
+    Quanta := Min(Width shl BITRES, Max(6 shl BITRES, Width));
+    DynallocLoopLogp := DynallocLogp;
+    Boost := 0;
+    while (TellFrac + (DynallocLoopLogp shl BITRES) < TotalBits) and (Boost < Cap[I]) do
+    begin
+      Flag := EcDecBitLogp(Rd^, DynallocLoopLogp);
+      TellFrac := EcTellFrac(Rd^);
+      if Flag = 0 then Break;
+      Boost := Boost + Quanta;
+      TotalBits := TotalBits - Quanta;
+      DynallocLoopLogp := 1;
+    end;
+    Offsets[I] := Boost;
+    if Boost > 0 then
+      DynallocLogp := Max(2, DynallocLogp - 1);
+  end;
+
+  if TellFrac + (6 shl BITRES) <= TotalBits then
+    AllocTrim := EcDecIcdf(Rd^, @TRIM_ICDF[0], 7)
+  else
+    AllocTrim := 5;
+
+  Bits := ((Len * 8) shl BITRES) - Integer(EcTellFrac(Rd^)) - 1;
+  if IsTransient and (LM >= 2) and (Bits >= ((LM + 2) shl BITRES)) then
+    AntiCollapseRsv := 1 shl BITRES
+  else
+    AntiCollapseRsv := 0;
+  Bits := Bits - AntiCollapseRsv;
+
+  Intensity := 0;
+  DualStereo := 0;
+  CodedBands := CltComputeAllocation(FStart, FEnd, Offsets, Cap, AllocTrim,
+    Intensity, DualStereo, Bits, Balance, Pulses, FineQuant, FinePriority, SC, LM, Rd^);
+
+  UnquantFineEnergy(FStart, FEnd, @FOldEBands[0], FineQuant, Rd^, SC);
+
+  for C := 0 to CC - 1 do
+    Move(FDecodeMem[C][N], FDecodeMem[C][0], (CELT_DECODE_BUFFER_SIZE - N + CELT_OVERLAP_SIZE) * SizeOf(Single));
+
+  SetLength(CollapseMasks, SC * CELT_NB_EBANDS);
+  FillChar(CollapseMasks[0], Length(CollapseMasks), 0);
+  X := @FX[0];
+  FillChar(X^, SC * N * SizeOf(Single), 0);
+  if SC = 2 then Y := X + N else Y := nil;
+
+  QuantAllBands(FStart, FEnd, X, Y, @CollapseMasks[0], Pulses, ShortBlocks,
+    SpreadDecision, DualStereo, Intensity, TfRes,
+    Len * (8 shl BITRES) - AntiCollapseRsv, Balance, Rd^, LM, CodedBands,
+    FRng, FDisableInv);
+
+  AntiCollapseOn := 0;
+  if AntiCollapseRsv > 0 then
+    AntiCollapseOn := EcDecBits(Rd^, 1);
+
+  UnquantEnergyFinalise(FStart, FEnd, @FOldEBands[0], FineQuant, FinePriority,
+    Len * 8 - EcTell(Rd^), Rd^, SC);
+
+  if AntiCollapseOn <> 0 then
+    AntiCollapse(X, @CollapseMasks[0], LM, SC, N, FStart, FEnd, @FOldEBands[0],
+      @FOldLogE[0], @FOldLogE2[0], Pulses, FRng);
+
+  if Silence then
+    for I := 0 to SC * CELT_NB_EBANDS - 1 do
+      FOldEBands[I] := -28.0;
+
+  if FPrefilterAndFold then
+    PrefilterAndFold(N);
+
+  Synthesis(X, OutSyn, @FOldEBands[0], FStart, EffEnd, SC, CC, IsTransient, LM, Silence);
+
+  for C := 0 to CC - 1 do
+  begin
+    FPostfilterPeriod := Max(FPostfilterPeriod, COMBFILTER_MINPERIOD);
+    FPostfilterPeriodOld := Max(FPostfilterPeriodOld, COMBFILTER_MINPERIOD);
+    CombFilter(OutSyn[C], OutSyn[C], FPostfilterPeriodOld, FPostfilterPeriod, CELT_SHORT_MDCT,
+      FPostfilterGainOld, FPostfilterGain, FPostfilterTapsetOld, FPostfilterTapset,
+      @CELT_WINDOW120[0], CELT_OVERLAP_SIZE);
+    if LM <> 0 then
+      CombFilter(OutSyn[C] + CELT_SHORT_MDCT, OutSyn[C] + CELT_SHORT_MDCT,
+        FPostfilterPeriod, PostfilterPitch, N - CELT_SHORT_MDCT,
+        FPostfilterGain, PostfilterGain, FPostfilterTapset, PostfilterTapset,
+        @CELT_WINDOW120[0], CELT_OVERLAP_SIZE);
+  end;
+  FPostfilterPeriodOld := FPostfilterPeriod;
+  FPostfilterGainOld := FPostfilterGain;
+  FPostfilterTapsetOld := FPostfilterTapset;
+  FPostfilterPeriod := PostfilterPitch;
+  FPostfilterGain := PostfilterGain;
+  FPostfilterTapset := PostfilterTapset;
+  if LM <> 0 then
+  begin
+    FPostfilterPeriodOld := FPostfilterPeriod;
+    FPostfilterGainOld := FPostfilterGain;
+    FPostfilterTapsetOld := FPostfilterTapset;
+  end;
+
+  if SC = 1 then
+    Move(FOldEBands[0], FOldEBands[CELT_NB_EBANDS], CELT_NB_EBANDS * SizeOf(Single));
+
+  if not IsTransient then
+  begin
+    Move(FOldLogE[0], FOldLogE2[0], 2 * CELT_NB_EBANDS * SizeOf(Single));
+    Move(FOldEBands[0], FOldLogE[0], 2 * CELT_NB_EBANDS * SizeOf(Single));
+  end
+  else
+    for I := 0 to 2 * CELT_NB_EBANDS - 1 do
+      FOldLogE[I] := Min(FOldLogE[I], FOldEBands[I]);
+
+  MaxBackgroundIncrease := Min(160, FLossDuration + M) * 0.001;
+  for I := 0 to 2 * CELT_NB_EBANDS - 1 do
+    FBackgroundLogE[I] := Min(FBackgroundLogE[I] + MaxBackgroundIncrease, FOldEBands[I]);
+
+  for C := 0 to 1 do
+  begin
+    for I := 0 to FStart - 1 do
+    begin
+      FOldEBands[C * CELT_NB_EBANDS + I] := 0;
+      FOldLogE[C * CELT_NB_EBANDS + I] := -28.0;
+      FOldLogE2[C * CELT_NB_EBANDS + I] := -28.0;
+    end;
+    for I := FEnd to CELT_NB_EBANDS - 1 do
+    begin
+      FOldEBands[C * CELT_NB_EBANDS + I] := 0;
+      FOldLogE[C * CELT_NB_EBANDS + I] := -28.0;
+      FOldLogE2[C * CELT_NB_EBANDS + I] := -28.0;
+    end;
+  end;
+  FRng := Rd^.Rng;
+
+  Deemphasis(OutSyn, Pcm, N, CC);
+  FLossDuration := 0;
+  FPrefilterAndFold := False;
+  if EcTell(Rd^) > 8 * Len then Exit(-3);
+  if Rd^.Error <> 0 then FError := 1;
+  Result := FrameSize;
 end;
 
 end.

@@ -118,18 +118,16 @@ begin
     20: FLM := 3;
     10: FLM := 2;
      5: FLM := 1;
-  else  FLM := 3;  // default 20ms
+  else  FLM := 3;  // default 20ms (2.5 ms / LM 0 no es seleccionable: FrameSizeMs es entero)
   end;
 
-  // CELT fullband (FB) config: config 28 = CELT WB 20ms, config 29 = CELT SWB 20ms,
-  // config 31 = CELT FB 20ms. Use config 28 for all frame sizes (compatible).
-  // For LM=3 (20ms): CELT FB = config 31. For LM=2 (10ms): config 29. Etc.
-  case FLM of
-    3: FConfig := 31;  // CELT FB 20ms
-    2: FConfig := 29;  // CELT SWB 10ms
-    1: FConfig := 25;  // CELT WB 5ms
-  else FConfig := 16;  // CELT NB 2.5ms
-  end;
+  // TOC config CELT (RFC 6716 §3.1): config = 16 + 4*bw + LM, con
+  // bw 0=NB 1=WB 2=SWB 3=FB (16-19, 20-23, 24-27, 28-31) y LM 0..3 =
+  // 2.5/5/10/20 ms. CeltEncodeFrame codifica siempre las 21 bandas
+  // (end band 21 = fullband), así que el config es 28 + LM:
+  //   28 = CELT FB 2.5 ms, 29 = FB 5 ms, 30 = FB 10 ms, 31 = FB 20 ms.
+  // (Antes: 29/25/16 para 10/5/2.5 ms, que el decoder leía como 5/5/2.5 ms.)
+  FConfig := 28 + FLM;
 
   CeltEncStateInit(FState, Channels, FLM);
   FFrameSize := FState.FrameSize;

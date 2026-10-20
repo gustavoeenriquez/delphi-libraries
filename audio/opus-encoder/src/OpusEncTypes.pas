@@ -88,8 +88,16 @@ implementation
 
 // ---------------------------------------------------------------------------
 // Config tables for TOC config byte lookup
-// (mirror of OPUS_CONFIG_MODE / OPUS_CONFIG_BANDWIDTH / OPUS_FRAME_SIZE_MS)
+// (mirror of OPUS_CONFIG_MODE / OPUS_CONFIG_BANDWIDTH; OpusTypes ya no
+//  exporta la tabla de duraciones, así que se define aquí — RFC 6716 §3.1)
 // ---------------------------------------------------------------------------
+
+const
+  OPUS_ENC_FRAME_SIZE_MS: array[0..31] of Single = (
+    10, 20, 40, 60,  10, 20, 40, 60,  10, 20, 40, 60,   // SILK NB/MB/WB
+    10, 20,  10, 20,                                     // Hybrid SWB/FB
+    2.5, 5, 10, 20,  2.5, 5, 10, 20,                     // CELT NB/WB
+    2.5, 5, 10, 20,  2.5, 5, 10, 20);                    // CELT SWB/FB
 
 procedure OpusEncConfigInit(out Cfg: TOpusEncConfig;
   AChannels, ASampleRate: Integer);
@@ -112,7 +120,7 @@ begin
   for I := 0 to 31 do
     if (OPUS_CONFIG_MODE[I] = Mode) and
        (OPUS_CONFIG_BANDWIDTH[I] = Bandwidth) and
-       (Abs(OPUS_FRAME_SIZE_MS[I] - FrameSizeMs) < 0.01) then
+       (Abs(OPUS_ENC_FRAME_SIZE_MS[I] - FrameSizeMs) < 0.01) then
       Exit(I);
   Result := -1;
 end;

@@ -74,6 +74,14 @@ const
   RE_CODE_TOP  = Cardinal($80000000);
   // Maximum chunk size for uniform-integer high/low split.
   EC_UINT_BITS = 8;
+  // Constantes del range coder (RFC 6716 §4.1 / entcode.h). Antes venían de
+  // OpusTypes; la reescritura del decoder las movió a OpusEntDec.
+  EC_SYM_BITS   = 8;
+  EC_CODE_BITS  = 32;
+  EC_SYM_MAX    = $FF;
+  EC_CODE_BOT   = 1 shl 23;
+  EC_CODE_SHIFT = EC_CODE_BITS - EC_SYM_BITS - 1;  // 23
+  EC_CODE_MASK  = $7FFFFFFF;
 
 // ---------------------------------------------------------------------------
 // EcILog: position of highest set bit, 1-based. EcILog(0) = 0.

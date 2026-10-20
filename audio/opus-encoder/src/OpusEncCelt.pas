@@ -27,8 +27,7 @@ uses
   SysUtils, Math,
   OpusTypes,
   OpusEncTypes,
-  OpusRangeEncoder,
-  OpusRangeDecoder;
+  OpusRangeEncoder;
 
 const
   CELT_ENC_BANDS  = 21;

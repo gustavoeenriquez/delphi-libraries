@@ -1,17 +1,24 @@
-program TestFonts;
+﻿program TestFonts;
 // Tests: uPDF.StdFonts (metrics of the 14 standard fonts, Annex D encodings,
-// Adobe Glyph List) and the simple-font loading of uPDF.Font: base encoding,
-// Differences, widths of fonts without /Widths, character codes to Unicode.
+// Adobe Glyph List), the simple-font loading of uPDF.Font (base encoding,
+// Differences, widths of fonts without /Widths, character codes to Unicode)
+// and the embedded font programs (uPDF.FontProgram, uPDF.FontCFF,
+// uPDF.FontType1): outlines against data\fonts (see tools\gen_font_vectors.py)
+// and the character code to glyph mapping of simple and CID fonts.
 
 {$APPTYPE CONSOLE}
 {$SCOPEDENUMS ON}
 
 uses
-  System.SysUtils, System.Classes, System.Math,
+  System.SysUtils, System.Classes, System.Math, System.IOUtils, System.Generics.Collections,
+  System.Generics.Defaults, System.Types,
   uPDF.Types         in '..\Src\Core\uPDF.Types.pas',
   uPDF.Errors        in '..\Src\Core\uPDF.Errors.pas',
   uPDF.Objects       in '..\Src\Core\uPDF.Objects.pas',
   uPDF.StdFonts      in '..\Src\Core\uPDF.StdFonts.pas',
+  uPDF.FontProgram   in '..\Src\Core\uPDF.FontProgram.pas',
+  uPDF.FontCFF       in '..\Src\Core\uPDF.FontCFF.pas',
+  uPDF.FontType1     in '..\Src\Core\uPDF.FontType1.pas',
   uPDF.Font          in '..\Src\Core\uPDF.Font.pas',
   uPDF.Document      in '..\Src\Core\uPDF.Document.pas',
   uPDF.TextExtractor in '..\Src\Core\uPDF.TextExtractor.pas';
@@ -298,6 +305,264 @@ begin
   end;
 end;
 
+// =========================================================================
+// uPDF.FontProgram / uPDF.FontCFF / uPDF.FontType1
+// =========================================================================
+
+function FindDataDir: string;
+var
+  D: string;
+begin
+  if (ParamCount > 0) and FileExists(TPath.Combine(ParamStr(1), 'manifest.txt')) then
+    Exit(ParamStr(1));
+  D := ExtractFilePath(ParamStr(0));
+  for var I := 0 to 5 do
+  begin
+    Result := TPath.Combine(D, 'data' + PathDelim + 'fonts');
+    if FileExists(TPath.Combine(Result, 'manifest.txt')) then Exit;
+    D := ExtractFilePath(ExcludeTrailingPathDelimiter(D));
+  end;
+  Result := '';
+end;
+
+// Sorted set of the outline points rounded to integers, as in manifest.txt
+function PointSet(const AOutline: TGlyphOutline): string;
+var
+  L: TList<TPoint>;
+
+  procedure Add(X, Y: Single);
+  begin
+    var P := TPoint.Create(Round(X), Round(Y));
+    if not L.Contains(P) then L.Add(P);
+  end;
+
+begin
+  L := TList<TPoint>.Create;
+  try
+    for var Op in AOutline do
+      case Op.Kind of
+        TGlyphOpKind.MoveTo, TGlyphOpKind.LineTo: Add(Op.X1, Op.Y1);
+        TGlyphOpKind.CurveTo:
+        begin
+          Add(Op.X1, Op.Y1);
+          Add(Op.X2, Op.Y2);
+          Add(Op.X3, Op.Y3);
+        end;
+      end;
+    // numeric order of (x, y), as Python sorts the tuples
+    L.Sort(TComparer<TPoint>.Construct(
+      function(const A, B: TPoint): Integer
+      begin
+        Result := CompareValue(A.X, B.X);
+        if Result = 0 then Result := CompareValue(A.Y, B.Y);
+      end));
+    Result := '';
+    for var P in L do
+    begin
+      if Result <> '' then Result := Result + ' ';
+      Result := Result + Format('%d,%d', [P.X, P.Y]);
+    end;
+  finally
+    L.Free;
+  end;
+end;
+
+function LoadProgram(const ADir, AFile: string): TPDFFontProgram;
+var
+  Key, Sub: string;
+begin
+  if AFile.EndsWith('.ttf') then Key := 'FontFile2'
+  else if AFile.EndsWith('.cff') then
+  begin
+    Key := 'FontFile3';
+    Sub := 'Type1C';
+  end else
+    Key := 'FontFile';
+  Result := LoadFontProgram(TFile.ReadAllBytes(TPath.Combine(ADir, AFile)), Key, Sub);
+end;
+
+procedure TestPrograms;
+var
+  Dir: string;
+  Progs: TObjectDictionary<string, TPDFFontProgram>;
+begin
+  Section('Programas de fuente: contornos (FreeType / fontTools)');
+  Dir := FindDataDir;
+  if Dir = '' then
+  begin
+    Fail('P00 no se encontró data/fonts/manifest.txt');
+    Exit;
+  end;
+  Progs := TObjectDictionary<string, TPDFFontProgram>.Create([doOwnsValues]);
+  try
+    for var Line in TFile.ReadAllLines(TPath.Combine(Dir, 'manifest.txt')) do
+    begin
+      if (Line = '') or Line.StartsWith('#') then Continue;
+      // file gid name points...: Split with a count drops the rest
+      var Parts := Line.Split([' ']);
+      var Prog: TPDFFontProgram;
+      if not Progs.TryGetValue(Parts[0], Prog) then
+      begin
+        Prog := LoadProgram(Dir, Parts[0]);
+        Progs.Add(Parts[0], Prog);
+        Check(Prog <> nil, 'P01 carga ' + Parts[0]);
+      end;
+      if Prog = nil then Continue;
+      var Expected := string.Join(' ', Copy(Parts, 3, MaxInt));
+      var GID := StrToInt(Parts[1]);
+      var Got := PointSet(Prog.GlyphOutline(GID));
+      Check((Got = Expected) and (Prog.GlyphName(GID) = Parts[2]),
+        Format('P02 %s glifo %d %s', [Parts[0], GID, Parts[2]]),
+        Format('nombre %s; obtenido [%s] esperado [%s]', [Prog.GlyphName(GID), Got, Expected]));
+    end;
+
+    Section('Programas de fuente: búsqueda de glifos');
+    var TT: TPDFFontProgram;
+    if Progs.TryGetValue('tt.ttf', TT) and (TT is TTrueTypeProgram) then
+    begin
+      var T := TTrueTypeProgram(TT);
+      Check(T.CmapGlyph(3, 1, $41) = 1, 'P03 TrueType cmap (3,1) A');
+      Check(T.CmapGlyph(3, 0, $F062) = 2, 'P03 TrueType cmap (3,0) F062');
+      Check(T.CmapGlyph(1, 0, $64) = 4, 'P03 TrueType cmap (1,0) d');
+      Check(T.CmapGlyph(3, 1, $44) = 0, 'P03 TrueType código sin glifo');
+      Check(T.GlyphByName('C') = 3, 'P03 TrueType nombre post');
+      Check(SameValue(T.FontMatrix.A, 0.001, 1e-9), 'P03 TrueType FontMatrix 1/unitsPerEm');
+    end else
+      Fail('P03 TrueType');
+    var C: TPDFFontProgram;
+    if Progs.TryGetValue('cff.cff', C) then
+    begin
+      Check(C.HasBuiltinEncoding and (C.BuiltinGlyphName($64) = 'Aacute'), 'P04 CFF codificación propia');
+      Check(C.GlyphByName('acute') = 5, 'P04 CFF charset');
+      Check((C is TCFFProgram) and not TCFFProgram(C).IsCIDKeyed, 'P04 CFF por nombres');
+    end;
+    var T1: TPDFFontProgram;
+    if Progs.TryGetValue('t1.pfa', T1) then
+    begin
+      Check(T1.HasBuiltinEncoding and (T1.BuiltinGlyphName($63) = 'C'), 'P05 Type 1 codificación propia');
+      Check(T1.GlyphByName('Aacute') = 4, 'P05 Type 1 CharStrings');
+      Check(SameValue(T1.FontMatrix.A, 0.001, 1e-9), 'P05 Type 1 FontMatrix');
+    end;
+    Check(LoadFontProgram(TBytes.Create(1, 2, 3, 4, 5), 'FontFile2', '') = nil,
+      'P06 datos inválidos -> nil');
+  finally
+    Progs.Free;
+  end;
+end;
+
+function FontFileStream(const AData: TBytes; const ASubtype: string = ''): TPDFStream;
+begin
+  Result := TPDFStream.Create;
+  Result.SetRawData(AData);
+  Result.Dict.SetValue('Length', TPDFInteger.Create(Length(AData)));
+  if ASubtype <> '' then
+    Result.Dict.SetValue('Subtype', TPDFName.Create(ASubtype));
+end;
+
+function EmbeddedFont(const ASubtype, ABase: string; AFlags: Integer; const AKey: string;
+  AFile: TPDFStream; AEncoding: TPDFObject = nil): TPDFFont;
+begin
+  var D := FontDict(ASubtype, ABase, AEncoding);
+  var Desc := Descriptor(AFlags);
+  Desc.SetValue(AKey, AFile);
+  D.SetValue('FontDescriptor', Desc);
+  Result := TPDFFontFactory.Build(D);
+  // the factory keeps references into D: it stays alive for the test run
+end;
+
+procedure TestEmbeddedFonts;
+var
+  F: TPDFFont;
+  Dir: string;
+begin
+  Section('Fuentes incrustadas: código a glifo');
+  Dir := FindDataDir;
+  if Dir = '' then Exit;
+  var TTData := TFile.ReadAllBytes(TPath.Combine(Dir, 'tt.ttf'));
+  var CFFData := TFile.ReadAllBytes(TPath.Combine(Dir, 'cff.cff'));
+  var T1Data := TFile.ReadAllBytes(TPath.Combine(Dir, 't1.pfa'));
+
+  // nonsymbolic TrueType with WinAnsi: code -> name -> Unicode -> (3,1)
+  F := EmbeddedFont('TrueType', 'ABCDEF+Test', 32, 'FontFile2', FontFileStream(TTData),
+    TPDFName.Create('WinAnsiEncoding'));
+  try
+    Check(F.FontProgram is TTrueTypeProgram, 'E01 TrueType cargada');
+    Check(F.GlyphID(Ord('B')) = 2, 'E01 no simbólica: B por (3,1)', IntToStr(F.GlyphID(Ord('B'))));
+    Check(F.GlyphID(Ord('Z')) = 0, 'E01 sin glifo -> .notdef');
+  finally
+    F.Free;
+  end;
+
+  // symbolic TrueType without /Encoding: the (3,0) cmap at 0xF000 + code
+  F := EmbeddedFont('TrueType', 'ABCDEF+Test', 4, 'FontFile2', FontFileStream(TTData));
+  try
+    Check(F.GlyphID($63) = 3, 'E02 simbólica: c por (3,0) F063', IntToStr(F.GlyphID($63)));
+  finally
+    F.Free;
+  end;
+
+  // Differences on a TrueType font: names through Unicode and 'post'
+  F := EmbeddedFont('TrueType', 'ABCDEF+Test', 32, 'FontFile2', FontFileStream(TTData),
+    DiffEncoding('WinAnsiEncoding', 1, ['C', 'B']));
+  try
+    Check((F.GlyphID(1) = 3) and (F.GlyphID(2) = 2), 'E03 TrueType con Differences');
+  finally
+    F.Free;
+  end;
+
+  // Type 1C without /Encoding: the built-in encoding of the program
+  F := EmbeddedFont('Type1', 'ABCDEF+TestCFF', 4, 'FontFile3', FontFileStream(CFFData, 'Type1C'));
+  try
+    Check(F.FontProgram is TCFFProgram, 'E04 CFF cargada');
+    Check(F.GlyphID($64) = 4, 'E04 CFF codificación interna d -> Aacute', IntToStr(F.GlyphID($64)));
+    Check(F.CharCodeToUnicode($64) = #$00C1, 'E04 CFF Unicode por nombre de glifo');
+  finally
+    F.Free;
+  end;
+
+  // Type 1C with WinAnsi: codes by the PDF encoding
+  F := EmbeddedFont('Type1', 'ABCDEF+TestCFF', 32, 'FontFile3', FontFileStream(CFFData, 'Type1C'),
+    TPDFName.Create('WinAnsiEncoding'));
+  try
+    Check(F.GlyphID(Ord('C')) = 3, 'E05 CFF WinAnsi C');
+    Check(F.GlyphID($C1) = 4, 'E05 CFF WinAnsi Á -> Aacute');
+  finally
+    F.Free;
+  end;
+
+  // Type 1 without /Encoding: the built-in encoding
+  F := EmbeddedFont('Type1', 'ABCDEF+TestT1', 4, 'FontFile', FontFileStream(T1Data));
+  try
+    Check(F.FontProgram is TType1Program, 'E06 Type 1 cargada');
+    Check(F.GlyphID($62) = 2, 'E06 Type 1 codificación interna b -> B');
+    Check(F.GlyphID($41) = -1, 'E06 código sin glifo');
+  finally
+    F.Free;
+  end;
+
+  // CIDFontType2 with a /CIDToGIDMap stream: CID 5 -> glyph 3
+  var CIDDict := TPDFDictionary.Create;
+  CIDDict.SetValue('Type', TPDFName.Create('Font'));
+  CIDDict.SetValue('Subtype', TPDFName.Create('CIDFontType2'));
+  CIDDict.SetValue('BaseFont', TPDFName.Create('ABCDEF+Test'));
+  var Desc := Descriptor(4);
+  Desc.SetValue('FontFile2', FontFileStream(TTData));
+  CIDDict.SetValue('FontDescriptor', Desc);
+  CIDDict.SetValue('CIDToGIDMap', FontFileStream(TBytes.Create(0, 0, 0, 1, 0, 2, 0, 0, 0, 0, 0, 3)));
+  var Desc0 := TPDFArray.Create;
+  Desc0.Add(CIDDict);
+  var T0 := FontDict('Type0', 'ABCDEF+Test', TPDFName.Create('Identity-H'));
+  T0.SetValue('DescendantFonts', Desc0);
+  F := TPDFFontFactory.Build(T0);
+  try
+    Check(F.FontProgram is TTrueTypeProgram, 'E07 Type0: programa de la descendiente');
+    Check((F.GlyphID(5) = 3) and (F.GlyphID(1) = 1), 'E07 CIDToGIDMap', IntToStr(F.GlyphID(5)));
+    Check(F.GlyphID(40) = 0, 'E07 CID fuera del mapa -> .notdef');
+  finally
+    F.Free;
+  end;
+end;
+
 procedure TestTextLayout;
 begin
   Section('Posición del texto');
@@ -327,6 +592,8 @@ begin
     TestStdFonts;
     TestSimpleFonts;
     TestTextLayout;
+    TestPrograms;
+    TestEmbeddedFonts;
   except
     on E: Exception do
     begin

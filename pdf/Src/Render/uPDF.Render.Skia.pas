@@ -70,6 +70,8 @@ type
     procedure OnPaintPath(const APath: TPDFPath;
                           const AState: TPDFGraphicsState;
                           AOp: TPDFPaintOp);
+    procedure PaintGlyphPath(const APath: ISkPath; const AGlyph: TPDFGlyphInfo;
+      const AState: TPDFGraphicsState);
     procedure OnPaintGlyph(const AGlyph: TPDFGlyphInfo;
                            const AState: TPDFGraphicsState);
     procedure OnPaintXObject(const AName: string;
@@ -164,6 +166,9 @@ type
   end;
 
 implementation
+
+uses
+  System.Character;
 
 const
   MAX_FORM_DEPTH = 32;
@@ -606,13 +611,34 @@ var
   Unicode:  string;
   Mode:     TPDFTextRenderMode;
 begin
-  Unicode := AGlyph.Unicode;
-  if Unicode = '' then Exit;   // no mapping available — skip
-
   Mode := AState.Text.RenderMode;
   if Mode = TPDFTextRenderMode.Invisible then Exit;
 
+  // Embedded font program: draw the glyph outline itself
+  var PDFFont := AState.Text.Font;
+  if (PDFFont <> nil) and (PDFFont.FontProgram <> nil) then
+  begin
+    var GID := PDFFont.GlyphID(AGlyph.CharCode);
+    if GID >= 0 then
+      PaintGlyphPath(FFontCache.GetGlyphPath(PDFFont, GID), AGlyph, AState);
+    Exit;
+  end;
+
+  Unicode := AGlyph.Unicode;
+  if Unicode = '' then Exit;   // no mapping available — skip
+
   Typeface := FFontCache.GetTypeface(AState.Text.Font);
+  // Characters the substitute lacks (Greek of Symbol, dingbats...) come
+  // from another system font
+  var CP := Ord(Unicode[1]);
+  if (Length(Unicode) >= 2) and Unicode[1].IsHighSurrogate then
+    CP := Char.ConvertToUtf32(Unicode, 0);
+  var Probe: ISkFont := TSkFont.Create(Typeface, 1, 1, 0);
+  if Probe.UnicharToGlyph(CP) = 0 then
+  begin
+    var FB := FFontCache.FallbackFor(CP);
+    if FB <> nil then Typeface := FB;
+  end;
   // Font size = 1.0 because all scaling is in the GlyphMatrix
   Font     := TSkFont.Create(Typeface, 1.0, 1.0, 0);
   Font.Subpixel := FOptions.SubpixelText;
@@ -683,6 +709,67 @@ begin
     end;
 
     TPDFTextRenderMode.Clip: ; // path-only clip — outline accumulated above, applied at ET
+  end;
+end;
+
+// -------------------------------------------------------------------------
+// Fills / strokes / clips a glyph outline of an embedded font program. The
+// path is in text space (1 unit = 1 em), placed by the glyph matrix.
+procedure TPDFSkiaRenderer.PaintGlyphPath(const APath: ISkPath;
+  const AGlyph: TPDFGlyphInfo; const AState: TPDFGraphicsState);
+var
+  Paint: ISkPaint;
+  Mode:  TPDFTextRenderMode;
+
+  procedure Fill;
+  begin
+    Paint := TSkPaint.Create;
+    Paint.Style     := TSkPaintStyle.Fill;
+    Paint.Color     := PDFColorToAlpha(AState.FillColor, AState.FillAlpha);
+    Paint.AntiAlias := FOptions.Antialias;
+    Paint.Blender   := TSkBlender.MakeMode(PDFBlendToSkia(AState.BlendMode));
+    FCanvas.DrawPath(APath, Paint);
+  end;
+
+  procedure Stroke;
+  begin
+    // the line width is in user space; the canvas is in text space
+    var GM := AGlyph.GlyphMatrix;
+    var CM := AState.CTM;
+    var DetT := Abs(GM.A * GM.D - GM.B * GM.C);
+    var DetU := Abs(CM.A * CM.D - CM.B * CM.C);
+    var Scale: Single := 1;
+    if (DetT > 0) and (DetU > 0) then Scale := Sqrt(DetT / DetU);
+    Paint := TSkPaint.Create;
+    Paint.Style       := TSkPaintStyle.Stroke;
+    Paint.Color       := PDFColorToAlpha(AState.StrokeColor, AState.StrokeAlpha);
+    Paint.AntiAlias   := FOptions.Antialias;
+    Paint.StrokeWidth := Max(AState.LineWidth, 0) / Scale;
+    Paint.Blender     := TSkBlender.MakeMode(PDFBlendToSkia(AState.BlendMode));
+    FCanvas.DrawPath(APath, Paint);
+  end;
+
+begin
+  if APath = nil then Exit;          // empty glyph (space)
+  Mode := AState.Text.RenderMode;
+  FCanvas.SetMatrix(TextMatrix(AGlyph.GlyphMatrix));
+
+  if Mode in [TPDFTextRenderMode.FillAndClip, TPDFTextRenderMode.StrokeAndClip,
+              TPDFTextRenderMode.FillStrokeClip, TPDFTextRenderMode.Clip] then
+  begin
+    if FTextClipBuilder = nil then
+      FTextClipBuilder := TSkPathBuilder.Create;
+    FTextClipBuilder.AddPath(APath.Transform(FCanvas.GetLocalToDeviceAs3x3));
+  end;
+
+  case Mode of
+    TPDFTextRenderMode.Fill, TPDFTextRenderMode.FillAndClip: Fill;
+    TPDFTextRenderMode.Stroke, TPDFTextRenderMode.StrokeAndClip: Stroke;
+    TPDFTextRenderMode.FillThenStroke, TPDFTextRenderMode.FillStrokeClip:
+    begin
+      Fill;
+      Stroke;
+    end;
   end;
 end;
 

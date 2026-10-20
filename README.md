@@ -92,6 +92,7 @@ tables and the G.722 test vectors (see [Upstream attributions](#upstream-attribu
 | `uPDF.GraphicsState` | Full graphics-state stack: CTM, colors, fonts, line params, clip path |
 | `uPDF.ColorSpace` | DeviceGray/RGB/CMYK, CalGray/RGB, ICCBased, Indexed, Pattern, Separation |
 | `uPDF.Font` | Type0/1/3/TrueType + CIDFont: glyph widths (standard 14 metrics when `/Widths` is missing), ToUnicode CMap, encodings |
+| `uPDF.FontProgram` / `uPDF.FontCFF` / `uPDF.FontType1` | Embedded TrueType, CFF and Type 1 programs: glyph outlines and code → glyph lookup, used by the renderer |
 | `uPDF.StdFonts` | Standard 14 font metrics, Annex D encodings and Adobe Glyph List (generated; Adobe notices, not CC0) |
 | `uPDF.FontCMap` | CMaps: predefined identities, embedded, Adobe-CNS1/GB1/Japan1/Korea1 |
 | `uPDF.Image` | `TPDFImage` — inline and XObject images; raw bytes + JPEG/Flate decode |

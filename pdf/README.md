@@ -628,6 +628,9 @@ PDFViewerControl1.ZoomFit;
 | `uPDF.GraphicsState` | Full graphics-state stack: CTM, colors, fonts, line params, clipping, pattern names |
 | `uPDF.ColorSpace` | DeviceGray/RGB/CMYK, CalGray/RGB, ICCBased, Indexed, Pattern, Separation |
 | `uPDF.Font` | Type0/1/3/TrueType + CIDFont: glyph widths, ToUnicode CMap, encodings (Standard/WinAnsi/MacRoman/built-in + Differences); fonts without `/Widths` take the standard 14 metrics |
+| `uPDF.FontProgram` | Embedded font programs for rendering: glyph outlines and code → glyph lookup; TrueType reader (`glyf`/`loca`, composite glyphs, `cmap` 0/4/6/12, `post` names); `LoadFontProgram` for FontFile/FontFile2/FontFile3 |
+| `uPDF.FontCFF` | CFF programs (FontFile3 `/Type1C`, `/CIDFontType0C`, OpenType `CFF `): charsets, encodings, FDArray/FDSelect, Type 2 charstrings (subroutines, flex, seac-style endchar) |
+| `uPDF.FontType1` | Type 1 programs (FontFile, PFA/PFB): eexec, Subrs/CharStrings, built-in encoding, Type 1 charstrings (flex and hint replacement OtherSubrs, seac) |
 | `uPDF.StdFonts` | Generated tables: metrics of the 14 standard fonts (Adobe Core14 AFM), simple-font encodings of ISO 32000-1 Annex D, Adobe Glyph List (glyph name → Unicode); font-name aliases (Arial → Helvetica, TimesNewRoman → Times...) |
 | `uPDF.FontCMap` | CMaps: predefined identities, embedded, Adobe-CNS1/GB1/Japan1/Korea1 |
 | `uPDF.Image` | `TPDFImage` — inline and XObject images; raw bytes + JPEG/Flate/CCITT decode (CCITT image masks included; WIC kept as a Windows fallback); `/Decode` arrays; colour space objects (Indexed, Separation, ICCBased N, DeviceN) in `ToRGBA`; `ToStencilRGBA` for image masks |
@@ -655,7 +658,7 @@ PDFViewerControl1.ZoomFit;
 | Unit | Responsibility |
 |---|---|
 | `uPDF.Render.Types` | `TPDFRenderTarget`, tile size, resolution constants |
-| `uPDF.Render.FontCache` | Platform font resolver + glyph-metric cache |
+| `uPDF.Render.FontCache` | Glyph paths of embedded font programs (cached per font); system substitutes for non-embedded fonts (PostScript names, descriptor flags) and per-character fallback faces |
 | `uPDF.Render.Skia` | Page rasterizer backed by **Skia4Delphi** — paths, text, images, axial/radial gradient shading patterns |
 | `uPDF.Viewer.Cache` | Tile + page-bitmap LRU cache |
 | `uPDF.Viewer.Control` | `TPDFViewerControl` — scrollable FMX control, zoom, page navigation |
@@ -676,8 +679,8 @@ PDFViewerControl1.ZoomFit;
 | TestDocumentSave (round-trip, page ops, metadata, LZW, encrypted save, pattern color space) | 76 ✅ |
 | TestCCITT (hand-coded streams, 52 libtiff/MuPDF vectors, CCITT filter; `TPDFImage` `/Decode`, image masks, Indexed; nested form resources; Win64 + Linux64) | 89 ✅ |
 | TestJBIG2 (MMR and structure, 9 jbig2enc/MuPDF vectors as PDF stream and as file, filter and `TPDFImage`; + 5 ITU conformance streams when given; Win64 + Linux64) | 27 (+5) ✅ |
-| TestFonts (standard 14 metrics and aliases, Annex D encodings, glyph names, simple fonts without `/Widths`, Differences, text advance; Win64 + Linux64) | 75 ✅ |
-| **Total** | **589+ ✅** |
+| TestFonts (standard 14 metrics and aliases, Annex D encodings, glyph names, simple fonts without `/Widths`, Differences, text advance; TrueType/CFF/Type 1 outlines against FreeType; code → glyph for symbolic/nonsymbolic TrueType, built-in encodings, `CIDToGIDMap`; Win64 + Linux64) | 124 ✅ |
+| **Total** | **638+ ✅** |
 
 Run the tests:
 
@@ -724,6 +727,14 @@ from the 14 Adobe Core AFM files (also shipped by matplotlib in
 (github.com/adobe-type-tools/agl-aglfn). It is not CC0: see `LICENSE.md`. Simple fonts
 without `/Widths` (4053 such fonts in a survey of local PDFs: the standard 14 and
 non-embedded Arial/Times New Roman) used to advance 1 em per glyph.
+
+Text of embedded fonts is drawn from the font programs themselves (glyph outlines filled
+with Skia), not through the platform engine: DirectWrite does not load bare CFF or Type 1
+programs, and looking glyphs up by Unicode fails on subset fonts with symbolic cmaps
+(Calibri subsets drew wrong glyphs). The outlines were checked glyph by glyph on fonts taken
+from local PDFs (TrueType and CFF against fontTools, Type 1 against FreeType); the test fonts
+in `Tests/data/fonts` are drawn by `Tests/tools/gen_font_vectors.py` (CC0) with FreeType's
+points as the expected values.
 
 ---
 

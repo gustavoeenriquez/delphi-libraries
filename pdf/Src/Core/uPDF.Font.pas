@@ -6,7 +6,7 @@ interface
 
 uses
   System.SysUtils, System.Classes, System.Generics.Collections, System.Math,
-  uPDF.Types, uPDF.Errors, uPDF.Objects, uPDF.StdFonts;
+  uPDF.Types, uPDF.Errors, uPDF.Objects, uPDF.StdFonts, uPDF.FontProgram;
 
 type
   // -------------------------------------------------------------------------
@@ -72,6 +72,7 @@ type
     FontFile:   TBytes;   // Type1 font program
     FontFile2:  TBytes;   // TrueType font program
     FontFile3:  TBytes;   // CFF/OpenType font program
+    FontFile3Subtype: string;   // Type1C, CIDFontType0C or OpenType
     function HasEmbeddedFont: Boolean; inline;
   end;
 
@@ -86,6 +87,8 @@ type
     FWidths:      TPDFFontWidths;    // may be nil (e.g. Type0)
     // ToUnicode CMap
     FToUnicode:   TDictionary<Integer, string>;   // charcode → Unicode string
+    FProgram:     TPDFFontProgram;   // embedded font program, loaded on demand
+    FProgramDone: Boolean;
   public
     constructor Create; virtual;
     destructor  Destroy; override;
@@ -101,6 +104,14 @@ type
 
     // Font program bytes (for Skia typeface loading)
     function  FontBytes: TBytes; virtual;
+
+    // The parsed embedded font program (TrueType, CFF or Type 1); nil when
+    // the font is not embedded or its program cannot be read
+    function  FontProgram: TPDFFontProgram; virtual;
+
+    // Glyph of a character code in FontProgram; -1 when there is no program
+    // or the program has no glyph for the code
+    function  GlyphID(ACharCode: Integer): Integer; virtual;
 
     // Reverse-encode a Unicode char to its byte code(s) in this font's
     // codespace. Used by content-stream redaction to substitute a glyph
@@ -125,15 +136,20 @@ type
   protected
     FEncoding:     TPDFFontEncodingKind;
     FBaseEncoding: TPDFStdEncoding;               // codes not in Differences
+    FExplicitBase: Boolean;                       // /Encoding names a base encoding
     FDifferences:  TDictionary<Integer, string>;  // charcode → glyph name
+    function  TrueTypeGlyph(AProgram: TTrueTypeProgram; ACharCode: Integer): Integer;
   public
     constructor Create; override;
     destructor  Destroy; override;
 
     procedure SetDifferences(ADiffs: TPDFDictionary);
-    // Glyph name of a code: Differences, then the base encoding ('' if unknown)
+    // Glyph name of a code: Differences, then the base encoding — the
+    // built-in encoding of an embedded Type 1/CFF program when /Encoding
+    // names none ('' if unknown)
     function  GlyphName(ACharCode: Integer): string;
     function  CharCodeToUnicode(ACharCode: Integer): string; override;
+    function  GlyphID(ACharCode: Integer): Integer; override;
     property  Encoding: TPDFFontEncodingKind read FEncoding write FEncoding;
     property  BaseEncoding: TPDFStdEncoding read FBaseEncoding write FBaseEncoding;
   end;
@@ -168,12 +184,15 @@ type
     FDW:     Single;                          // default width
     FW:      TDictionary<Integer, Single>;    // individual widths
     FW2:     TDictionary<Integer, Single>;    // vertical writing widths
+    FCIDToGID: TArray<Word>;                  // CIDFontType2 /CIDToGIDMap stream (nil = Identity)
   public
     constructor Create; override;
     destructor  Destroy; override;
 
     procedure LoadWidths(ADict: TPDFDictionary);
     function  GetWidth(ACharCode: Integer): Single; override;
+    // ACharCode is the CID
+    function  GlyphID(ACharCode: Integer): Integer; override;
     property  DefaultWidth: Single read FDW write FDW;
   end;
 
@@ -193,6 +212,8 @@ type
 
     function  CharCodeToUnicode(ACharCode: Integer): string; override;
     function  GetWidth(ACharCode: Integer): Single; override;
+    function  GlyphID(ACharCode: Integer): Integer; override;
+    function  FontProgram: TPDFFontProgram; override;
     property  Descendant: TPDFCIDFont read FDescendant write FDescendant;
     property  CMapName:   string read FCMapName write FCMapName;
   end;
@@ -220,7 +241,7 @@ type
 implementation
 
 uses
-  uPDF.FontCMap;
+  System.Character, uPDF.FontCMap, uPDF.FontCFF;
 
 // =========================================================================
 // TPDFFontDescriptor
@@ -274,6 +295,7 @@ end;
 
 destructor TPDFFont.Destroy;
 begin
+  FProgram.Free;
   FWidths.Free;
   FToUnicode.Free;
   inherited;
@@ -307,6 +329,26 @@ begin
   if Length(FDescriptor.FontFile2) > 0 then Result := FDescriptor.FontFile2
   else if Length(FDescriptor.FontFile3) > 0 then Result := FDescriptor.FontFile3
   else Result := FDescriptor.FontFile;
+end;
+
+function TPDFFont.FontProgram: TPDFFontProgram;
+begin
+  if not FProgramDone then
+  begin
+    FProgramDone := True;
+    if Length(FDescriptor.FontFile2) > 0 then
+      FProgram := LoadFontProgram(FDescriptor.FontFile2, 'FontFile2', '')
+    else if Length(FDescriptor.FontFile3) > 0 then
+      FProgram := LoadFontProgram(FDescriptor.FontFile3, 'FontFile3', FDescriptor.FontFile3Subtype)
+    else if Length(FDescriptor.FontFile) > 0 then
+      FProgram := LoadFontProgram(FDescriptor.FontFile, 'FontFile', '');
+  end;
+  Result := FProgram;
+end;
+
+function TPDFFont.GlyphID(ACharCode: Integer): Integer;
+begin
+  Result := -1;
 end;
 
 function TPDFFont.TryEncodeChar(const AUnicode: string; ACodeByteLen: Integer;
@@ -377,8 +419,92 @@ end;
 
 function TPDFSimpleFont.GlyphName(ACharCode: Integer): string;
 begin
-  if not FDifferences.TryGetValue(ACharCode, Result) then
-    Result := StdEncodingGlyph(FBaseEncoding, ACharCode);
+  if FDifferences.TryGetValue(ACharCode, Result) then Exit;
+  if not FExplicitBase and (FFontType <> TPDFFontType.TrueType) and
+     ((Length(FDescriptor.FontFile) > 0) or (Length(FDescriptor.FontFile3) > 0)) then
+  begin
+    var P := FontProgram;
+    if (P <> nil) and P.HasBuiltinEncoding then
+      Exit(P.BuiltinGlyphName(ACharCode));
+  end;
+  Result := StdEncodingGlyph(FBaseEncoding, ACharCode);
+end;
+
+function TPDFSimpleFont.GlyphID(ACharCode: Integer): Integer;
+var
+  P: TPDFFontProgram;
+begin
+  P := FontProgram;
+  if P = nil then Exit(-1);
+  if P is TTrueTypeProgram then
+    Result := TrueTypeGlyph(TTrueTypeProgram(P), ACharCode)
+  else
+  begin
+    // Type 1 and CFF glyphs are found by name
+    var Name := GlyphName(ACharCode);
+    Result := P.GlyphByName(Name);
+    if (Result < 0) and P.HasBuiltinEncoding then
+      Result := P.GlyphByName(P.BuiltinGlyphName(ACharCode));
+    if (Result < 0) and (P is TCFFProgram) and TCFFProgram(P).IsCIDKeyed then
+      Result := P.GlyphByCID(ACharCode);     // CID-keyed program used as a simple font
+  end;
+  if Result >= P.GlyphCount then Result := -1;
+end;
+
+// Glyph of a code in an embedded TrueType program (ISO 32000-1, 9.6.6.4):
+// for a nonsymbolic font the code goes through its glyph name and Unicode to
+// the (3,1) cmap; a symbolic font maps codes through the (3,0) cmap (also at
+// 0xF000 + code) or the (1,0) cmap; the 'post' names are the last resort.
+function TPDFSimpleFont.TrueTypeGlyph(AProgram: TTrueTypeProgram; ACharCode: Integer): Integer;
+const
+  SYMBOLIC = 4;
+var
+  Name, U: string;
+begin
+  Result := 0;
+  Name := GlyphName(ACharCode);
+  var IsSymbolic := FDescriptor.Flags and SYMBOLIC <> 0;
+  var Uni31 := AProgram.HasCmap(3, 1);
+  var Uni03 := AProgram.HasCmap(0, 3);
+  if (Uni31 or Uni03) and (not IsSymbolic or FExplicitBase or (FDifferences.Count > 0)) then
+  begin
+    U := GlyphNameToUnicode(Name);
+    if U <> '' then
+    begin
+      var CP := Ord(U[1]);
+      if (Length(U) >= 2) and Char.IsSurrogatePair(U, 0) then
+        CP := Char.ConvertToUtf32(U, 0);
+      if Uni31 then Result := AProgram.CmapGlyph(3, 1, CP);
+      if (Result = 0) and Uni03 then Result := AProgram.CmapGlyph(0, 3, CP);
+    end;
+    if (Result = 0) and (Name <> '') then
+      Result := Max(0, AProgram.GlyphByName(Name));
+    if Result > 0 then Exit;
+  end;
+  if AProgram.HasCmap(3, 0) then
+    for var Base in [0, $F000, $F100, $F200] do
+    begin
+      Result := AProgram.CmapGlyph(3, 0, Base + ACharCode);
+      if Result > 0 then Exit;
+    end;
+  if AProgram.HasCmap(1, 0) then
+  begin
+    Result := AProgram.CmapGlyph(1, 0, ACharCode);
+    if Result > 0 then Exit;
+  end;
+  if Uni31 then
+  begin
+    // symbolic fonts written with a Unicode cmap keyed by the codes
+    Result := AProgram.CmapGlyph(3, 1, ACharCode);
+    if Result = 0 then Result := AProgram.CmapGlyph(3, 1, $F000 + ACharCode);
+    if Result > 0 then Exit;
+  end;
+  if Name <> '' then
+    Result := Max(0, AProgram.GlyphByName(Name));
+  // no usable cmap at all: codes are glyph indices
+  if (Result = 0) and not Uni31 and not AProgram.HasCmap(3, 0) and
+     not AProgram.HasCmap(1, 0) and not Uni03 then
+    Result := ACharCode;
 end;
 
 function TPDFSimpleFont.CharCodeToUnicode(ACharCode: Integer): string;
@@ -450,6 +576,25 @@ begin
   inherited;
 end;
 
+function TPDFCIDFont.GlyphID(ACharCode: Integer): Integer;
+var
+  P: TPDFFontProgram;
+begin
+  P := FontProgram;
+  if P = nil then Exit(-1);
+  if P is TTrueTypeProgram then
+  begin
+    if FCIDToGID = nil then
+      Result := ACharCode
+    else if (ACharCode >= 0) and (ACharCode < Length(FCIDToGID)) then
+      Result := FCIDToGID[ACharCode]
+    else
+      Result := 0;
+  end else
+    Result := P.GlyphByCID(ACharCode);
+  if (Result < 0) or (Result >= P.GlyphCount) then Result := -1;
+end;
+
 // PDF spec: /W array format is one of:
 //   c [w1 w2 ...]      — individual widths starting at c
 //   cfirst clast w     — range with same width
@@ -516,6 +661,23 @@ begin
     Result := Char(ACharCode)
   else
     Result := inherited CharCodeToUnicode(ACharCode);
+end;
+
+function TPDFType0Font.FontProgram: TPDFFontProgram;
+begin
+  if FDescendant <> nil then
+    Result := FDescendant.FontProgram
+  else
+    Result := nil;
+end;
+
+function TPDFType0Font.GlyphID(ACharCode: Integer): Integer;
+begin
+  // Identity-H/V: the code is the CID
+  if FDescendant <> nil then
+    Result := FDescendant.GlyphID(ACharCode)
+  else
+    Result := -1;
 end;
 
 function TPDFType0Font.GetWidth(ACharCode: Integer): Single;
@@ -624,8 +786,19 @@ begin
         else
           CIDFont := TPDFCIDType2Font.Create;
         CIDFont.FName     := DescDict.GetAsName('BaseFont');
-        CIDFont.FFontType := TPDFFontType.CIDType2;
+        if DescSubtype = 'CIDFontType0' then
+          CIDFont.FFontType := TPDFFontType.CIDType0
+        else
+          CIDFont.FFontType := TPDFFontType.CIDType2;
         CIDFont.LoadWidths(DescDict);
+        var MapObj := DescDict.Get('CIDToGIDMap');
+        if (MapObj <> nil) and MapObj.IsStream then
+        begin
+          var Map := TPDFStream(MapObj).DecodedBytes;
+          SetLength(CIDFont.FCIDToGID, Length(Map) div 2);
+          for var I := 0 to High(CIDFont.FCIDToGID) do
+            CIDFont.FCIDToGID[I] := (Map[I * 2] shl 8) or Map[I * 2 + 1];
+        end;
         var CIDDescObj := DescDict.Get('FontDescriptor');
         if (CIDDescObj <> nil) and CIDDescObj.IsDictionary then
           LoadDescriptor(CIDFont, TPDFDictionary(CIDDescObj), AResolver);
@@ -687,6 +860,9 @@ begin
   AFont.FDescriptor.FontFile    := LoadFontFile('FontFile');
   AFont.FDescriptor.FontFile2   := LoadFontFile('FontFile2');
   AFont.FDescriptor.FontFile3   := LoadFontFile('FontFile3');
+  var FF3 := ADescDict.Get('FontFile3');
+  if (FF3 <> nil) and FF3.IsStream then
+    AFont.FDescriptor.FontFile3Subtype := TPDFStream(FF3).Dict.GetAsName('Subtype');
 end;
 
 class procedure TPDFFontFactory.LoadSimpleEncoding(AFont: TPDFSimpleFont;
@@ -743,6 +919,7 @@ begin
     begin
       AFont.FEncoding     := Kind;
       AFont.FBaseEncoding := Base;
+      AFont.FExplicitBase := True;
     end;
   end else if EncObj.IsDictionary then
   begin
@@ -751,6 +928,7 @@ begin
     begin
       AFont.FEncoding     := Kind;
       AFont.FBaseEncoding := Base;
+      AFont.FExplicitBase := True;
     end;
     // Load Differences array
     var DiffArr := EncDict.GetAsArray('Differences');

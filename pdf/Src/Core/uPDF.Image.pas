@@ -36,6 +36,7 @@ type
     Intent:          string;      // /Intent rendering intent
     // For inline images: filter abbreviations already expanded
     HasSMask:        Boolean;     // soft-mask channel present
+    DecodeArray:     TArray<Double>;  // /Decode (Dmin Dmax per component); empty = default
 
     // CCITT parameters (only relevant when Encoding = CCITT)
     CCITTKFactor:    Integer;     // K param: <0=Group4, 0=Group3-1D, >0=Group3-2D
@@ -58,9 +59,12 @@ type
     FInfo:       TPDFImageInfo;
     FSamples:    TBytes;   // decoded raw samples OR JPEG/CCITT bytes
     FSMask:      TPDFImage;  // optional soft-mask channel (owns)
+    FColorSpace: TPDFColorSpace;  // the image colour space, nil if unknown (owns)
+    procedure BuildColorSpace(ADict: TPDFDictionary; AResolver: IObjectResolver);
     // Takes APixels (CCITTFaxDecode output) as 1-bit samples when they have
     // the image size
     function AcceptCCITT(const APixels: TBytes): Boolean;
+    procedure ApplyDecodeArray;
   public
     constructor Create;
     destructor  Destroy; override;
@@ -79,6 +83,10 @@ type
     // Convert raw samples to RGBA8888 (4 bytes per pixel, top-left origin)
     // Caller owns the returned TBytes.
     function ToRGBA: TBytes;
+
+    // Image masks: RGBA with the colour (R, G, B, A) where the mask paints and
+    // transparent elsewhere.  Other images: same as ToRGBA.
+    function ToStencilRGBA(R, G, B, A: Byte): TBytes;
 
     // Save as BMP (no external libs needed — for testing/debugging)
     procedure SaveToBMP(const APath: string);
@@ -360,6 +368,7 @@ end;
 destructor TPDFImage.Destroy;
 begin
   FSMask.Free;
+  FColorSpace.Free;
   inherited;
 end;
 
@@ -456,6 +465,19 @@ begin
                         ADict.GetAsBoolean('I', False));
   AInfo.Intent := ADict.GetAsName('Intent');
 
+  // /Decode (inline abbreviation /D)
+  AInfo.DecodeArray := nil;
+  var DecObj := ADict.RawGet('Decode');
+  if DecObj = nil then DecObj := ADict.RawGet('D');
+  if DecObj <> nil then DecObj := DecObj.Dereference;
+  if (DecObj <> nil) and DecObj.IsArray then
+  begin
+    var DA := TPDFArray(DecObj);
+    SetLength(AInfo.DecodeArray, DA.Count);
+    for var I := 0 to DA.Count - 1 do
+      AInfo.DecodeArray[I] := DA.GetAsNumber(I);
+  end;
+
   // For image masks: 1 component, 1 BPC
   if AInfo.IsImageMask then
   begin
@@ -508,6 +530,7 @@ begin
 
   Result := TPDFImage.Create;
   FillImageInfoFromDict(Result.FInfo, AStream.Dict, AResolver);
+  Result.BuildColorSpace(AStream.Dict, AResolver);
 
   // Decode stream
   // JPEG: keep raw bytes; Skia decodes in DrawPDFImage.
@@ -544,6 +567,7 @@ class function TPDFImage.FromInline(ADict: TPDFDictionary;
 begin
   Result := TPDFImage.Create;
   FillImageInfoFromDict(Result.FInfo, ADict, nil);
+  Result.BuildColorSpace(ADict, nil);
 
   if Result.FInfo.Encoding = TPDFImageEncoding.JPEG then
     Result.FSamples := AData
@@ -580,6 +604,35 @@ end;
 // -------------------------------------------------------------------------
 // Decode  (called after construction if samples need post-processing)
 // -------------------------------------------------------------------------
+
+// Colour space object of the image; its component count replaces the
+// guess made from the name (ICCBased with 1 or 4 components, Indexed,
+// Separation, DeviceN).  Names an inline image takes from the page
+// resources cannot be resolved here and keep the guess.
+procedure TPDFImage.BuildColorSpace(ADict: TPDFDictionary;
+  AResolver: IObjectResolver);
+begin
+  if FInfo.IsImageMask then Exit;
+  var CSObj := ADict.RawGet('ColorSpace');
+  if CSObj = nil then CSObj := ADict.RawGet('CS');
+  if CSObj = nil then Exit;
+  CSObj := CSObj.Dereference;
+  try
+    if CSObj.IsName then
+    begin
+      // the factory maps unknown names to DeviceGray: only the device spaces
+      if FInfo.ColorSpaceName = 'DeviceGray' then FColorSpace := TPDFDeviceGray.Create
+      else if FInfo.ColorSpaceName = 'DeviceRGB' then FColorSpace := TPDFDeviceRGB.Create
+      else if FInfo.ColorSpaceName = 'DeviceCMYK' then FColorSpace := TPDFDeviceCMYK.Create;
+    end
+    else
+      FColorSpace := TPDFColorSpaceFactory.Build(CSObj, AResolver);
+  except
+    FColorSpace := nil;
+  end;
+  if FColorSpace <> nil then
+    FInfo.ComponentCount := FColorSpace.ComponentCount;
+end;
 
 function TPDFImage.AcceptCCITT(const APixels: TBytes): Boolean;
 begin
@@ -646,11 +699,68 @@ begin
       New_[I] := FSamples[I * 2];
     FSamples := New_;
   end;
+
+  ApplyDecodeArray;
+end;
+
+// /Decode on the 8-bit samples: sample' = 255 * (Dmin + sample/255 * (Dmax - Dmin)).
+// Image masks keep the convention 0 = paint, so [1 0] inverts them.
+// Indexed images are skipped (their Decode maps the index, not a colour).
+procedure TPDFImage.ApplyDecodeArray;
+var
+  NC, I, C: Integer;
+  Lut: array of array[0..255] of Byte;
+  Identity: Boolean;
+begin
+  if FInfo.ColorSpaceName = 'Indexed' then Exit;
+  if FInfo.IsImageMask then NC := 1 else NC := FInfo.ComponentCount;
+  if (NC <= 0) or (Length(FInfo.DecodeArray) < 2 * NC) then Exit;
+  SetLength(Lut, NC);
+  Identity := True;
+  for C := 0 to NC - 1 do
+  begin
+    var D0 := FInfo.DecodeArray[2 * C];
+    var D1 := FInfo.DecodeArray[2 * C + 1];
+    if (D0 <> 0) or (D1 <> 1) then Identity := False;
+    for I := 0 to 255 do
+      Lut[C][I] := Round(EnsureRange(D0 + I / 255 * (D1 - D0), 0, 1) * 255);
+  end;
+  if Identity then Exit;
+  for I := 0 to High(FSamples) do
+  begin
+    C := I mod NC;
+    FSamples[I] := Lut[C][FSamples[I]];
+  end;
+end;
+
+function TPDFImage.ToStencilRGBA(R, G, B, A: Byte): TBytes;
+var
+  I, N: Integer;
+begin
+  if not FInfo.IsImageMask then Exit(ToRGBA);
+  N := FInfo.Width * FInfo.Height;
+  SetLength(Result, N * 4);
+  for I := 0 to N - 1 do
+    if (I < Length(FSamples)) and (FSamples[I] < 128) then
+    begin
+      Result[I * 4]     := R;
+      Result[I * 4 + 1] := G;
+      Result[I * 4 + 2] := B;
+      Result[I * 4 + 3] := A;
+    end
+    else
+      PCardinal(@Result[I * 4])^ := 0;
 end;
 
 // -------------------------------------------------------------------------
 // ToRGBA  — convert decoded samples to 32-bit RGBA (bottom-up → top-down)
 // -------------------------------------------------------------------------
+
+// Sample N of A, 0 past the end of the data
+function SampleAt(const A: TBytes; N: Integer): Byte; inline;
+begin
+  if N < Length(A) then Result := A[N] else Result := 0;
+end;
 
 function TPDFImage.ToRGBA: TBytes;
 var
@@ -666,55 +776,98 @@ begin
 
   var Src := FSamples;
   var Dst := 0;
+  var NC  := FInfo.ComponentCount;
 
-  case FInfo.ComponentCount of
+  // One-component spaces other than gray (Indexed, Separation): a table of
+  // the 256 possible 8-bit samples.  Indexed samples are palette indexes,
+  // which the bit expansion scaled to 0..255.
+  if (NC = 1) and (FColorSpace <> nil) and not (FColorSpace.Kind in
+    [TPDFColorSpaceKind.DeviceGray, TPDFColorSpaceKind.CalGray,
+     TPDFColorSpaceKind.ICCBased]) then
+  begin
+    var Lut: array[0..255, 0..2] of Byte;
+    var MaxV := (1 shl Min(FInfo.BitsPerComponent, 8)) - 1;
+    var Comp: TArray<Single>;
+    SetLength(Comp, 1);
+    for I := 0 to 255 do
+    begin
+      if FColorSpace.Kind = TPDFColorSpaceKind.Indexed then
+        Comp[0] := Round(I * MaxV / 255)
+      else
+        Comp[0] := I / 255;
+      var RF, GF, BF: Single;
+      FColorSpace.ToRGB(Comp, RF, GF, BF);
+      Lut[I, 0] := Round(EnsureRange(RF, 0, 1) * 255);
+      Lut[I, 1] := Round(EnsureRange(GF, 0, 1) * 255);
+      Lut[I, 2] := Round(EnsureRange(BF, 0, 1) * 255);
+    end;
+    for I := 0 to W * H - 1 do
+    begin
+      var V := SampleAt(Src, I);
+      Result[Dst]   := Lut[V, 0];
+      Result[Dst+1] := Lut[V, 1];
+      Result[Dst+2] := Lut[V, 2];
+      Result[Dst+3] := 255;
+      Inc(Dst, 4);
+    end;
+  end
+  else
+  case NC of
     1: // Gray
     begin
-      for I := 0 to H - 1 do
-        for J := 0 to W - 1 do
-        begin
-          var Idx := I * W + J;
-          var GV: Byte := 0;
-          if Idx < Length(Src) then GV := Src[Idx];
-          if FInfo.IsImageMask then GV := 255 - GV; // invert mask
-          Result[Dst]   := GV;
-          Result[Dst+1] := GV;
-          Result[Dst+2] := GV;
-          Result[Dst+3] := 255;
-          Inc(Dst, 4);
-        end;
+      for I := 0 to W * H - 1 do
+      begin
+        var GV := SampleAt(Src, I);
+        Result[Dst]   := GV;
+        Result[Dst+1] := GV;
+        Result[Dst+2] := GV;
+        Result[Dst+3] := 255;
+        Inc(Dst, 4);
+      end;
     end;
     3: // RGB
     begin
-      for I := 0 to H - 1 do
-        for J := 0 to W - 1 do
-        begin
-          var Idx := (I * W + J) * 3;
-          Result[Dst]   := IfThen(Idx   < Length(Src), Src[Idx],   0);
-          Result[Dst+1] := IfThen(Idx+1 < Length(Src), Src[Idx+1], 0);
-          Result[Dst+2] := IfThen(Idx+2 < Length(Src), Src[Idx+2], 0);
-          Result[Dst+3] := 255;
-          Inc(Dst, 4);
-        end;
+      for I := 0 to W * H - 1 do
+      begin
+        Result[Dst]   := SampleAt(Src, I * 3);
+        Result[Dst+1] := SampleAt(Src, I * 3 + 1);
+        Result[Dst+2] := SampleAt(Src, I * 3 + 2);
+        Result[Dst+3] := 255;
+        Inc(Dst, 4);
+      end;
     end;
     4: // CMYK → RGB
     begin
-      for I := 0 to H - 1 do
-        for J := 0 to W - 1 do
-        begin
-          var Idx := (I * W + J) * 4;
-          var C := IfThen(Idx   < Length(Src), Src[Idx],   0) / 255.0;
-          var M := IfThen(Idx+1 < Length(Src), Src[Idx+1], 0) / 255.0;
-          var Y := IfThen(Idx+2 < Length(Src), Src[Idx+2], 0) / 255.0;
-          var K := IfThen(Idx+3 < Length(Src), Src[Idx+3], 0) / 255.0;
-          var RF, GF, BF: Single;
-          CMYKToRGB(C, M, Y, K, RF, GF, BF);
-          Result[Dst]   := Round(EnsureRange(RF, 0, 1) * 255);
-          Result[Dst+1] := Round(EnsureRange(GF, 0, 1) * 255);
-          Result[Dst+2] := Round(EnsureRange(BF, 0, 1) * 255);
-          Result[Dst+3] := 255;
-          Inc(Dst, 4);
-        end;
+      for I := 0 to W * H - 1 do
+      begin
+        var RF, GF, BF: Single;
+        CMYKToRGB(SampleAt(Src, I * 4) / 255.0, SampleAt(Src, I * 4 + 1) / 255.0,
+          SampleAt(Src, I * 4 + 2) / 255.0, SampleAt(Src, I * 4 + 3) / 255.0, RF, GF, BF);
+        Result[Dst]   := Round(EnsureRange(RF, 0, 1) * 255);
+        Result[Dst+1] := Round(EnsureRange(GF, 0, 1) * 255);
+        Result[Dst+2] := Round(EnsureRange(BF, 0, 1) * 255);
+        Result[Dst+3] := 255;
+        Inc(Dst, 4);
+      end;
+    end;
+  else
+    // other component counts (DeviceN): through the colour space, if known
+    if (NC > 0) and (FColorSpace <> nil) then
+    begin
+      var Comp: TArray<Single>;
+      SetLength(Comp, NC);
+      for I := 0 to W * H - 1 do
+      begin
+        for J := 0 to NC - 1 do
+          Comp[J] := SampleAt(Src, I * NC + J) / 255;
+        var RF, GF, BF: Single;
+        FColorSpace.ToRGB(Comp, RF, GF, BF);
+        Result[Dst]   := Round(EnsureRange(RF, 0, 1) * 255);
+        Result[Dst+1] := Round(EnsureRange(GF, 0, 1) * 255);
+        Result[Dst+2] := Round(EnsureRange(BF, 0, 1) * 255);
+        Result[Dst+3] := 255;
+        Inc(Dst, 4);
+      end;
     end;
   end;
 

@@ -21,6 +21,8 @@ type
   private
     FPage:     TPDFPage;
     FOverride: TPDFDictionary;  // optional override (for form XObjects)
+    // AType/AName in the form's resources, then in the page's
+    function Lookup(const AType, AName: string): TPDFObject;
   public
     constructor Create(APage: TPDFPage; AOverride: TPDFDictionary = nil);
     function GetFont(const AName: string): TPDFFont;
@@ -59,6 +61,8 @@ type
     FRenderH:          Single;
     // Page-flip + scale matrix (PDF → screen)
     FPageFlip:         TMatrix;
+    FOrgX, FOrgY:      Single;   // lower-left corner of the CropBox (PDF points)
+    FFormDepth:        Integer;  // nesting of form XObjects being drawn
     // Accumulates glyph outlines (device space) during a BT..ET block for clip modes
     FTextClipBuilder:  ISkPathBuilder;
 
@@ -101,8 +105,10 @@ type
                                  const AState: TPDFGraphicsState;
                                  AEvenOdd: Boolean);
 
-    // Draw a decoded TPDFImage (or inline image) at the current CTM position
-    procedure DrawPDFImage(AImage: TPDFImage; const ACanvasMatrix: TMatrix);
+    // Draw a decoded TPDFImage (or inline image) at the current CTM position;
+    // image masks paint with the fill colour of AState
+    procedure DrawPDFImage(AImage: TPDFImage; const ACanvasMatrix: TMatrix;
+      const AState: TPDFGraphicsState);
 
     // ---- Shading / pattern helpers ----
     // Evaluate a PDF function (Type 2 or 3) at parameter t → color components
@@ -159,6 +165,9 @@ type
 
 implementation
 
+const
+  MAX_FORM_DEPTH = 32;
+
 // =========================================================================
 // TPDFPageResources
 // =========================================================================
@@ -170,12 +179,25 @@ begin
   FOverride := AOverride;
 end;
 
+function TPDFPageResources.Lookup(const AType, AName: string): TPDFObject;
+begin
+  Result := nil;
+  if FOverride <> nil then
+  begin
+    var TypeDict := FOverride.GetAsDictionary(AType);
+    if TypeDict <> nil then
+      Result := TypeDict.Get(AName);
+  end;
+  if Result = nil then
+    Result := FPage.GetResource(AType, AName);
+end;
+
 function TPDFPageResources.GetFont(const AName: string): TPDFFont;
 var
   Obj: TPDFObject;
 begin
   Result := nil;
-  Obj := FPage.GetResource('Font', AName);
+  Obj := Lookup('Font', AName);
   if (Obj <> nil) and Obj.IsDictionary then
     Result := TPDFFontFactory.Build(TPDFDictionary(Obj),
                 FPage.Document.Resolver);
@@ -186,7 +208,7 @@ var
   Obj: TPDFObject;
 begin
   Result := nil;
-  Obj := FPage.GetResource('XObject', AName);
+  Obj := Lookup('XObject', AName);
   if (Obj <> nil) and Obj.IsStream then
     Result := TPDFStream(Obj);
 end;
@@ -196,7 +218,7 @@ var
   Obj: TPDFObject;
 begin
   Result := nil;
-  Obj := FPage.GetResource('ColorSpace', AName);
+  Obj := Lookup('ColorSpace', AName);
   if Obj <> nil then
     Result := TPDFColorSpaceFactory.Build(Obj, FPage.Document.Resolver);
 end;
@@ -206,19 +228,19 @@ var
   Obj: TPDFObject;
 begin
   Result := nil;
-  Obj := FPage.GetResource('ExtGState', AName);
+  Obj := Lookup('ExtGState', AName);
   if (Obj <> nil) and Obj.IsDictionary then
     Result := TPDFDictionary(Obj);
 end;
 
 function TPDFPageResources.GetPattern(const AName: string): TPDFObject;
 begin
-  Result := FPage.GetResource('Pattern', AName);
+  Result := Lookup('Pattern', AName);
 end;
 
 function TPDFPageResources.GetShading(const AName: string): TPDFObject;
 begin
-  Result := FPage.GetResource('Shading', AName);
+  Result := Lookup('Shading', AName);
 end;
 
 // =========================================================================
@@ -273,8 +295,8 @@ begin
   Result.m21 := AGM.C * FScaleX;
   Result.m22 := AGM.D * FScaleY;
   Result.m23 := 0;
-  Result.m31 := AGM.E * FScaleX;
-  Result.m32 := FRenderH - AGM.F * FScaleY;
+  Result.m31 := (AGM.E - FOrgX) * FScaleX;
+  Result.m32 := FRenderH - (AGM.F - FOrgY) * FScaleY;
   Result.m33 := 1;
 end;
 
@@ -673,13 +695,13 @@ var
   PDFImage: TPDFImage;
   CanvasMat: TMatrix;
 begin
-  XStream := nil;
-  var Obj := FPage.GetResource('XObject', AName);
-  if Obj = nil then Exit;
-  if Obj.IsStream then
-    XStream := TPDFStream(Obj)
+  // names are resolved in the current resources (those of the form being
+  // drawn, if any): a form may reuse a page name for another object
+  if FCurrentResources <> nil then
+    XStream := FCurrentResources.GetXObject(AName)
   else
-    Exit;
+    XStream := nil;
+  if XStream = nil then Exit;
 
   SubType := XStream.Dict.GetAsName('Subtype');
 
@@ -690,7 +712,7 @@ begin
       PDFImage := TPDFImage.FromXObject(XStream, FPage.Document.Resolver);
       PDFImage.Decode;
       CanvasMat := ImageMatrix(AMatrix);
-      DrawPDFImage(PDFImage, CanvasMat);
+      DrawPDFImage(PDFImage, CanvasMat, AState);
     finally
       PDFImage.Free;
     end;
@@ -714,7 +736,7 @@ begin
     PDFImage := TPDFImage.FromInline(AImageDict, AImageData);
     PDFImage.Decode;
     CanvasMat := ImageMatrix(AState.CTM);
-    DrawPDFImage(PDFImage, CanvasMat);
+    DrawPDFImage(PDFImage, CanvasMat, AState);
   finally
     PDFImage.Free;
   end;
@@ -725,7 +747,7 @@ end;
 // =========================================================================
 
 procedure TPDFSkiaRenderer.DrawPDFImage(AImage: TPDFImage;
-  const ACanvasMatrix: TMatrix);
+  const ACanvasMatrix: TMatrix; const AState: TPDFGraphicsState);
 var
   SkImg:   ISkImage;
   ImgInfo: TSkImageInfo;
@@ -770,8 +792,15 @@ begin
   end
   else
   begin
-    // Raw pixels: ToRGBA already applies SMask into the alpha channel
-    RGBA := AImage.ToRGBA;
+    // Raw pixels: ToRGBA already applies SMask into the alpha channel;
+    // image masks are stencils painted with the fill colour
+    if AImage.Info.IsImageMask then
+    begin
+      var C := TAlphaColorRec(PDFColorToAlpha(AState.FillColor, AState.FillAlpha));
+      RGBA := AImage.ToStencilRGBA(C.R, C.G, C.B, C.A);
+    end
+    else
+      RGBA := AImage.ToRGBA;
     if Length(RGBA) > 0 then
     begin
       ImgInfo := TSkImageInfo.Create(AImage.Width, AImage.Height,
@@ -1130,6 +1159,8 @@ var
   Processor:  TPDFContentStreamProcessor;
   SavedPage:  TPDFPage;
 begin
+  // cyclic or absurdly deep form nesting would overflow the stack
+  if FFormDepth >= MAX_FORM_DEPTH then Exit;
   FormBytes := AStream.DecodedBytes;
   if Length(FormBytes) = 0 then Exit;
 
@@ -1175,6 +1206,7 @@ begin
     FTextClipBuilder  := nil;
     FCurrentResources := FormRes;
     Processor := TPDFContentStreamProcessor.Create;
+    Inc(FFormDepth);
     try
       Processor.OnPaintPath        := OnPaintPath;
       Processor.OnPaintGlyph       := OnPaintGlyph;
@@ -1185,6 +1217,7 @@ begin
       Processor.OnPaintShading     := OnPaintShading;
       Processor.Process(FormBytes, FormRes, FPage.Document.Resolver);
     finally
+      Dec(FFormDepth);
       Processor.Free;
       FTextClipBuilder  := SavedClipBuilder;
       FCurrentResources := SavedResources;
@@ -1214,11 +1247,18 @@ begin
   FRenderH := ARenderHeight;
   FScaleX  := ARenderWidth  / Max(FPageW, 1);
   FScaleY  := ARenderHeight / Max(FPageH, 1);
+  // the CropBox does not always start at (0, 0)
+  var Crop := APage.CropBox.Normalize;
+  FOrgX    := Crop.LLX;
+  FOrgY    := Crop.LLY;
 
-  // Page-flip + scale matrix:  (x,y) PDF → (x*sx, renderH - y*sy) screen
+  // Page-flip + scale matrix:
+  //   (x,y) PDF → ((x - orgX)*sx, renderH - (y - orgY)*sy) screen
   FPageFlip.m11 := FScaleX;  FPageFlip.m12 := 0;        FPageFlip.m13 := 0;
   FPageFlip.m21 := 0;        FPageFlip.m22 := -FScaleY; FPageFlip.m23 := 0;
-  FPageFlip.m31 := 0;        FPageFlip.m32 := FRenderH; FPageFlip.m33 := 1;
+  FPageFlip.m31 := -FOrgX * FScaleX;
+  FPageFlip.m32 := FRenderH + FOrgY * FScaleY;
+  FPageFlip.m33 := 1;
 
   // Fill background
   ACanvas.DrawColor(FOptions.BackgroundColor, TSkBlendMode.Src);

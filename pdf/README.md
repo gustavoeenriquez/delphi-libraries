@@ -628,7 +628,7 @@ PDFViewerControl1.ZoomFit;
 | `uPDF.ColorSpace` | DeviceGray/RGB/CMYK, CalGray/RGB, ICCBased, Indexed, Pattern, Separation |
 | `uPDF.Font` | Type0/1/3/TrueType + CIDFont: glyph widths, ToUnicode CMap, encoding maps |
 | `uPDF.FontCMap` | CMaps: predefined identities, embedded, Adobe-CNS1/GB1/Japan1/Korea1 |
-| `uPDF.Image` | `TPDFImage` — inline and XObject images; raw bytes + JPEG/Flate/CCITT decode (CCITT image masks included; WIC kept as a Windows fallback) |
+| `uPDF.Image` | `TPDFImage` — inline and XObject images; raw bytes + JPEG/Flate/CCITT decode (CCITT image masks included; WIC kept as a Windows fallback); `/Decode` arrays; colour space objects (Indexed, Separation, ICCBased N, DeviceN) in `ToRGBA`; `ToStencilRGBA` for image masks |
 | `uPDF.TextExtractor` | `TPDFTextExtractor` — fragments, line grouping, plain-text export |
 | `uPDF.ImageExtractor` | `TPDFImageExtractor` — enumerate and save embedded images per page |
 | `uPDF.TTFParser` | Binary TrueType/OpenType parser: tables `head`, `hhea`, `OS/2`, `cmap` (format 4), `hmtx`, `loca`, `glyf`; `CharToGlyph`, advance widths, embedding-permission check (`fsType`) |
@@ -672,8 +672,8 @@ PDFViewerControl1.ZoomFit;
 | TestTTFEmbeddedFont (widths, EncodeTextHex, CMap, subset bytes, PDF objects) | 51 ✅ |
 | TestPDFEmbeddedWriter (structure, content encoding, multi-page, conformance) | 40 ✅ |
 | TestDocumentSave (round-trip, page ops, metadata, LZW, encrypted save, pattern color space) | 76 ✅ |
-| TestCCITT (hand-coded streams, 52 libtiff/MuPDF vectors, filter and `TPDFImage`; Win64 + Linux64) | 80 ✅ |
-| **Total** | **478+ ✅** |
+| TestCCITT (hand-coded streams, 52 libtiff/MuPDF vectors, CCITT filter; `TPDFImage` `/Decode`, image masks, Indexed; nested form resources; Win64 + Linux64) | 89 ✅ |
+| **Total** | **487+ ✅** |
 
 Run the tests:
 

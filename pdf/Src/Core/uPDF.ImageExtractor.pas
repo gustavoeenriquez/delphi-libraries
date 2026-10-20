@@ -34,6 +34,8 @@ type
     FDocument:  TPDFDocument;
     FImages:    TList<TPDFExtractedImage>;
     FPageIndex: Integer;
+    FFormRes:   TPDFDictionary;  // /Resources of the form being processed (nil: page)
+    FFormDepth: Integer;
 
     procedure OnXObject(const AName: string; const AMatrix: TPDFMatrix;
       const AState: TPDFGraphicsState);
@@ -112,7 +114,15 @@ begin
   if (FPageIndex < 0) or (FPageIndex >= FDocument.PageCount) then Exit;
   var Page := FDocument.Pages[FPageIndex];
 
-  var XObj := Page.GetResource('XObject', AName);
+  // the name is looked up in the current form's resources first: a form
+  // may reuse a page name for another object
+  var XObj: TPDFObject := nil;
+  if FFormRes <> nil then
+  begin
+    var XDict := FFormRes.GetAsDictionary('XObject');
+    if XDict <> nil then XObj := XDict.Get(AName);
+  end;
+  if XObj = nil then XObj := Page.GetResource('XObject', AName);
   if XObj = nil then Exit;
   XObj := XObj.Dereference;
   if not XObj.IsStream then Exit;
@@ -175,15 +185,18 @@ var
   Proc:     TPDFContentStreamProcessor;
   Data:     TBytes;
 begin
+  // cyclic or absurdly deep form nesting would overflow the stack
+  if FFormDepth >= 32 then Exit;
   Data := AStream.DecodedBytes;
   if Length(Data) = 0 then Exit;
 
-  // Build a resource adapter for the form's own resources
-  // Form XObjects have their own /Resources dict; if absent, inherit from page
+  // Form XObjects have their own /Resources dict; if absent, inherit from page.
+  // XObject names are resolved in OnXObject through FFormRes.
   var FormResDict := AStream.Dict.GetAsDictionary('Resources');
+  var SavedFormRes := FFormRes;
+  if FormResDict <> nil then FFormRes := FormResDict;
+  Inc(FFormDepth);
 
-  // For simplicity, use the page resources adapter (inherits page fonts/XObjects)
-  // A full implementation would merge form resources over page resources
   var Res: IPDFResources := TPDFPageResources.Create(APage);
   Proc := TPDFContentStreamProcessor.Create;
   try
@@ -202,6 +215,8 @@ begin
     Proc.Process(Data, Res, FDocument.Resolver);
   finally
     Proc.Free;
+    Dec(FFormDepth);
+    FFormRes := SavedFormRes;
     // Res is IPDFResources — lifetime managed by interface reference counting
   end;
 end;
@@ -217,6 +232,8 @@ var
   Res:  IPDFResources;
 begin
   FPageIndex := APageIndex;
+  FFormRes   := nil;
+  FFormDepth := 0;
   Data       := APage.ContentStreamBytes;
   if Length(Data) = 0 then Exit;
 

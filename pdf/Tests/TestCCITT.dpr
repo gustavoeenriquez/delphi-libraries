@@ -15,7 +15,9 @@ uses
   uPDF.Objects       in '..\Src\Core\uPDF.Objects.pas',
   uPDF.Filters       in '..\Src\Core\uPDF.Filters.pas',
   uPDF.ColorSpace    in '..\Src\Core\uPDF.ColorSpace.pas',
-  uPDF.Image         in '..\Src\Core\uPDF.Image.pas';
+  uPDF.Image         in '..\Src\Core\uPDF.Image.pas',
+  uPDF.Document      in '..\Src\Core\uPDF.Document.pas',
+  uPDF.ImageExtractor in '..\Src\Core\uPDF.ImageExtractor.pas';
 
 // =========================================================================
 // Helpers
@@ -418,11 +420,207 @@ begin
   end;
 end;
 
+// =========================================================================
+// T4: TPDFImage — /Decode, image masks, Indexed, short data; form resources
+// =========================================================================
+
+// Image XObject with raw (unfiltered) samples
+function RawImage(W, H, BPC: Integer; ACS: TPDFObject; AMask: Boolean;
+  const ADecode: array of Double; const AData: TBytes): TPDFStream;
+begin
+  Result := TPDFStream.Create;
+  Result.Dict.SetValue('Subtype', TPDFName.Create('Image'));
+  Result.Dict.SetValue('Width', TPDFInteger.Create(W));
+  Result.Dict.SetValue('Height', TPDFInteger.Create(H));
+  if AMask then
+    Result.Dict.SetValue('ImageMask', TPDFBoolean.Create(True))
+  else
+  begin
+    Result.Dict.SetValue('BitsPerComponent', TPDFInteger.Create(BPC));
+    Result.Dict.SetValue('ColorSpace', ACS);
+  end;
+  if Length(ADecode) > 0 then
+  begin
+    var A := TPDFArray.Create;
+    for var D in ADecode do A.Add(TPDFReal.Create(D));
+    Result.Dict.SetValue('Decode', A);
+  end;
+  Result.SetRawData(AData);
+end;
+
+function DecodedImage(St: TPDFStream): TPDFImage;
+begin
+  try
+    Result := TPDFImage.FromXObject(St);
+    Result.Decode;
+  finally
+    St.Free;
+  end;
+end;
+
+function IndexedCS: TPDFArray;
+begin
+  // palette: 0 = red, 1 = green
+  Result := TPDFArray.Create;
+  Result.Add(TPDFName.Create('Indexed'));
+  Result.Add(TPDFName.Create('DeviceRGB'));
+  Result.Add(TPDFInteger.Create(1));
+  var Pal: RawByteString;
+  SetLength(Pal, 6);
+  FillChar(Pal[1], 6, 0);
+  Pal[1] := AnsiChar($FF);
+  Pal[5] := AnsiChar($FF);
+  Result.Add(TPDFString.Create(Pal));
+end;
+
+// "RRGGBBAA" of every pixel
+function RGBAHex(const B: TBytes): string;
+begin
+  Result := Hex(B);
+end;
+
+// Minimal PDF: the page draws /Xf1 (form 4), whose own /Xf1 is form 5, which
+// draws /img0 = image 7 (3 x 1).  The page's /img0 is image 6 (2 x 1).  iText
+// writes forms like this; resolving names in the page resources loops forever.
+function NestedFormPDF: TBytes;
+var
+  Objs: array[1..7] of AnsiString;
+  S: AnsiString;
+  Offs: array[1..7] of Integer;
+  I: Integer;
+begin
+  Objs[1] := '<< /Type /Catalog /Pages 2 0 R >>';
+  Objs[2] := '<< /Type /Pages /Kids [3 0 R] /Count 1 >>';
+  Objs[3] := '<< /Type /Page /Parent 2 0 R /MediaBox [0 0 100 100] /Contents 8 0 R ' +
+             '/Resources << /XObject << /Xf1 4 0 R /img0 6 0 R >> >> >>';
+  Objs[4] := '<< /Type /XObject /Subtype /Form /BBox [0 0 100 100] ' +
+             '/Resources << /XObject << /Xf1 5 0 R >> >> /Length 7 >>'#10'stream'#10'/Xf1 Do'#10'endstream';
+  Objs[5] := '<< /Type /XObject /Subtype /Form /BBox [0 0 100 100] ' +
+             '/Resources << /XObject << /img0 7 0 R >> >> /Length 8 >>'#10'stream'#10'/img0 Do'#10'endstream';
+  Objs[6] := '<< /Type /XObject /Subtype /Image /Width 2 /Height 1 /BitsPerComponent 8 ' +
+             '/ColorSpace /DeviceGray /Length 2 >>'#10'stream'#10#0#0#10'endstream';
+  Objs[7] := '<< /Type /XObject /Subtype /Image /Width 3 /Height 1 /BitsPerComponent 8 ' +
+             '/ColorSpace /DeviceGray /Length 3 >>'#10'stream'#10#0#0#0#10'endstream';
+  S := '%PDF-1.4'#10;
+  for I := 1 to 7 do
+  begin
+    Offs[I] := Length(S);
+    S := S + AnsiString(IntToStr(I)) + ' 0 obj'#10 + Objs[I] + #10'endobj'#10;
+  end;
+  var Content: AnsiString := '/Xf1 Do';
+  var ContentOff := Length(S);
+  S := S + '8 0 obj'#10'<< /Length ' + AnsiString(IntToStr(Length(Content))) + ' >>'#10'stream'#10 +
+    Content + #10'endstream'#10'endobj'#10;
+  var XRef := Length(S);
+  S := S + 'xref'#10'0 9'#10'0000000000 65535 f '#10;
+  for I := 1 to 7 do
+    S := S + AnsiString(Format('%.10d 00000 n '#10, [Offs[I]]));
+  S := S + AnsiString(Format('%.10d 00000 n '#10, [ContentOff]));
+  S := S + 'trailer'#10'<< /Size 9 /Root 1 0 R >>'#10'startxref'#10 +
+    AnsiString(IntToStr(XRef)) + #10'%%EOF'#10;
+  SetLength(Result, Length(S));
+  Move(S[1], Result[0], Length(S));
+end;
+
+procedure TestImageColor;
+var
+  Img: TPDFImage;
+begin
+  Section('T4: TPDFImage — /Decode, máscaras, Indexed');
+
+  Img := DecodedImage(RawImage(2, 1, 8, TPDFName.Create('DeviceGray'), False, [1, 0],
+    TBytes.Create(0, 255)));
+  try
+    Check(Hex(Img.Samples) = 'FF00', 'I01 /Decode [1 0] invierte DeviceGray', Hex(Img.Samples));
+  finally
+    Img.Free;
+  end;
+
+  // mask bits 1 0: with the default Decode the 0 bit paints
+  Img := DecodedImage(RawImage(2, 1, 1, nil, True, [], TBytes.Create($80)));
+  try
+    Check(RGBAHex(Img.ToStencilRGBA($11, $22, $33, $FF)) = '0000000011223'+'3FF',
+      'I02 máscara: pinta con el color donde el bit es 0',
+      RGBAHex(Img.ToStencilRGBA($11, $22, $33, $FF)));
+    Check(RGBAHex(Img.ToRGBA) = 'FFFFFFFF000000FF', 'I03 ToRGBA de máscara: negro donde pinta',
+      RGBAHex(Img.ToRGBA));
+  finally
+    Img.Free;
+  end;
+
+  Img := DecodedImage(RawImage(2, 1, 1, nil, True, [1, 0], TBytes.Create($80)));
+  try
+    Check(RGBAHex(Img.ToStencilRGBA($11, $22, $33, $FF)) = '112233FF00000000',
+      'I04 máscara con /Decode [1 0]: pinta donde el bit es 1',
+      RGBAHex(Img.ToStencilRGBA($11, $22, $33, $FF)));
+  finally
+    Img.Free;
+  end;
+
+  Img := DecodedImage(RawImage(2, 1, 8, IndexedCS, False, [], TBytes.Create(1, 0)));
+  try
+    Check(Img.Info.ComponentCount = 1, 'I05 Indexed tiene 1 componente');
+    Check(RGBAHex(Img.ToRGBA) = '00FF00FFFF0000FF', 'I06 Indexed 8 bits: paleta',
+      RGBAHex(Img.ToRGBA));
+  finally
+    Img.Free;
+  end;
+
+  Img := DecodedImage(RawImage(2, 1, 4, IndexedCS, False, [], TBytes.Create($10)));
+  try
+    Check(RGBAHex(Img.ToRGBA) = '00FF00FFFF0000FF', 'I07 Indexed 4 bits: índices sin escalar',
+      RGBAHex(Img.ToRGBA));
+  finally
+    Img.Free;
+  end;
+
+  // 2 x 2 RGB with only 3 bytes of data: no range error, missing pixels black
+  Img := DecodedImage(RawImage(2, 2, 8, TPDFName.Create('DeviceRGB'), False, [],
+    TBytes.Create(10, 20, 30)));
+  try
+    var R: TBytes;
+    try
+      R := Img.ToRGBA;
+      Check(Hex(R) = '0A141EFF000000FF000000FF000000FF', 'I08 datos cortos sin error de rango',
+        Hex(R));
+    except
+      on E: Exception do Fail('I08 datos cortos sin error de rango', E.ClassName);
+    end;
+  finally
+    Img.Free;
+  end;
+
+  // nested forms reusing the page's XObject names
+  var Data := NestedFormPDF;
+  var MS := TBytesStream.Create(Data);
+  var Doc := TPDFDocument.Create;
+  try
+    Doc.LoadFromStream(MS);
+    var Ex := TPDFImageExtractor.Create(Doc);
+    try
+      var Imgs := Ex.ExtractPage(0);
+      try
+        Check((Length(Imgs) = 1) and (Imgs[0].Width = 3),
+          'I09 formulario anidado: nombres en los recursos del formulario',
+          Format('%d imágenes', [Length(Imgs)]));
+      finally
+        for var E in Imgs do E.Image.Free;
+      end;
+    finally
+      Ex.Free;
+    end;
+  finally
+    Doc.Free;
+    MS.Free;
+  end;
+end;
+
 begin
   try
     TestHandCoded;
     TestVectors;
     TestFilterAndImage;
+    TestImageColor;
   except
     on E: Exception do
     begin

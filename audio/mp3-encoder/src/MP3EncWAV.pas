@@ -87,15 +87,17 @@ function WAVReaderReadFrameStereo(var AReader: TWAVReader;
   out APCM_L, APCM_R: T1152; out ACount: Integer): Boolean;
 
 { Encode a WAV stream to MP3.  Mono WAV -> mono MP3; 2+ channels -> stereo MP3.
+  Raw frames only (no Info/LAME header, so decoders do not trim the encoder
+  delay); EncodeWAVStreamLame and the tagged variants add the gapless header.
   Returns frame count or -1 on error. }
 function EncodeWAVStream(AWavIn, AMP3Out: TStream;
   ABrIdx, APadding: Byte): Integer;
 
-{ Encode a WAV stream and append an ID3v1.1 tag. }
+{ Encode a WAV stream with the gapless Info/LAME header and append an ID3v1.1 tag. }
 function EncodeWAVStreamTagged(AWavIn, AMP3Out: TStream;
   ABrIdx, APadding: Byte; const ATag: TID3v1Tag): Integer;
 
-{ Encode a WAV stream and prepend an ID3v2.3 tag. }
+{ Encode a WAV stream with the gapless Info/LAME header and prepend an ID3v2.3 tag. }
 function EncodeWAVStreamTaggedV2(AWavIn, AMP3Out: TStream;
   ABrIdx, APadding: Byte; const ATag: TID3v2Tag): Integer;
 
@@ -465,7 +467,7 @@ var
 begin
   Temp := TMemoryStream.Create;
   try
-    Result := EncodeWAVStream(AWavIn, Temp, ABrIdx, APadding);
+    Result := EncodeWAVStreamLame(AWavIn, Temp, ABrIdx, APadding);
     if Result >= 0 then begin
       ID3v2WriteTag(AMP3Out, ATag);
       Temp.Position := 0;
@@ -538,7 +540,7 @@ end;
 function EncodeWAVStreamTagged(AWavIn, AMP3Out: TStream;
   ABrIdx, APadding: Byte; const ATag: TID3v1Tag): Integer;
 begin
-  Result := EncodeWAVStream(AWavIn, AMP3Out, ABrIdx, APadding);
+  Result := EncodeWAVStreamLame(AWavIn, AMP3Out, ABrIdx, APadding);
   if Result >= 0 then
     ID3WriteTag(AMP3Out, ATag);
 end;

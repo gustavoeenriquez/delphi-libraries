@@ -291,7 +291,8 @@ begin
   try
     r := EncodeWAVStreamTagged(WavIn, MP3Out, 9, 0, Tag);
     Check('TV01 frames = 2',                r = 2);
-    Check('TV02 size = 834 + 128 = 962',    MP3Out.Size = 962);
+    { two audio frames + the gapless Info/LAME frame (3 x 417) + the 128-byte tag }
+    Check('TV02 size = 1251 + 128 = 1379',  MP3Out.Size = 1379);
     Check('TV03 HasTag -> True',            ID3HasTag(MP3Out));
     Check('TV04 ReadTag -> True',           ID3ReadTag(MP3Out, TagOut));
     Check('TV05 tag Title correct',         TagOut.Title  = 'Test Title');
@@ -300,7 +301,7 @@ begin
 
     { After removing tag, what's left is the raw MP3 frame }
     ID3RemoveTag(MP3Out);
-    Check('TV08 size after remove = 834',   MP3Out.Size = 834);
+    Check('TV08 size after remove = 1251',  MP3Out.Size = 1251);
   finally
     WavIn.Free;
     MP3Out.Free;

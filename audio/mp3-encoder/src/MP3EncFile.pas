@@ -24,7 +24,8 @@ uses
   MP3EncID3v2,
   MP3EncProbe;
 
-{ Encode a WAV file to an MP3 file.
+{ Encode a WAV file to an MP3 file with the gapless Info/LAME header frame
+  (decoders such as ffmpeg trim the encoder delay and the padding).
   ABrIdx 1..14, APadding 0..1.  Returns frame count or -1 on error. }
 function EncodeWAVFile(const AWavPath, AMP3Path: string;
   ABrIdx, APadding: Byte): Integer;
@@ -81,7 +82,7 @@ begin
     except
       Exit;
     end;
-    Result := EncodeWAVStream(WavIn, MP3Out, ABrIdx, APadding);
+    Result := EncodeWAVStreamLame(WavIn, MP3Out, ABrIdx, APadding);
     if Result > 0 then
       try
         MP3Out.SaveToFile(AMP3Path);

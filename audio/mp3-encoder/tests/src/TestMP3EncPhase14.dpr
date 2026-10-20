@@ -340,7 +340,8 @@ begin
     MP3Out.Position := tagSz;
     MP3Out.ReadBuffer(b, 1);
     Check('TE04 MP3 sync $FF after tag',   b = $FF);
-    Check('TE05 total size = tag+834',     MP3Out.Size = tagSz + 834);
+    { two audio frames + the gapless Info/LAME header frame (417 bytes each) }
+    Check('TE05 total size = tag+3*417',   MP3Out.Size = tagSz + 3 * 417);
 
     { roundtrip tag fields }
     Check('TE06 ReadTag -> True',          ID3v2ReadTag(MP3Out, TagOut));

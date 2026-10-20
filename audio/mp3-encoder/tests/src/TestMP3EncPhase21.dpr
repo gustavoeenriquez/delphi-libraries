@@ -142,15 +142,20 @@ begin
   end;
 end;
 
+var
+  EncM, EncS, EncC: TMP3Encoder;   { global: too large for the stack }
+
 procedure TestVBR;
 var
   L, R: TDoubles;
   Dec: array[0..1] of TDoubles;
   Br0, Br5, Br9: TArray<Integer>;
   D0, D5, D9: TBytes;
-  i, mdb0, mdb5, mdb9, distinct, nSilent32: Integer;
+  i, f, mdb0, mdb5, mdb9, distinct, nSilent32: Integer;
   used: array[1..14] of Boolean;
   snrL, snrR: Double;
+  Cfg: TEncConfig;
+  P: T1152;
 begin
   WriteLn('VB: variable bitrate');
   L := TestSignal(NFR * 1152, 0.0);
@@ -184,6 +189,23 @@ begin
   snrR := SnrDb(R, 0, Dec[1], RT_DELAY, (NFR - 2) * 1152);
   WriteLn(Format('       stereo V2 round trip SNR: L %.1f dB, R %.1f dB', [snrL, snrR]));
   Check('VB07 stereo V2 round trip SNR > 20 dB', (snrL > 20) and (snrR > 20));
+
+  { mono: allowed noise 1.5 dB under the stereo scale (M/S thresholds are
+    the minimum of three analyses, stricter than a single channel's) }
+  Cfg.SrIdx := 0; Cfg.BrIdx := 9; Cfg.Padding := 0;
+  EncInit(EncM, Cfg); EncEnableVBR(EncM, 2);
+  EncInitStereo(EncS, Cfg); EncEnableVBR(EncS, 2);
+  Check('VB08 mono quality scale 1.5 dB stricter than stereo',
+    Abs(10 * Log10(EncS.VbrNoiseScale / EncM.VbrNoiseScale) - 1.5) < 1e-9);
+  { pre-echo control keeps the thresholds of the last granules in VBR only }
+  EncInit(EncC, Cfg);
+  for f := 0 to 7 do begin
+    for i := 0 to 1151 do P[i] := 8000 * Sin(2 * Pi * 440 * (f * 1152 + i) / SR);
+    EncodeFrame(EncM, P);
+    EncodeFrame(EncC, P);
+  end;
+  Check('VB09 pre-echo state: tracked in VBR, not in CBR',
+    (EncM.PrevXmin1[0][5] < 1e29) and (EncC.PrevXmin1[0][5] >= 1e29));
 end;
 
 { minimal 16-bit PCM WAV writer }

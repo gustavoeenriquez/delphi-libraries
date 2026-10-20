@@ -107,33 +107,53 @@ laxos (+5 dB en V2), que dejaban otras bandas sobre la máscara. Con la cuantiza
 directa, el modelo revisado (ver arriba) y minval 32 dB a 0 Bark en VBR (24.5 en
 CBR; protege las bandas graves y medias estacionarias, cuyo ruido PEAQ ve en la
 modulación de la envolvente), la escala está recalibrada para que la música
-estéreo quede en los bitrates de LAME. Media de seis piezas (las cinco de arriba y
-música 1 en mono):
+estéreo quede en los bitrates de LAME.
 
-| | antes | ahora | LAME |
-|---|---:|---:|---:|
-| V0 | −0.18 | **−0.07** | −0.01 |
-| V2 | −0.63 | **−0.41** | −0.29 |
-| V5 | −2.01 | **−1.48** | −1.25 |
+Reparto entre materiales (mismo día): con la escala calibrada sobre música estéreo,
+la voz, las castañuelas y la música mono recibían 15–25 % menos bits que en LAME.
+Tres cambios, solo en VBR:
+
+- Mono 1.5 dB más estricto: en joint stereo los umbrales de M/S son el mínimo de
+  los análisis de L, R y el propio, más estrictos que el análisis de un canal mono.
+  Calibrado aparte sobre las tres piezas mono, el desplazamiento sale casi igual en
+  todas las calidades (−0.9 a −2.0 dB). Voz V2: 69 → 80 kbps, −0.64 → −0.36.
+- Bloques cortos 8 dB más estrictos: el umbral de ruido del modelo corto dejaba los
+  ataques demasiado gruesos. Batería sobre acorde V2: −0.41 → 0.00 con un 1 % más
+  de bits.
+- Control de pre-eco en bloques largos (modelo 2 de la ISO): el umbral de un gránulo
+  no pasa de 2 veces el del anterior ni de 16 veces el del previo, porque el ruido
+  de un ataque dentro de un bloque largo se reparte también antes del ataque. Voz
+  V2: −0.33 → −0.26.
+
+Probados sin ventaja: un ATH adaptativo que sigue la sonoridad con decaimiento lento
+(PEAQ sí quiere el siseo de fondo de las castañuelas codificado: −0.39 → −0.96),
+un tope del ruido VBR por la energía propia y un paso bajo en V0. Media de seis
+piezas (las cinco de arriba y música 1 en mono):
+
+| | antes (6ec9769) | cuantización directa | + reparto | LAME |
+|---|---:|---:|---:|---:|
+| V0 | −0.18 | −0.07 | **−0.02** | −0.01 |
+| V2 | −0.63 | −0.41 | **−0.26** | −0.29 |
+| V4 | — | — | **−0.67** | −0.76 |
+| V5 | −2.01 | −1.48 | **−1.13** | −1.25 |
+| V6 | — | — | **−1.49** | −1.66 |
+| V7 | — | — | **−1.83** | −2.06 |
+| V9 | — | — | **−2.52** | −2.62 |
 
 Por pieza (kbps / ODG de PEAQ):
 
 | Calidad | música 1 | LAME | música 2 | LAME | voz | LAME | batería | LAME | castañuelas | LAME | música 1 mono | LAME |
 |---|---|---|---|---|---|---|---|---|---|---|---|---|
-| V0 | 236 / 0.10 | 232 / 0.06 | 239 / 0.05 | 244 / −0.07 | 89 / −0.16 | 114 / −0.03 | 95 / 0.04 | 143 / 0.01 | 124 / −0.50 | 140 / −0.08 | 119 / 0.04 | 118 / 0.04 |
-| V2 | 187 / −0.08 | 180 / −0.26 | 182 / −0.54 | 191 / −0.27 | 69 / −0.64 | 87 / −0.25 | 82 / −0.41 | 84 / −0.22 | 83 / −0.41 | 104 / −0.43 | 93 / −0.35 | 94 / −0.32 |
-| V4 | 158 / −0.48 | 150 / −0.94 | 145 / −1.32 | 155 / −1.06 | 57 / −1.28 | 70 / −0.73 | 69 / −0.40 | 67 / −0.43 | 63 / −0.82 | 77 / −0.43 | 77 / −1.02 | 81 / −0.95 |
-| V6 | 122 / −1.52 | 121 / −1.79 | 100 / −2.41 | 103 / −2.34 | 44 / −2.32 | 51 / −1.80 | 52 / −1.16 | 52 / −1.37 | 35 / −1.82 | 44 / −0.89 | 59 / −2.27 | 67 / −1.80 |
-| V9 | 81 / −3.07 | 80 / −3.09 | 73 / −2.89 | 75 / −2.65 | 32 / −3.04 | 37 / −2.55 | 40 / −2.53 | 41 / −2.58 | 33 / −2.94 | 36 / −1.80 | 38 / −3.81 | 44 / −3.05 |
+| V0 | 241 / 0.07 | 232 / 0.06 | 235 / 0.03 | 244 / −0.07 | 101 / −0.04 | 114 / −0.03 | 96 / −0.26 | 143 / 0.01 | 137 / 0.03 | 140 / −0.08 | 130 / 0.08 | 118 / 0.04 |
+| V2 | 192 / −0.07 | 180 / −0.26 | 178 / −0.65 | 191 / −0.27 | 80 / −0.36 | 87 / −0.25 | 83 / 0.00 | 84 / −0.22 | 94 / −0.36 | 104 / −0.43 | 102 / −0.13 | 94 / −0.32 |
+| V4 | 163 / −0.45 | 150 / −0.94 | 142 / −1.45 | 155 / −1.06 | 67 / −0.78 | 70 / −0.73 | 70 / −0.19 | 67 / −0.43 | 72 / −0.58 | 77 / −0.43 | 87 / −0.59 | 81 / −0.95 |
+| V6 | 126 / −1.53 | 121 / −1.79 | 98 / −2.49 | 103 / −2.34 | 52 / −1.72 | 51 / −1.80 | 53 / −0.65 | 52 / −1.37 | 43 / −0.83 | 44 / −0.89 | 67 / −1.73 | 67 / −1.80 |
+| V9 | 85 / −3.13 | 80 / −3.09 | 71 / −2.95 | 75 / −2.65 | 40 / −2.41 | 37 / −2.55 | 41 / −1.89 | 41 / −2.58 | 33 / −1.46 | 36 / −1.80 | 48 / −3.26 | 44 / −3.05 |
 
-A igual bitrate por pieza, en V2 quedamos por delante de LAME en música 1 (−0.17
-frente a −0.26), voz (−0.22 frente a −0.25) y castañuelas (−0.41 frente a −0.43), y
-por detrás en música 2 (−0.42 frente a −0.27) y batería (−0.41 frente a −0.22).
-Además está el reparto entre materiales: con la misma
-calidad la voz y las castañuelas reciben un 15–25 % menos de bits que en LAME, y
-en las calidades bajas (V6–V9) eso se nota. Bajar más el umbral absoluto de los
-gránulos silenciosos le da bits a la voz, pero los gasta en casi silencio en las
-otras piezas.
+Lo que queda: el reparto dentro de la música estéreo (música 1 recibe más bits que
+en LAME y música 2 menos; música 2 en V2 −0.65 frente a −0.27) y la batería en V0
+(−0.26 frente a 0.01; sin paso bajo en V0, LAME corta a ~19.5 kHz, pero cortar
+empeora las castañuelas).
 
 El umbral absoluto es adaptativo en VBR: en los gránulos silenciosos (pausas de la
 voz, finales) baja hasta 20 dB, porque el oyente sube el volumen y ese detalle se
@@ -220,7 +240,7 @@ así que los decodificadores gapless (ffmpeg, LAME) recuperan la duración exact
 
 ## Tests
 
-`tests/src/TestMP3EncPhase1..21.dpr` (un programa por fase, 861 checks; la 19
+`tests/src/TestMP3EncPhase1..21.dpr` (un programa por fase, 863 checks; la 19
 cubre los modelos psicoacústicos (MDCT y FFT), el bucle (también en modo calidad), el reservorio, MS automático y round trips
 decodificados con `mp3-decoder`; la 20, bloques cortos (round trips solo cortos y
 automáticos, secuencia legal de ventanas, pre-eco frente a solo bloques largos,

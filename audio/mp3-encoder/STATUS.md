@@ -79,6 +79,11 @@ delay 528 + padding y la duración queda exacta).
   −0.18 / −0.63 / −2.01 → −0.07 / −0.41 / −1.48 (LAME −0.01 / −0.29 / −1.25); CBR
   96/128/192 (5 piezas) −1.34 / −0.73 / −0.08 (LAME −1.32 / −0.76 / −0.13). Fase 19:
   PS15 y PS22–PS25, LP20–LP23; fase 20: WS11–WS13.
+- Reparto VBR entre materiales: mono 1.5 dB más estricto (calibrado aparte),
+  bloques cortos 8 dB más estrictos, control de pre-eco ISO (2× / 16×) en bloques
+  largos; escala recalibrada. ODG medio (6 piezas) V0/V2/V5/V7 −0.02 / −0.26 /
+  −1.13 / −1.83, a la par o por delante de LAME (−0.01 / −0.29 / −1.25 / −2.06).
+  Fase 21: VB08–VB09.
 
 ## Pendiente / ideas
 
@@ -90,10 +95,9 @@ delay 528 + padding y la duración queda exacta).
   a 96–128 kbps (música 1 a 128 kbps −1.53 frente a −1.32). Ideas: scfsi,
   estrategias de amplificación del bucle externo. Probado sin ventaja: redondeo
   al nivel más cercano (adj43).
-- VBR: a igual bitrate por delante de LAME en música 1, voz y castañuelas; por
-  detrás en música 2 (−0.42 frente a −0.27 en V2) y batería (−0.41 frente a
-  −0.22). Queda el reparto entre materiales: con la misma calidad la voz y las
-  castañuelas reciben 15–25 % menos bits que en LAME, visible en V6–V9. Probado
-  sin ventaja: umbral absoluto más bajo en silencios (gasta bits en casi silencio),
-  tope del ruido VBR por la energía propia, minval con más pendiente, umbral de
-  ataque más sensible, modelo FFT en VBR.
+- VBR: queda el reparto dentro de la música estéreo (música 2 en V2 −0.65 frente
+  a −0.27; recibe menos bits que en LAME y música 1 más) y la batería en V0 (−0.26;
+  LAME corta a ~19.5 kHz). Probado sin ventaja: umbral absoluto más bajo en
+  silencios, ATH que sigue la sonoridad con decaimiento, tope del ruido VBR por la
+  energía propia, minval con más pendiente, umbral de ataque más sensible, modelo
+  FFT en VBR, paso bajo en V0.

@@ -128,6 +128,7 @@ type
     VbrQuality: Integer;   { 0 (best) .. 9 }
     VbrNoiseScale: Double; { allowed noise x this factor }
     AthAdapt  : Boolean;   { absolute threshold lowered in quiet granules (VBR) }
+    PrevXmin1, PrevXmin2: array[0..1] of TPsyBandArr; { VBR pre-echo control }
     LastBrIdx : Integer;   { bitrate index of the last encoded frame }
     BrHist    : array[1..14] of Integer;  { frames per bitrate index }
     TargBits  : Integer;   { mean main-data bits per granule per channel }
@@ -253,6 +254,17 @@ const
   ATH_ADAPT_SLOPE  = 2.0;
   ATH_ADAPT_MAX_DB = 20.0;
   ENC_VBR_MINVAL   = 32.0;   { minval at 0 Bark in quality mode (dB) }
+  { quality mode, measured with PEAQ (equal bitrates, LAME as the yardstick):
+    - short blocks: the noise-like threshold of the short model left the
+      attacks too coarse; 8 dB stricter (drums over a chord, V2: -0.41 ->
+      0.00 for 1 % more bits);
+    - mono: in joint stereo the M/S thresholds are the minimum of the L, R
+      and own analyses, about 1.5 dB stricter than the single analysis of a
+      mono channel; the scale, calibrated on stereo music, is 1.5 dB
+      stricter for mono so that mono lands on the LAME bitrates too (speech
+      V2: 69 -> 80 kbps, ODG -0.64 -> -0.36) }
+  VBR_SHORT_SCALE  = 0.158;  { 10^(-8/10) }
+  VBR_MONO_DB      = -1.5;
 
 type
   TFrameXr = array[0..ENC_GRANULES - 1, 0..1] of T576;
@@ -295,9 +307,13 @@ end;
 
 procedure InitCommon(out AEnc: TMP3Encoder; const ACfg: TEncConfig; AChannels: Integer);
 var
-  dataBits, siBits, k: Integer;
+  dataBits, siBits, k, b: Integer;
 begin
   AEnc := Default(TMP3Encoder);
+  for k := 0 to 1 do
+    for b := 0 to PSY_BANDS - 1 do begin
+      AEnc.PrevXmin1[k][b] := 1e30; AEnc.PrevXmin2[k][b] := 1e30;
+    end;
   AEnc.Cfg        := ACfg;
   AEnc.Channels   := AChannels;
   AEnc.FrameBytes := EncFrameBytes(ACfg.BrIdx, ACfg.SrIdx, ACfg.Padding);
@@ -377,7 +393,7 @@ const
   EQ_KBPS: array[0..9] of Integer = (256, 224, 192, 176, 160, 128, 112, 96, 80, 64);
   { allowed noise relative to the masking threshold (dB); calibrated so that
     stereo music lands near the bitrates of LAME -V0 .. -V9 }
-  NOISE_DB: array[0..9] of Double = (-2.2, 0.0, 2.3, 3.4, 5.2, 7.5, 9.0, 9.7, 9.9, 12.0);
+  NOISE_DB: array[0..9] of Double = (-1.7, 0.5, 2.9, 4.0, 5.8, 8.1, 9.6, 10.3, 10.6, 12.6);
 var
   kb: Integer;
 begin
@@ -385,7 +401,10 @@ begin
   AEnc.Vbr := True;
   AEnc.VbrQuality := AQuality;
   AEnc.AthAdapt := True;
-  AEnc.VbrNoiseScale := Power(10.0, NOISE_DB[AQuality] / 10.0);
+  if AEnc.Channels = 1 then
+    AEnc.VbrNoiseScale := Power(10.0, (NOISE_DB[AQuality] + VBR_MONO_DB) / 10.0)
+  else
+    AEnc.VbrNoiseScale := Power(10.0, NOISE_DB[AQuality] / 10.0);
   EncEnableReservoir(AEnc, True);
   kb := EQ_KBPS[AQuality];
   if AEnc.Channels = 1 then kb := kb * 3 div 4;
@@ -781,7 +800,7 @@ var
   xmin  : array[0..3] of TPsyBandArr;
   xminS : array[0..3] of TPsyShortArr;
   FP    : TFramePsy;
-  sumEst, sumT, mean: Double;
+  sumEst, sumT, mean, v: Double;
   SI    : TFrameSideInfo;
   FCfg  : TFrameConfig;
   BW    : TMP3BitWriter;
@@ -808,9 +827,32 @@ begin
     if AEnc.Vbr then begin
       for j := 0 to PSY_BANDS - 1 do xmin[k][j] := xmin[k][j] * AEnc.VbrNoiseScale;
       for j := 0 to QUANT_SFB_SMAX - 1 do
-        for w := 0 to 2 do xminS[k][j][w] := xminS[k][j][w] * AEnc.VbrNoiseScale;
+        for w := 0 to 2 do xminS[k][j][w] := xminS[k][j][w] * AEnc.VbrNoiseScale * VBR_SHORT_SCALE;
     end;
   end;
+
+  { pre-echo control (VBR, long blocks): the threshold of a granule may not
+    exceed 2x that of the previous granule nor 16x the one before (ISO
+    model 2 rpelev / rpelev2).  An attack inside a long block spreads its
+    noise over the whole window, also before the attack, where the quiet
+    past does not mask it.  VBR only: tried earlier in CBR (FFT model), it
+    measured no better there. }
+  if AEnc.Vbr then
+    for k := 0 to n - 1 do begin
+      g := k div AEnc.Channels; c := k mod AEnc.Channels;
+      if AEnc.BlockType[g] = 2 then begin
+        for j := 0 to PSY_BANDS - 1 do begin
+          AEnc.PrevXmin2[c][j] := 1e30; AEnc.PrevXmin1[c][j] := 1e30;
+        end;
+        Continue;
+      end;
+      for j := 0 to PSY_BANDS - 1 do begin
+        v := xmin[k][j];
+        xmin[k][j] := Min(xmin[k][j], Min(2.0 * AEnc.PrevXmin1[c][j], 16.0 * AEnc.PrevXmin2[c][j]));
+        AEnc.PrevXmin2[c][j] := AEnc.PrevXmin1[c][j];
+        AEnc.PrevXmin1[c][j] := v;
+      end;
+    end;
 
   SI := Default(TFrameSideInfo);
   vbrDone := False;

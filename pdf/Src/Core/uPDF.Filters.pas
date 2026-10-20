@@ -6,7 +6,7 @@ interface
 
 uses
   System.SysUtils, System.Classes, System.ZLib,
-  uPDF.Types, uPDF.Errors, uPDF.CCITTFax;
+  uPDF.Types, uPDF.Errors, uPDF.CCITTFax, uPDF.JBIG2;
 
 type
   // -------------------------------------------------------------------------
@@ -93,7 +93,7 @@ type
   end;
 
   // -------------------------------------------------------------------------
-  // JBIG2Decode — stub
+  // JBIG2Decode  (decoder in uPDF.JBIG2; /DecodeParms /JBIG2Globals)
   // -------------------------------------------------------------------------
   TPDFJBIG2Filter = class(TPDFFilter)
   public
@@ -932,12 +932,36 @@ begin
 end;
 
 // =========================================================================
-// TPDFJBIG2Filter — stub
+// TPDFJBIG2Filter
 // =========================================================================
 
 procedure TPDFJBIG2Filter.Decode(AInput: TStream; AOutput: TStream; AParams: TObject);
+var
+  Data, Globals, Pixels: TBytes;
+  W, H, I: Integer;
 begin
-  raise EPDFNotSupportedError.Create('JBIG2 decode not implemented');
+  AInput.Position := 0;
+  SetLength(Data, AInput.Size);
+  if Length(Data) > 0 then
+    AInput.ReadBuffer(Data[0], Length(Data));
+  Globals := nil;
+  if AParams is TPDFDictionary then
+  begin
+    var G := TPDFDictionary(AParams).Get('JBIG2Globals');
+    if (G <> nil) and G.IsStream then
+      Globals := TPDFStream(G).DecodedBytes;
+  end;
+  try
+    Pixels := JBIG2DecodeEmbedded(Data, Globals, W, H);
+  except
+    on E: EJBIG2Error do
+      raise EPDFFilterError.Create(E.Message);
+  end;
+  // JBIG2 has 1 = black; the filter output has 1 = white (PDF 7.4.7)
+  for I := 0 to High(Pixels) do
+    Pixels[I] := not Pixels[I];
+  if Length(Pixels) > 0 then
+    AOutput.WriteBuffer(Pixels[0], Length(Pixels));
 end;
 
 procedure TPDFJBIG2Filter.Encode(AInput: TStream; AOutput: TStream; AParams: TObject);

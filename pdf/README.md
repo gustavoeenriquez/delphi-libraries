@@ -621,8 +621,9 @@ PDFViewerControl1.ZoomFit;
 | `uPDF.Document` | `TPDFDocument` (open/create/save) · `TPDFPage` (geometry, resources, content stream) |
 | `uPDF.Crypto` | MD5, SHA-1, SHA-256/384/512, RC4, AES-128/256 primitives |
 | `uPDF.Encryption` | Standard security handler Rev 2/3/4/6 — RC4 + AES, user/owner auth |
-| `uPDF.Filters` | FlateDecode, ASCIIHex, ASCII85, LZW, RunLength, CCITTFax, DCT (JPEG passthrough) |
+| `uPDF.Filters` | FlateDecode, ASCIIHex, ASCII85, LZW, RunLength, CCITTFax, JBIG2 (with `/JBIG2Globals`), DCT (JPEG passthrough) |
 | `uPDF.CCITTFax` | CCITT Group 3 / Group 4 fax decoder (T.4 / T.6) for `CCITTFaxDecode`: K < 0, 0, > 0, EOL / fill bits, `EncodedByteAlign`, `EndOfBlock`, `BlackIs1`, damaged-row recovery; pure Pascal, Win64 + Linux64 |
+| `uPDF.JBIG2` | JBIG2 decoder (ITU-T T.88) for `JBIG2Decode`: MQ arithmetic and Huffman variants, generic regions (templates 0-3, extended template, TPGD, MMR), refinement (TPGR), symbol dictionaries (refinement/aggregation, context reuse, export), text regions, pattern dictionaries and halftone regions, code tables, intermediate regions, striped pages; embedded (PDF) and file organisations; pure Pascal, Win64 + Linux64 |
 | `uPDF.ContentStream` | Content-stream interpreter (all path/text/color/clip/transform/shading operators incl. `scn`/`SCN` pattern names and `sh` shading) |
 | `uPDF.GraphicsState` | Full graphics-state stack: CTM, colors, fonts, line params, clipping, pattern names |
 | `uPDF.ColorSpace` | DeviceGray/RGB/CMYK, CalGray/RGB, ICCBased, Indexed, Pattern, Separation |
@@ -673,7 +674,8 @@ PDFViewerControl1.ZoomFit;
 | TestPDFEmbeddedWriter (structure, content encoding, multi-page, conformance) | 40 ✅ |
 | TestDocumentSave (round-trip, page ops, metadata, LZW, encrypted save, pattern color space) | 76 ✅ |
 | TestCCITT (hand-coded streams, 52 libtiff/MuPDF vectors, CCITT filter; `TPDFImage` `/Decode`, image masks, Indexed; nested form resources; Win64 + Linux64) | 89 ✅ |
-| **Total** | **487+ ✅** |
+| TestJBIG2 (MMR and structure, 9 jbig2enc/MuPDF vectors as PDF stream and as file, filter and `TPDFImage`; + 5 ITU conformance streams when given; Win64 + Linux64) | 27 (+5) ✅ |
+| **Total** | **514+ ✅** |
 
 Run the tests:
 
@@ -688,6 +690,8 @@ msbuild pdf\Tests\TestTTFEmbeddedFont.dproj    /p:Config=Debug /p:Platform=Win64
 msbuild pdf\Tests\TestPDFEmbeddedWriter.dproj  /p:Config=Debug /p:Platform=Win64
 msbuild pdf\Tests\TestCCITT.dproj              /p:Config=Release /p:Platform=Win64
 msbuild pdf\Tests\TestCCITT.dproj              /p:Config=Release /p:Platform=Linux64
+msbuild pdf\Tests\TestJBIG2.dproj              /p:Config=Release /p:Platform=Win64
+msbuild pdf\Tests\TestJBIG2.dproj              /p:Config=Release /p:Platform=Linux64
 ```
 
 The CCITT vectors in `Tests/data/ccitt` are regenerated with
@@ -695,6 +699,20 @@ The CCITT vectors in `Tests/data/ccitt` are regenerated with
 encodes the fax data and MuPDF's `CCITTFaxDecode` output, checked against the source
 image, gives the expected SHA-1. The decoder was also compared with MuPDF on 2591
 CCITT images from 58 real scanned PDFs (all Group 4): identical filter output in every one.
+
+JBIG2 was written from the text of ITU-T T.88 (08/2018). The vectors in `Tests/data/jbig2`
+are regenerated with `python Tests/tools/gen_jbig2_vectors.py Tests/data/jbig2` (jbig2enc +
+PyMuPDF; MuPDF's `JBIG2Decode` output is the reference) and the standard Huffman tables
+B.1-B.15 in `uPDF.JBIG2` with `Tests/tools/gen_jbig2_huffman.py` from the text of the
+Recommendation (it checks every assigned code against the encodings printed in B.5).
+Further checks, not distributed (ITU licence): the datastream of Annex H (all three pages
+identical to the expected bitmaps: Huffman, MMR, halftone, arithmetic, refinement and
+aggregation) and the conformance data of the T.88 software package (Annex K):
+`TestJBIG2 <folder>` decodes the streams that follow the Recommendation (TT3, TT4, TT7,
+TT9, TT10); the others were written by the sample encoder with its own interpretations
+(export runs, implicit dictionaries, run codes). Two of those (export runs 0, 0 and text
+regions that refer to no dictionary) are accepted for compatibility. 807 JBIG2 images
+from 13 real PDFs decode identically to MuPDF.
 
 ---
 

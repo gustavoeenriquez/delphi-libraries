@@ -61,9 +61,9 @@ type
     FSMask:      TPDFImage;  // optional soft-mask channel (owns)
     FColorSpace: TPDFColorSpace;  // the image colour space, nil if unknown (owns)
     procedure BuildColorSpace(ADict: TPDFDictionary; AResolver: IObjectResolver);
-    // Takes APixels (CCITTFaxDecode output) as 1-bit samples when they have
-    // the image size
-    function AcceptCCITT(const APixels: TBytes): Boolean;
+    // Takes APixels (CCITTFaxDecode or JBIG2Decode output) as 1-bit samples
+    // when they have the image size
+    function AcceptBilevel(const APixels: TBytes): Boolean;
     procedure ApplyDecodeArray;
   public
     constructor Create;
@@ -536,12 +536,19 @@ begin
   // JPEG: keep raw bytes; Skia decodes in DrawPDFImage.
   // CCITT: the filter chain decodes it to 1-bit samples; if that fails
   // (or /Columns does not match /Width), keep the raw bytes for Decode().
+  // JBIG2: the filter chain decodes it to 1-bit samples; if that fails the
+  // image keeps the JBIG2 encoding and is not drawn.
   if Result.FInfo.Encoding = TPDFImageEncoding.JPEG then
     Result.FSamples := AStream.RawBytes
   else if Result.FInfo.Encoding = TPDFImageEncoding.CCITT then
   begin
-    if not Result.AcceptCCITT(AStream.DecodedBytes) then
+    if not Result.AcceptBilevel(AStream.DecodedBytes) then
       Result.FSamples := AStream.RawBytes;
+  end
+  else if Result.FInfo.Encoding = TPDFImageEncoding.JBIG2 then
+  begin
+    if not Result.AcceptBilevel(AStream.DecodedBytes) then
+      Result.FSamples := nil;
   end
   else
     Result.FSamples := AStream.DecodedBytes;
@@ -589,7 +596,7 @@ begin
       end;
       if Result.FInfo.Encoding = TPDFImageEncoding.CCITT then
       begin
-        if not Result.AcceptCCITT(Decoded) then
+        if not Result.AcceptBilevel(Decoded) then
           Result.FSamples := AData;  // retried in Decode()
       end
       else if Decoded <> nil then
@@ -634,7 +641,7 @@ begin
     FInfo.ComponentCount := FColorSpace.ComponentCount;
 end;
 
-function TPDFImage.AcceptCCITT(const APixels: TBytes): Boolean;
+function TPDFImage.AcceptBilevel(const APixels: TBytes): Boolean;
 begin
   Result := (FInfo.Width > 0) and (FInfo.Height > 0) and
     (Length(APixels) = FInfo.Height * ((FInfo.Width + 7) div 8));
@@ -657,7 +664,7 @@ begin
     P.Columns := FInfo.Width;
     P.Rows    := FInfo.Height;
     try
-      AcceptCCITT(CCITTFaxDecode(FSamples, P));
+      AcceptBilevel(CCITTFaxDecode(FSamples, P));
     except
       on ECCITTFaxError do ;
     end;

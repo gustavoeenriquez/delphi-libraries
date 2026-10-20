@@ -87,7 +87,7 @@ tables and the G.722 test vectors (see [Upstream attributions](#upstream-attribu
 | `uPDF.Document` | `TPDFDocument` — open/create/save PDFs; `TPDFPage` — geometry, resources, content |
 | `uPDF.Crypto` | MD5, RC4, AES-128/256 primitives used by the encryption layer |
 | `uPDF.Encryption` | `TPDFDecryptor` — Standard handler Rev 2/3/4/6; RC4 + AES, password auth |
-| `uPDF.Filters` | FlateDecode, ASCIIHexDecode, ASCII85Decode, LZWDecode, RunLengthDecode, CCITTFaxDecode (pure Pascal G3/G4), DCTDecode (JPEG passthrough) |
+| `uPDF.Filters` | FlateDecode, ASCIIHexDecode, ASCII85Decode, LZWDecode, RunLengthDecode, CCITTFaxDecode (pure Pascal G3/G4), JBIG2Decode (pure Pascal, T.88), DCTDecode (JPEG passthrough) |
 | `uPDF.ContentStream` | Content-stream interpreter (all path/text/color/transform operators) + `TPDFContentBuilder` |
 | `uPDF.GraphicsState` | Full graphics-state stack: CTM, colors, fonts, line params, clip path |
 | `uPDF.ColorSpace` | DeviceGray/RGB/CMYK, CalGray/RGB, ICCBased, Indexed, Pattern, Separation |

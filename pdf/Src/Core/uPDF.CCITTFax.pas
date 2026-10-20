@@ -46,6 +46,10 @@ function CCITTFaxDecode(const AData: TBytes;
 // Same; ARows receives the number of rows in the result.
 function CCITTFaxDecode(const AData: TBytes;
   const AParams: TCCITTFaxParams; out ARows: Integer): TBytes; overload;
+// Same; AConsumed receives the number of bytes used, including an EOFB
+// right after the last of AParams.Rows rows (JBIG2 MMR data, T.88 6.2.6).
+function CCITTFaxDecode(const AData: TBytes;
+  const AParams: TCCITTFaxParams; out ARows, AConsumed: Integer): TBytes; overload;
 
 implementation
 
@@ -397,6 +401,14 @@ end;
 function CCITTFaxDecode(const AData: TBytes;
   const AParams: TCCITTFaxParams; out ARows: Integer): TBytes;
 var
+  Consumed: Integer;
+begin
+  Result := CCITTFaxDecode(AData, AParams, ARows, Consumed);
+end;
+
+function CCITTFaxDecode(const AData: TBytes;
+  const AParams: TCCITTFaxParams; out ARows, AConsumed: Integer): TBytes;
+var
   D: TFaxDecoder;
   RowBytes, Row, NRef, Cap: Integer;
   P0: Int64;
@@ -494,6 +506,10 @@ begin
 
   if Row = 0 then
     raise ECCITTFaxError.Create('CCITTFax: no row could be decoded');
+  // an EOFB right after the last row belongs to the data
+  if (AParams.Rows > 0) and (Row = AParams.Rows) and (D.Peek(24) = $001001) then
+    D.Eat(24);
+  AConsumed := Integer(Min(Int64(Length(AData)), (D.Pos + 7) div 8));
   if AParams.Rows > 0 then
   begin
     // missing rows are white

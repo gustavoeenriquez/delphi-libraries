@@ -13,7 +13,12 @@
     - Select the best Huffman table for each spectral region
     - Fill a complete TRCtrlParams descriptor for one granule
 
-  Fixed region layout (standard MPEG1 44100 Hz long blocks):
+  Region layout of the big values (long blocks): region0_count and
+  region1_count are chosen per granule among all the scalefactor band
+  boundaries the side info can express, with the best table for each
+  region (RateCtrlBestRegions; prefix sums of the pair bits per table make
+  every candidate split O(1)).  Without it, or with window switching, the
+  layout is fixed:
     Region 0: sfb bands 0..10  (region0_count = 10)
     Region 1: sfb bands 11..14 (region1_count = 3)
     Region 2: remainder up to big_values * 2
@@ -38,8 +43,8 @@ type
     Count1            : Integer;  { number of count1 quads }
     Count1TableSelect : Byte;     { 0 = table 32 (A), 1 = table 33 (B) }
     TableSelect       : array[0..2] of Byte;  { Huffman table per region }
-    Region0Count      : Byte;     { = RC_REGION0_COUNT }
-    Region1Count      : Byte;     { = RC_REGION1_COUNT }
+    Region0Count      : Byte;     { region0_count (0..15) }
+    Region1Count      : Byte;     { region1_count (0..7) }
     SrIdx             : Byte;     { sample rate index 0/1/2 }
     BlockType         : Byte;     { 0..3: region layout (window switching) }
   end;
@@ -67,10 +72,11 @@ function RateCtrlBestTable(const AIx: T576Int; AStart, AEnd: Integer): Integer;
 function RateCtrlBestTableFast(const AIx: T576Int; AStart, AEnd: Integer): Integer;
 
 { Fill all coding parameters for one granule given its quantized Ix[] array.
-  Uses RC_REGION0_COUNT / RC_REGION1_COUNT for the region layout.
+  Uses RC_REGION0_COUNT / RC_REGION1_COUNT for the region layout, or with
+  ABestRegions (long blocks only) the cheapest region0/region1 split.
   Count1 is determined by trailing [-1,0,+1] quads beyond big_values. }
 procedure RateCtrlFillParams(const AIx: T576Int; ASrIdx: Byte;
-  out AParams: TRCtrlParams; ABlockType: Byte = 0);
+  out AParams: TRCtrlParams; ABlockType: Byte = 0; ABestRegions: Boolean = False);
 
 { First line of Huffman regions 1 and 2 for a parameter set. }
 procedure RateCtrlRegionStarts(const AParams: TRCtrlParams; out AR1Start, AR2Start: Integer);
@@ -87,6 +93,11 @@ function RateCtrlFindGain(const AQState: TQuantState;
   const AXr: T576; ATargetBits: Integer;
   const AScalefacL: TScalefacL; AScalefacScale, APreflag, ASrIdx: Integer;
   out AIx: T576Int; out AParams: TRCtrlParams): Integer;
+
+var
+  { the noise-shaping loops choose region0_count / region1_count per granule
+    (long blocks); False = fixed layout }
+  RateCtrlBestRegions: Boolean = True;
 
 implementation
 
@@ -229,8 +240,91 @@ begin
   end;
 end;
 
+{ Best region0_count / region1_count and tables for the big values
+  [0, ABigEnd) of a long block (side info limits: region0_count 0..15,
+  region1_count 0..7, region0_count + region1_count + 2 <= 22). }
+procedure OptimizeRegions(const AIx: T576Int; var AParams: TRCtrlParams; ABigEnd: Integer);
+const
+  MAXT = 30;
+var
+  tabs: array[0..MAXT - 1] of Integer;
+  pre, inv: array[0..MAXT - 1, 0..QUANT_GRANULE div 2] of Integer;
+  bnd: array[0..QUANT_SFB_LMAX] of Integer;
+  c0, cEnd, t0, tEnd: array[0..QUANT_SFB_LMAX] of Integer;
+  nt, np, mx, i, k, b, r0, r1, a1, c, cm, tm, best, bestR0, bestR1: Integer;
+
+  { fewest bits for the pairs [AFrom, ATo); ATab = that table (0 if empty) }
+  function Cost(AFrom, ATo: Integer; out ATab: Integer): Integer;
+  var j, v: Integer;
+  begin
+    ATab := 0;
+    if ATo <= AFrom then Exit(0);
+    Result := MaxInt;
+    for j := 0 to nt - 1 do
+      if inv[j][ATo] = inv[j][AFrom] then begin
+        v := pre[j][ATo] - pre[j][AFrom];
+        if v < Result then begin Result := v; ATab := tabs[j]; end;
+      end;
+  end;
+
+begin
+  np := ABigEnd div 2;
+  if np = 0 then Exit;
+  mx := 0;
+  for i := 0 to ABigEnd - 1 do
+    if Abs(AIx[i]) > mx then mx := Abs(AIx[i]);
+  { candidate tables: 0 (all-zero regions), those without escape (4 and 14
+    do not exist) and, when some value needs them, the escape tables }
+  nt := 0;
+  for i := 0 to 15 do
+    if (i <> 4) and (i <> 14) then begin tabs[nt] := i; Inc(nt); end;
+  if mx > 15 then
+    for i := 16 to 31 do begin tabs[nt] := i; Inc(nt); end;
+  { prefix sums of the pair bits per table (and of the uncodable pairs) }
+  for k := 0 to nt - 1 do begin
+    pre[k][0] := 0; inv[k][0] := 0;
+    for i := 0 to np - 1 do begin
+      b := HuffCountPairBits(tabs[k], Abs(AIx[2 * i]), Abs(AIx[2 * i + 1]));
+      if b = HUFF_INVALID then begin
+        pre[k][i + 1] := pre[k][i]; inv[k][i + 1] := inv[k][i] + 1;
+      end else begin
+        pre[k][i + 1] := pre[k][i] + b; inv[k][i + 1] := inv[k][i];
+      end;
+    end;
+  end;
+  { region boundaries in pairs, clipped to the big values }
+  for i := 0 to QUANT_SFB_LMAX do begin
+    bnd[i] := QuantSfbBand(AParams.SrIdx, i);
+    if bnd[i] > ABigEnd then bnd[i] := ABigEnd;
+    bnd[i] := bnd[i] div 2;
+  end;
+  for i := 1 to 16 do c0[i] := Cost(0, bnd[i], t0[i]);
+  for i := 2 to QUANT_SFB_LMAX do cEnd[i] := Cost(bnd[i], np, tEnd[i]);
+
+  best := MaxInt; bestR0 := 0; bestR1 := 0;
+  for r0 := 0 to 15 do begin
+    if c0[r0 + 1] = MaxInt then Continue;
+    a1 := bnd[r0 + 1];
+    for r1 := 0 to 7 do begin
+      if r0 + r1 + 2 > QUANT_SFB_LMAX then Break;
+      if cEnd[r0 + r1 + 2] = MaxInt then Continue;
+      cm := Cost(a1, bnd[r0 + r1 + 2], tm);
+      if cm = MaxInt then Continue;
+      c := c0[r0 + 1] + cm + cEnd[r0 + r1 + 2];
+      if c < best then begin best := c; bestR0 := r0; bestR1 := r1; end;
+    end;
+  end;
+  if best = MaxInt then Exit;   { keep the fixed layout }
+  AParams.Region0Count := bestR0;
+  AParams.Region1Count := bestR1;
+  AParams.TableSelect[0] := t0[bestR0 + 1];
+  Cost(bnd[bestR0 + 1], bnd[bestR0 + bestR1 + 2], tm);
+  AParams.TableSelect[1] := tm;
+  AParams.TableSelect[2] := tEnd[bestR0 + bestR1 + 2];
+end;
+
 procedure RateCtrlFillParams(const AIx: T576Int; ASrIdx: Byte;
-  out AParams: TRCtrlParams; ABlockType: Byte);
+  out AParams: TRCtrlParams; ABlockType: Byte; ABestRegions: Boolean);
 var
   bigEnd, r1Start, r2Start, i: Integer;
 begin
@@ -271,6 +365,9 @@ begin
   AParams.TableSelect[0] := RateCtrlBestTableFast(AIx, 0,       r1Start);
   AParams.TableSelect[1] := RateCtrlBestTableFast(AIx, r1Start, r2Start);
   AParams.TableSelect[2] := RateCtrlBestTableFast(AIx, r2Start, bigEnd);
+
+  if ABestRegions and (ABlockType = 0) then
+    OptimizeRegions(AIx, AParams, bigEnd);
 end;
 
 // ---------------------------------------------------------------------------

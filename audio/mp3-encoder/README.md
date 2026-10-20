@@ -10,11 +10,19 @@ ODG de PEAQ básico (GstPEAQ; 0 = transparente, −4 = muy molesto) sobre cinco 
 de 4–30 s a 44,1 kHz (dos músicas estéreo, voz, batería estéreo, castañuelas),
 decodificando con ffmpeg y remuestreando a 48 kHz. Media de las cinco:
 
-| CBR | antes de las correcciones | modelo MDCT (defecto) | modelo FFT | LAME 3.100 |
-|---|---:|---:|---:|---:|
-| 96 kbps | — | −1.62 | −1.59 | −1.32 |
-| 128 kbps | −1.35 | −1.03 | −1.02 | −0.76 |
-| 192 kbps | — | −0.40 | −0.38 | −0.13 |
+| CBR | antes de las correcciones | modelo MDCT | + regiones Huffman (defecto) | modelo FFT | LAME 3.100 |
+|---|---:|---:|---:|---:|---:|
+| 96 kbps | — | −1.62 | −1.59 | −1.59 | −1.32 |
+| 128 kbps | −1.35 | −1.03 | −1.00 | −1.02 | −0.76 |
+| 192 kbps | — | −0.40 | −0.38 | −0.38 | −0.13 |
+
+Regiones Huffman: en bloques largos `region0_count`/`region1_count` se eligen por
+gránulo (la división más barata de las 125 que admite la side info, con la mejor
+tabla en cada región) en vez de 10/3 fijos: −1.9 % de bits Huffman, que el bucle
+convierte en menos ruido (la música gana 0.03–0.1; VBR, la misma calidad con
+1.5–2 % menos de bits). La búsqueda binaria de global_gain cuenta con la división
+fija y solo los últimos pasos con la óptima: codificar es unas 2 veces más lento
+(30 s de estéreo a 128 kbps en ~3 s).
 
 Las dos correcciones de esta fecha (ver la historia al final) son la mejora: los
 cuartetos count1 iban con el índice de la tabla invertido y ffmpeg descartaba
@@ -25,8 +33,8 @@ media en CBR, pero peor en la batería, y en VBR reparte peor los bits (da a la
 música densa demasiados pocos). Por eso no es el modelo por defecto. La distancia
 que queda con LAME no es del modelo psicoacústico: a igual tasa media, ni el
 modelo ni sus parámetros (TMN/NMT, minval, ATH, control de pre-eco) la cambian;
-está en la eficiencia de codificación (regiones Huffman fijas, sin scfsi,
-redondeo del cuantizador, reparto de bits entre gránulos).
+está en la eficiencia de codificación (sin scfsi, redondeo del cuantizador,
+reparto de bits entre gránulos).
 
 ## Conmutación de ventana y pre-eco (2026-10-20)
 
@@ -113,7 +121,7 @@ solo en bloques largos.
 | `MP3EncPsy` | Modelo psicoacústico sobre las líneas MDCT: energía por banda, spreading (Schroeder, Bark), tonalidad (SFM), minval, ATH; versión de bloques cortos por ventana; devuelve ruido permitido por línea y estimación de bits. Opcional para bloques largos: modelo 2 de la ISO sobre una FFT de 1024 puntos del PCM (particiones de 1/3 Bark, tonalidad por impredecibilidad de cada línea), que da la relación umbral/energía por banda y se aplica a las energías MDCT |
 | `MP3EncLoop` | Bucle interno (búsqueda binaria de global_gain) + externo (scalefactors por banda, scalefac_scale, preflag, scalefac_compress); criterio de LAME (suma de excesos²); fase de ahorro de bits; variante de bloques cortos con subblock_gain |
 | `MP3EncQuantize` | Fórmulas ISO de cuantización/decuantización, tablas de bandas |
-| `MP3EncHuffman` / `MP3EncRateCtrl` | Tablas Huffman, big_values/count1/rzero (Shine), elección rápida de tabla por máximo de región |
+| `MP3EncHuffman` / `MP3EncRateCtrl` | Tablas Huffman, big_values/count1/rzero (Shine), elección rápida de tabla por máximo de región, división óptima de las regiones (bloques largos) |
 | `MP3EncFrame` / `MP3EncBitWriter` | Cabecera, side info, scalefactors, datos Huffman |
 | `MP3EncEncoder` | `TMP3Encoder`: análisis con un gránulo de anticipación, detector de ataques y secuencia de ventanas, MS espectral (automático por frame según la estimación de bits), asignación de bits entre gránulos/canales, reservorio (main_data_begin ≤ 511 B), paso bajo por tasa (tabla LAME), cola de emisión |
 | `MP3EncWAV` / `MP3EncFile` | WAV → MP3 (streams y archivos), etiquetas ID3v1/ID3v2, cabecera Xing/LAME gapless (delay 528) |
@@ -145,7 +153,7 @@ así que los decodificadores gapless (ffmpeg, LAME) recuperan la duración exact
 
 ## Tests
 
-`tests/src/TestMP3EncPhase1..21.dpr` (un programa por fase, 843 checks; la 19
+`tests/src/TestMP3EncPhase1..21.dpr` (un programa por fase, 848 checks; la 19
 cubre los modelos psicoacústicos (MDCT y FFT), el bucle, el reservorio, MS automático y round trips
 decodificados con `mp3-decoder`; la 20, bloques cortos (round trips solo cortos y
 automáticos, secuencia legal de ventanas, pre-eco frente a solo bloques largos,

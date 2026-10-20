@@ -164,8 +164,10 @@ var
   end;
 
   { Quantize with global gain AGain; returns the Huffman bit count
-    (MaxInt when a value cannot be coded) and fills ix / params. }
-  function QuantizeAndCount(AGain: Integer): Integer;
+    (MaxInt when a value cannot be coded) and fills ix / params.  ABest:
+    cheapest region split (exact count) instead of the fixed one (an upper
+    bound, cheaper to compute). }
+  function QuantizeAndCount(AGain: Integer; ABest: Boolean = True): Integer;
   var bb, ii, e, q: Integer; f: Double;
   begin
     for bb := 0 to QUANT_SFB_LMAX - 1 do begin
@@ -182,24 +184,29 @@ var
         end;
       end;
     end;
-    RateCtrlFillParams(ix, ASrIdx, params, ABlockType);
+    RateCtrlFillParams(ix, ASrIdx, params, ABlockType, ABest and RateCtrlBestRegions);
     Result := RateCtrlHuffBits(ix, params);
   end;
 
   { Binary search of the smallest global_gain whose Huffman bits fit ABudget.
-    Leaves ix / params for that gain; returns the gain and its bit count. }
+    Leaves ix / params for that gain; returns the gain and its bit count.
+    The search counts with the fixed region split; the best split never
+    costs more, so the gain is then lowered while it still fits. }
   function InnerLoop(ABudget: Integer; out ABits: Integer): Integer;
   var lo, hi, mid, bb: Integer;
   begin
     lo := 0; hi := 255; Result := 255; ABits := 0;
     while lo <= hi do begin
       mid := (lo + hi) shr 1;
-      bb := QuantizeAndCount(mid);
+      bb := QuantizeAndCount(mid, False);
       if bb <= ABudget then begin
         Result := mid; ABits := bb; hi := mid - 1;
       end else
         lo := mid + 1;
     end;
+    if RateCtrlBestRegions and (ABlockType = 0) then
+      while (Result > 0) and (QuantizeAndCount(Result - 1) <= ABudget) do
+        Dec(Result);
     { restore ix / params of the chosen gain (the last probe may differ) }
     ABits := QuantizeAndCount(Result);
   end;

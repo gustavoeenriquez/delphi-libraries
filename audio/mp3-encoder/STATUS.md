@@ -63,6 +63,8 @@ delay 528 + padding y la duración queda exacta).
 - Modelo psicoacústico 2 de la ISO con FFT de 1024 puntos para bloques largos,
   opcional (`EncDefaultPsyModel := 1`): a la par del modelo MDCT en CBR, peor
   reparto en VBR. Fase 19 ampliada (PF01–PF10, RV28–RV30).
+- Regiones Huffman óptimas por gránulo (bloques largos): −1.9 % de bits Huffman,
+  ODG medio 128 kbps −1.03 → −1.00. Fase 19: RC04–RC08.
 
 ## Pendiente / ideas
 
@@ -70,8 +72,8 @@ delay 528 + padding y la duración queda exacta).
 - La decisión automática M/S por bits estimados no siempre elige el modo de
   mejor SNR (en ruido sintético ancho elige L/R aunque M/S conserva mejor S).
 - Intensity stereo; MPEG-2/2.5 (tasas bajas de muestreo).
-- Distancia con LAME (PEAQ, 128 kbps: −1.03 frente a −0.76): está en la
+- Distancia con LAME (PEAQ, 128 kbps: −1.00 frente a −0.76): está en la
   eficiencia de codificación, no en el modelo psicoacústico. Candidatos:
-  regiones Huffman óptimas por gránulo (hoy region0/1 fijas), scfsi, redondeo
-  del cuantizador y reparto de bits entre gránulos según la entropía perceptual.
+  reparto de bits entre gránulos según la entropía perceptual, scfsi y redondeo
+  del cuantizador.
 - VBR con voz: usa menos bits que LAME y la calidad cae en proporción.

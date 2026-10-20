@@ -7,7 +7,7 @@
   PS: MP3EncPsy      (ATH, Bark, spreading, thresholds, tonality)
   PF: MP3EncPsy      (FFT model: partitions, tonal vs noise ratios)
   LP: MP3EncLoop     (scalefac_compress, loop budget, shaping, bit saving)
-  RC: MP3EncRateCtrl (fast Huffman table choice)
+  RC: MP3EncRateCtrl (fast Huffman table choice, best region split)
   RV: MP3EncEncoder  (reservoir accounting, flush, lowpass, MS/LR, round trip)
 }
 
@@ -341,6 +341,76 @@ begin
   Check('RC03 uncodable value -> 0', RateCtrlBestTableFast(Ix, 0, 2) = 0);
 end;
 
+{ Spectrum shaped like a real one: large at low frequencies, decaying. }
+procedure SyntheticIx(ATrial: Integer; out AIx: T576Int);
+var i, a: Integer;
+begin
+  for i := 0 to 575 do begin
+    a := Round((5 + 40 * (ATrial mod 5)) * Exp(-i / (40.0 + 20 * (ATrial mod 7))) * Random);
+    if Random(2) = 0 then a := -a;
+    AIx[i] := a;
+  end;
+end;
+
+procedure TestBestRegions;
+var
+  Ix: T576Int;
+  P0, P1, P2: TRCtrlParams;
+  Gr: TGrInfo;
+  trial, b0, b1, b2, r0, r1, t0, t1, t2, s1, s2, bestB, worse, lim, wr, brute: Integer;
+  sum0, sum1: Int64;
+begin
+  WriteLn('RC: best region split');
+  RandSeed := 5;
+  worse := 0; lim := 0; wr := 0; brute := 0; sum0 := 0; sum1 := 0;
+  for trial := 0 to 39 do begin
+    SyntheticIx(trial, Ix);
+    RateCtrlFillParams(Ix, 0, P0, 0, False);
+    RateCtrlFillParams(Ix, 0, P1, 0, True);
+    b0 := RateCtrlHuffBits(Ix, P0);
+    b1 := RateCtrlHuffBits(Ix, P1);
+    Inc(sum0, b0); Inc(sum1, b1);
+    if b1 > b0 then Inc(worse);
+    if (P1.Region0Count > 15) or (P1.Region1Count > 7) or
+       (P1.Region0Count + P1.Region1Count + 2 > QUANT_SFB_LMAX) then Inc(lim);
+    { the frame writer must spend exactly the counted bits }
+    Gr := Default(TGrInfo);
+    Gr.SrIdx := 0; Gr.BlockType := 0; Gr.Ix := Ix;
+    Gr.BigValues := P1.BigValues; Gr.Count1 := P1.Count1;
+    Gr.Count1TableSelect := P1.Count1TableSelect;
+    Gr.TableSelect[0] := P1.TableSelect[0]; Gr.TableSelect[1] := P1.TableSelect[1];
+    Gr.TableSelect[2] := P1.TableSelect[2];
+    Gr.Region0Count := P1.Region0Count; Gr.Region1Count := P1.Region1Count;
+    if FrameHuffmanBits(Gr) <> b1 then Inc(wr);
+    { exhaustive search over every split with the exhaustive table choice }
+    if trial < 8 then begin
+      bestB := MaxInt;
+      for r0 := 0 to 15 do
+        for r1 := 0 to 7 do begin
+          if r0 + r1 + 2 > QUANT_SFB_LMAX then Break;
+          P2 := P0; P2.Region0Count := r0; P2.Region1Count := r1;
+          RateCtrlRegionStarts(P2, s1, s2);
+          if s1 > P2.BigValues * 2 then s1 := P2.BigValues * 2;
+          if s2 > P2.BigValues * 2 then s2 := P2.BigValues * 2;
+          t0 := RateCtrlBestTable(Ix, 0, s1);
+          t1 := RateCtrlBestTable(Ix, s1, s2);
+          t2 := RateCtrlBestTable(Ix, s2, P2.BigValues * 2);
+          P2.TableSelect[0] := t0; P2.TableSelect[1] := t1; P2.TableSelect[2] := t2;
+          b2 := RateCtrlHuffBits(Ix, P2);
+          if b2 < bestB then bestB := b2;
+        end;
+      if bestB <> b1 then Inc(brute);
+    end;
+  end;
+  WriteLn(Format('       Huffman bits, fixed -> best split: %d -> %d (%.1f %%)',
+    [sum0, sum1, 100.0 * (sum1 - sum0) / sum0]));
+  Check('RC04 best split never costs more (40 trials)', worse = 0);
+  Check('RC05 best split saves bits overall', sum1 < sum0);
+  Check('RC06 region counts within the side info limits', lim = 0);
+  Check('RC07 frame writer spends the counted bits', wr = 0);
+  Check('RC08 equals the exhaustive search (8 trials)', brute = 0);
+end;
+
 // ---------------------------------------------------------------------------
 // RV: encoder, reservoir, round trips
 // ---------------------------------------------------------------------------
@@ -531,6 +601,7 @@ begin
     TestPsyFFT;
     TestLoop;
     TestFastTables;
+    TestBestRegions;
     TestEncoder;
   except
     on E: Exception do begin

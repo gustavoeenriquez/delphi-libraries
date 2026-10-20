@@ -7,6 +7,20 @@ except `audio/opus-decoder` and `audio/opus-encoder`: they are derivative works 
 (Copyright Xiph.Org, Skype Limited and others) and are distributed under the libopus BSD 3-clause
 license, whose full text is in their README files.
 
+Third-party data that is **not** covered by CC0:
+
+- `audio/g729-codec/src/G729Tables.pas`: the numeric codebook tables of ITU-T G.729 / G.729 Annex A
+  and Annex B (LSP, MA predictor, gain codebooks and maps, b30 filter, SID/VAD tables), taken from
+  `TAB_LD8A.C` and `tab_dtx.c` of the ITU-T G.729 software package (Copyright (c) 1996 AT&T,
+  France Telecom, NTT, Universite de Sherbrooke, Rockwell International). Only the numbers are
+  reproduced, because bit-stream interoperability with G.729 requires these exact values; the
+  copyright on them, if any, stays with their authors. All the code of `audio/g729-codec` is CC0.
+- `audio/g722-codec/samples/` (`inpsp.bin`, `codspw.cod`, `outsp1.bin`, `outsp2.bin`,
+  `outsp3.bin`): test vectors of the ITU-T Software Tool Library (G.191), G.722 module
+  (copyright CNET / France Telecom), redistributed unmodified under the ITU-T Software Tools
+  General Public License (`audio/g722-codec/samples/LICENSE-ITU-STL.md`, notice in
+  `audio/g722-codec/samples/NOTICE.md`).
+
 https://creativecommons.org/publicdomain/zero/1.0/
 
 ### Full Legal Text

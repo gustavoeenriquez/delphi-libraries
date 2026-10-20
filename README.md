@@ -8,7 +8,8 @@ Everything compiles with stock Delphi on Windows, Linux, and any RTL-supported p
 
 **License: [CC0 1.0 Universal (Public Domain)](./LICENSE.md)** — use however you like.
 Exception: `audio/opus-decoder` and `audio/opus-encoder` are faithful ports of libopus and keep its
-permissive **BSD 3-clause** license (see [Upstream attributions](#upstream-attributions)).
+permissive **BSD 3-clause** license, and two pieces of ITU-T data are not CC0: the G.729 codebook
+tables and the G.722 test vectors (see [Upstream attributions](#upstream-attributions)).
 
 ---
 
@@ -329,6 +330,8 @@ See [docs/BUILD.md](./docs/BUILD.md) for the full guide.
 All code is **CC0 1.0 Universal (Public Domain)**, except the Opus codec ports
 (`audio/opus-decoder`, `audio/opus-encoder`), which are derivative works of libopus
 and are distributed under the libopus **BSD 3-clause** license.
+Two pieces of ITU-T data included in the repository are not CC0 (see the table below and
+[LICENSE.md](./LICENSE.md)).
 https://creativecommons.org/publicdomain/zero/1.0/
 
 ### Upstream attributions
@@ -337,6 +340,8 @@ https://creativecommons.org/publicdomain/zero/1.0/
 |---|---|---|
 | `audio/mp3-decoder` | Translated from [minimp3](https://github.com/lieff/minimp3) | CC0 1.0 |
 | `audio/opus-decoder`, `audio/opus-encoder` | Faithful ports of [libopus 1.5.2](https://opus-codec.org/) (Xiph.Org, Skype et al.) | **BSD 3-clause** (full text in [opus-decoder/README.md](./audio/opus-decoder/README.md) and [opus-encoder/README.md](./audio/opus-encoder/README.md)); tests CC0 |
+| `audio/g729-codec` | Written from the text of ITU-T G.729 (06/2012) and Annex A/B; the codebook tables in `G729Tables.pas` are the numbers of `TAB_LD8A.C`/`tab_dtx.c` of the ITU-T software package (© AT&T, France Telecom, NTT, Université de Sherbrooke, Rockwell), required for interoperability | Code CC0 1.0; **tables not CC0** (copyright, if any, of their authors) |
+| `audio/g722-codec` | Written from the text of ITU-T G.722 (09/2012); test vectors in `samples/` from the [ITU-T STL](https://github.com/openitu/STL) (G.191) | Code CC0 1.0; **test vectors under the ITU-T Software Tools GPL** (see [samples/NOTICE.md](./audio/g722-codec/samples/NOTICE.md)) |
 | `audio/ogg-container`, `audio/vorbis-decoder` | Written from RFC 3533 and the Vorbis I specification (stb_vorbis, public domain, as reference) | CC0 1.0 |
 | `barcode/qr-generator` (encoder) | Algorithm translated from [QR Code generator library](https://github.com/nayuki/QR-Code-generator) (Project Nayuki) | CC0 1.0 (see MIT notice in [barcode/qr-generator/README.md](./barcode/qr-generator/README.md)) |
 | `barcode/qr-generator` (reader) | Algorithm translated from [ZXing](https://github.com/zxing/zxing) | CC0 1.0 (see Apache 2.0 notice in [barcode/qr-generator/README.md](./barcode/qr-generator/README.md)) |

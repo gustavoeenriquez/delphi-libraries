@@ -1,7 +1,8 @@
 # g722-codec — Códec ITU-T G.722 (SB-ADPCM) en Delphi puro
 
 Encoder y decoder G.722 (audio de 7 kHz, SB-ADPCM de 2 sub-bandas con QMF) en Object Pascal,
-sin DLLs. Entrada y salida: PCM lineal int16 a 16 kHz. Licencia: CC0 1.0.
+sin DLLs. Entrada y salida: PCM lineal int16 a 16 kHz. Licencia: CC0 1.0 para el código; los
+vectores de prueba de `samples/` son de la ITU-T STL y van bajo su licencia (ver `samples/NOTICE.md`).
 
 Implementado desde el texto de la Recomendación ITU-T G.722 (09/2012), con los bloques y las
 tablas de la norma. El software de STL (G.191) solo se usó como referencia cruzada y como

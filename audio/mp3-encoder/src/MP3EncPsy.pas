@@ -124,13 +124,14 @@ function PsyBarkOf(AFreqHz: Double): Double;
 procedure PsyInit(out AModel: TPsyModel; ASrIdx: Integer;
   AAthAdjustDb: Double = 0.0);
 
-{ Analyse one granule (576 MDCT lines) and compute the allowed noise. }
+{ Analyse one granule (576 MDCT lines) and compute the allowed noise.
+  AAthScale multiplies the absolute threshold (adaptive ATH). }
 procedure PsyAnalyse(const AModel: TPsyModel; const AXr: T576;
-  out AResult: TPsyResult);
+  out AResult: TPsyResult; AAthScale: Double = 1.0);
 
 { Analyse one short-block granule: three windows of 192 lines each. }
 procedure PsyAnalyseShort(const AModel: TPsyModel; const ASpec: TPsyShortSpec;
-  out AResult: TPsyShortResult);
+  out AResult: TPsyShortResult; AAthScale: Double = 1.0);
 
 { Bit demand estimate of a short-block granule. }
 function PsyEstimateBitsShort(const AModel: TPsyModel;
@@ -153,7 +154,7 @@ procedure PsyAnalyseFFT(const AModel: TPsyModel; var AState: TPsyFFTState;
   them), with the absolute threshold as the floor.  Updates Xmin and
   EstBits. }
 procedure PsyApplyRatio(const AModel: TPsyModel; const ARatio: TPsyBandArr;
-  var AResult: TPsyResult);
+  var AResult: TPsyResult; AAthScale: Double = 1.0);
 
 implementation
 
@@ -423,7 +424,7 @@ begin
 end;
 
 procedure PsyApplyRatio(const AModel: TPsyModel; const ARatio: TPsyBandArr;
-  var AResult: TPsyResult);
+  var AResult: TPsyResult; AAthScale: Double);
 var
   b: Integer;
   t: Double;
@@ -433,7 +434,7 @@ begin
       t := ARatio[b] * AResult.Energy[b] / AModel.Width[b]
     else
       t := 0.0;
-    if t < AModel.AthLin[b] then t := AModel.AthLin[b];
+    if t < AModel.AthLin[b] * AAthScale then t := AModel.AthLin[b] * AAthScale;
     AResult.Xmin[b] := t;
   end;
   AResult.EstBits := PsyEstimateBits(AModel, AResult.Energy, AResult.Xmin);
@@ -458,7 +459,7 @@ begin
 end;
 
 procedure PsyAnalyseShort(const AModel: TPsyModel; const ASpec: TPsyShortSpec;
-  out AResult: TPsyShortResult);
+  out AResult: TPsyShortResult; AAthScale: Double);
 var
   b, k, w, i, lo: Integer;
   e, c, o, t: Double;
@@ -482,7 +483,7 @@ begin
       if o < AModel.MinValDbS[b] then o := AModel.MinValDbS[b];
       t := c * Power(10.0, -o / 10.0);
       if AModel.WidthS[b] > 0 then t := t / AModel.WidthS[b] else t := 0.0;
-      if t < AModel.AthLinS[b] then t := AModel.AthLinS[b];
+      if t < AModel.AthLinS[b] * AAthScale then t := AModel.AthLinS[b] * AAthScale;
       AResult.Xmin[b][w] := t;
     end;
   AResult.EstBits := PsyEstimateBitsShort(AModel, AResult.Energy, AResult.Xmin);
@@ -506,7 +507,7 @@ begin
 end;
 
 procedure PsyAnalyse(const AModel: TPsyModel; const AXr: T576;
-  out AResult: TPsyResult);
+  out AResult: TPsyResult; AAthScale: Double);
 var
   b, k, i, lo, cnt: Integer;
   e, avg, sumLog, sumLin, sfm, a, c, o, t: Double;
@@ -552,7 +553,7 @@ begin
     if o < AModel.MinValDb[b] then o := AModel.MinValDb[b];
     t := c * Power(10.0, -o / 10.0);
     if AModel.Width[b] > 0 then t := t / AModel.Width[b] else t := 0.0;
-    if t < AModel.AthLin[b] then t := AModel.AthLin[b];
+    if t < AModel.AthLin[b] * AAthScale then t := AModel.AthLin[b] * AAthScale;
     AResult.Xmin[b] := t;
   end;
 

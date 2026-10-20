@@ -82,6 +82,8 @@ delay 528 + padding y la duración queda exacta).
   −1.45 frente a −1.32) y 192 kbps (−0.18 frente a −0.13). Ideas: scfsi,
   estrategias de amplificación del bucle externo. Probado sin ventaja: redondeo
   al nivel más cercano (adj43).
-- VBR: a V5–V9 da más bitrate que LAME en música desde el cambio de M/S
-  (recalibrar NOISE_DB); con voz, menos bits y peor calidad.
+- VBR: recalibrado tras M/S y con umbral absoluto adaptativo (gránulos
+  silenciosos, solo VBR): bitrates como LAME en las cinco piezas; V2 medio
+  −0.91 → −0.62 (LAME −0.29). Por detrás en música 2 y batería (umbral de los
+  transitorios en modo calidad).
 - VBR con voz: usa menos bits que LAME y la calidad cae en proporción.

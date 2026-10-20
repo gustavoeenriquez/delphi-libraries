@@ -80,18 +80,25 @@ cuantización más gruesa cuyo ruido queda bajo el umbral psicoacústico desplaz
 la calidad, y la trama toma el bitrate más bajo que, con el reservorio, aloja esos
 bits. El archivo lleva cabecera Xing (VBR) con número de tramas, bytes, tabla de
 búsqueda real y extensión LAME (gapless). La escala de calidad está calibrada para
-quedar cerca de los bitrates de LAME en música estéreo (kbps / ODG de PEAQ):
+quedar cerca de los bitrates de LAME (kbps / ODG de PEAQ):
 
-| Calidad | música 1 | LAME | música 2 | LAME | voz | LAME |
-|---|---|---|---|---|---|---|
-| V0 | 239 / 0.09 | 232 / 0.06 | 256 / −0.38 | 244 / −0.07 | 72 / −0.90 | 114 / −0.03 |
-| V2 | 197 / −0.12 | 180 / −0.26 | 202 / −0.86 | 191 / −0.27 | 58 / −1.55 | 87 / −0.25 |
-| V4 | 155 / −0.84 | 150 / −0.94 | 155 / −1.66 | 155 / −1.06 | 46 / −2.15 | 70 / −0.73 |
-| V6 | 125 / −1.83 | 121 / −1.79 | 124 / −2.55 | 103 / −2.34 | 39 / −2.59 | 51 / −1.80 |
-| V9 | 91 / −3.05 | 80 / −3.09 | 105 / −2.72 | 75 / −2.65 | 36 / −2.76 | 37 / −2.55 |
+| Calidad | música 1 | LAME | música 2 | LAME | voz | LAME | batería | LAME | castañuelas | LAME |
+|---|---|---|---|---|---|---|---|---|---|---|
+| V0 | 230 / 0.07 | 232 / 0.06 | 253 / −0.39 | 244 / −0.07 | 105 / −0.16 | 114 / −0.03 | 92 / −0.51 | 143 / 0.01 | 144 / −0.05 | 140 / −0.08 |
+| V2 | 184 / −0.27 | 180 / −0.26 | 194 / −0.96 | 191 / −0.27 | 81 / −0.67 | 87 / −0.25 | 76 / −0.85 | 84 / −0.22 | 103 / −0.37 | 104 / −0.43 |
+| V4 | 153 / −0.91 | 150 / −0.94 | 158 / −1.63 | 155 / −1.06 | 66 / −1.44 | 70 / −0.73 | 63 / −1.29 | 67 / −0.43 | 82 / −0.47 | 77 / −0.43 |
+| V6 | 114 / −2.40 | 121 / −1.79 | 114 / −2.77 | 103 / −2.34 | 48 / −2.57 | 51 / −1.80 | 49 / −2.25 | 52 / −1.37 | 36 / −0.84 | 44 / −0.89 |
+| V9 | 79 / −3.44 | 80 / −3.09 | 81 / −3.27 | 75 / −2.65 | 41 / −3.04 | 37 / −2.55 | 39 / −2.39 | 41 / −2.58 | 33 / −0.86 | 36 / −1.80 |
 
-Con voz el VBR usa menos bits que LAME y la calidad cae en proporción: el umbral
-psicoacústico subestima lo que necesita la voz.
+Recalibrada el 2026-10-20 tras el cambio de M/S, y con umbral absoluto adaptativo:
+en los gránulos silenciosos (pausas de la voz, finales) el umbral absoluto baja
+hasta 20 dB, porque el oyente sube el volumen y ese detalle se oye. Sin él la voz
+quedaba a 54 kbps con −1.75 en V2 (pausas con 4 dB de SNR; LAME 25 dB). Solo en
+VBR: en CBR los gránulos silenciosos ya reciben bits sobrantes y bajar el umbral
+les quita reservorio a los transitorios (castañuelas −0.39 → −0.77 a 96 kbps).
+Ahora los bitrates siguen a los de LAME en las cinco piezas; la calidad queda a la
+par en música 1 y castañuelas y por detrás en música 2 y batería (el umbral de los
+transitorios en modo calidad).
 
 ## Corrección del joint stereo (2026-10-20)
 

@@ -127,6 +127,7 @@ type
     Vbr       : Boolean;
     VbrQuality: Integer;   { 0 (best) .. 9 }
     VbrNoiseScale: Double; { allowed noise x this factor }
+    AthAdapt  : Boolean;   { absolute threshold lowered in quiet granules (VBR) }
     LastBrIdx : Integer;   { bitrate index of the last encoded frame }
     BrHist    : array[1..14] of Integer;  { frames per bitrate index }
     TargBits  : Integer;   { mean main-data bits per granule per channel }
@@ -240,6 +241,17 @@ const
   ISQRT2 = 0.70710678118654752;
   EST_SCALE_LONG  = 2.5;   { bit demand estimate -> coded bits, long blocks }
   EST_SCALE_SHORT = 4.0;   { idem, short blocks }
+  { adaptive absolute threshold (VBR): granules whose MDCT energy (the larger
+    channel) is under ATH_ADAPT_REF_DB get the threshold lowered by
+    ATH_ADAPT_SLOPE dB per dB, at most ATH_ADAPT_MAX_DB.  The fixed threshold
+    assumes a full-scale sine at 96 dB SPL; quiet passages (pauses in speech,
+    fades) would then sit at the threshold and be dropped, which a listener
+    turning the volume up hears.  In CBR the quiet granules get spare bits
+    anyway and lowering the threshold there takes the reservoir away from
+    the transients, so it is used in VBR only. }
+  ATH_ADAPT_REF_DB = -15.0;
+  ATH_ADAPT_SLOPE  = 2.0;
+  ATH_ADAPT_MAX_DB = 20.0;
 
 type
   TFrameXr = array[0..ENC_GRANULES - 1, 0..1] of T576;
@@ -339,13 +351,14 @@ const
   EQ_KBPS: array[0..9] of Integer = (256, 224, 192, 176, 160, 128, 112, 96, 80, 64);
   { allowed noise relative to the masking threshold (dB); calibrated so that
     stereo music lands near the bitrates of LAME -V0 .. -V9 }
-  NOISE_DB: array[0..9] of Double = (0, 2, 4, 6, 8, 9.5, 11, 11.5, 12, 12.5);
+  NOISE_DB: array[0..9] of Double = (0.8, 2.9, 5.2, 6.4, 8.3, 10.7, 12.2, 13.1, 13.1, 14.1);
 var
   kb: Integer;
 begin
   AQuality := EnsureRange(AQuality, 0, 9);
   AEnc.Vbr := True;
   AEnc.VbrQuality := AQuality;
+  AEnc.AthAdapt := True;
   AEnc.VbrNoiseScale := Power(10.0, NOISE_DB[AQuality] / 10.0);
   EncEnableReservoir(AEnc, True);
   kb := EQ_KBPS[AQuality];
@@ -619,7 +632,8 @@ var
   spec  : TPsyShortSpec;
   tmpL  : TPsyBandArr;
   tmpS  : TPsyShortArr;
-  v     : Double;
+  v, lv : Double;
+  athSc : array[0..ENC_GRANULES - 1] of Double;
 begin
   AP := Default(TFramePsy);
   n := ENC_GRANULES * AEnc.Channels;
@@ -642,16 +656,33 @@ begin
         for j := AEnc.LowpassLine to QUANT_GRANULE - 1 do AXr[g][c][j] := 0.0;
     end;
 
+  { adaptive absolute threshold (VBR): lowered in quiet granules }
+  for g := 0 to ENC_GRANULES - 1 do begin
+    athSc[g] := 1.0;
+    if not AEnc.AthAdapt then Continue;
+    v := 0.0;
+    for c := 0 to AEnc.Channels - 1 do begin
+      lv := 0.0;
+      for j := 0 to QUANT_GRANULE - 1 do lv := lv + Sqr(AXr[g][c][j]);
+      if lv > v then v := lv;
+    end;
+    v := ATH_ADAPT_SLOPE * (10.0 * Log10(v + 1e-20) - ATH_ADAPT_REF_DB);
+    if v > 0.0 then v := 0.0;
+    if v < -ATH_ADAPT_MAX_DB then v := -ATH_ADAPT_MAX_DB;
+    athSc[g] := Power(10.0, v / 10.0);
+  end;
+
   { psychoacoustic analysis of every granule / channel }
   for k := 0 to n - 1 do begin
     g := k div AEnc.Channels; c := k mod AEnc.Channels;
     if AEnc.BlockType[g] = 2 then begin
       ShortToSpec(AEnc.Cfg.SrIdx, AXr[g][c], spec);
-      PsyAnalyseShort(AEnc.Psy, spec, psyS[k]);
+      PsyAnalyseShort(AEnc.Psy, spec, psyS[k], athSc[g]);
     end else begin
-      PsyAnalyse(AEnc.Psy, AXr[g][c], psyR[k]);
-      if AEnc.PsyFFT then PsyApplyRatio(AEnc.Psy, AEnc.PsyRatio[g][c], psyR[k]);
+      PsyAnalyse(AEnc.Psy, AXr[g][c], psyR[k], athSc[g]);
+      if AEnc.PsyFFT then PsyApplyRatio(AEnc.Psy, AEnc.PsyRatio[g][c], psyR[k], athSc[g]);
     end;
+    if (AEnc.BlockType[g] <> 2) and (GetEnvironmentVariable('TONDBG') = '1') then Writeln('TON ', psyR[k].Tonality:0:3, ' ', psyR[k].EstBits:0:0); {DBG}
   end;
   if AMS and (AEnc.Channels = 2) then begin
     { L = (M + S)/sqrt2 and R = (M - S)/sqrt2: the noise energies of M and S
@@ -674,7 +705,7 @@ begin
         for c := 0 to 1 do begin
           ShortToSpec(AEnc.Cfg.SrIdx, AXr[g][c], spec);
           tmpS := psyS[g * 2 + c].Xmin;
-          PsyAnalyseShort(AEnc.Psy, spec, psyS[g * 2 + c]);
+          PsyAnalyseShort(AEnc.Psy, spec, psyS[g * 2 + c], athSc[g]);
           for j := 0 to QUANT_SFB_SMAX - 1 do
             for w := 0 to 2 do
               psyS[g * 2 + c].Xmin[j][w] := Min(psyS[g * 2 + c].Xmin[j][w], tmpS[j][w]);
@@ -688,8 +719,8 @@ begin
         end;
         for c := 0 to 1 do begin
           tmpL := psyR[g * 2 + c].Xmin;
-          PsyAnalyse(AEnc.Psy, AXr[g][c], psyR[g * 2 + c]);
-          if AEnc.PsyFFT then PsyApplyRatio(AEnc.Psy, AEnc.PsyRatio[g][2 + c], psyR[g * 2 + c]);
+          PsyAnalyse(AEnc.Psy, AXr[g][c], psyR[g * 2 + c], athSc[g]);
+          if AEnc.PsyFFT then PsyApplyRatio(AEnc.Psy, AEnc.PsyRatio[g][2 + c], psyR[g * 2 + c], athSc[g]);
           for j := 0 to PSY_BANDS - 1 do
             psyR[g * 2 + c].Xmin[j] := Min(psyR[g * 2 + c].Xmin[j], tmpL[j]);
           psyR[g * 2 + c].EstBits := PsyEstimateBits(AEnc.Psy, psyR[g * 2 + c].Energy, psyR[g * 2 + c].Xmin);

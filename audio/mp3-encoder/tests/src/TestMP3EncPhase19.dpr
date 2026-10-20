@@ -128,6 +128,8 @@ begin
   PsyAnalyse(M, Xr, R);
   Check('PS10 silence: xmin = ATH', Abs(R.Xmin[6] - M.AthLin[6]) < 1e-20);
   Check('PS11 silence: no bit demand', R.EstBits = 0);
+  PsyAnalyse(M, Xr, R, 0.01);
+  Check('PS21 adaptive ATH: silence xmin = ATH x scale', Abs(R.Xmin[6] - M.AthLin[6] * 0.01) < 1e-22);
 
   Xr[24] := 0.5;   { ~1 kHz line, sfb 6 at 48 kHz }
   PsyAnalyse(M, Xr, R);

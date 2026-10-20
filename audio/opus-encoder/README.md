@@ -6,26 +6,34 @@ Salida: paquetes Opus crudos (RTP, RFC 7587) o un flujo Ogg Opus (RFC 7845).
 
 Es obra derivada de libopus (BSD de Xiph.Org y otros): ver [Licencia](#licencia).
 
-## Estado (E2 cerrada el 2026-10-20)
+## Estado (E3 cerrada el 2026-10-20: port completo)
 
 | Etapa | Contenido | Estado |
 |---|---|---|
 | **E1 – CELT** | `celt_encoder.c` completo (transitorios, prefiltro de pitch, MDCT, tf_select, spread, dynalloc, trim, energía Laplace con doble pasada, PVQ, theta RDO, intensity/dual stereo, CBR/VBR/CVBR), capa `opus_encoder.c` para modo CELT, repaquetizador (40/60 ms), relleno CBR, Ogg Opus | ✅ **byte a byte idéntico a libopus** |
 | **E2 – SILK** | encoder SILK float completo (`enc_API.c`, `encode_frame_FLP.c`: VAD, pitch, LPC/Burg, NLSF con trellis, LTP, análisis de ruido, NSQ y NSQ con decisión diferida, ganancias con control de tasa, LBRR/FEC in-band, DTX, estéreo mid/side, remuestreo y cambio de ancho de banda NB/MB/WB), y en `opus_encoder.c` los modos SILK e híbrido, `decide_fec`, el reparto SILK/CELT del híbrido, las transiciones con trama CELT redundante y el prefill | ✅ **byte a byte idéntico a libopus** |
-| E3 – Análisis | `analysis.c` + MLP (detección voz/música, ancho de banda detectado, actividad para DTX), regenerar vectores de complejidad ≥ 7 | pendiente |
+| **E3 – Análisis** | `analysis.c` + MLP (`mlp.c`, `mlp_data.c`): análisis tonal a 24 kHz con FFT de 480, probabilidad voz/música y de actividad (red densa + GRU), ancho de banda detectado, `leak_boost`/`max_pitch_ratio` para CELT; en `opus_encoder.c` la decisión de modo por `voice_ratio`, la reducción por ancho de banda detectado, la actividad para la DTX de Opus (con energía pico) y el análisis por subtrama en tramas largas | ✅ **byte a byte idéntico a libopus** |
 
-Hasta E3 no se ejecuta el análisis tonal (`analysis.c`), que libopus usa con
-complejidad ≥ 7 a ≥ 16 kHz: en esos casos la salida es la de libopus sin
-análisis (la estimación voz/música usa los valores por defecto de la
-aplicación). Todo lo demás —modos SILK, híbrido y CELT, decisiones de modo,
-ancho de banda y canales, FEC y DTX— ya es el de libopus.
+El encoder reproduce libopus 1.5.2 (build float por defecto) en todos sus
+caminos: CELT, SILK, híbrido, transiciones, FEC, DTX y análisis tonal. No
+incluye las extensiones experimentales que libopus deja desactivadas por
+defecto (DRED, OSCE, enmascaramiento de surround).
 
 ## Validación
 
 Oráculo: libopus 1.5.2 compilado en WSL (`tests/tools/build_oracle.sh`,
-`--disable-intrinsics`, configuración por defecto con `FLOAT_APPROX`), más una
-variante parcheada que descarta el resultado del análisis tonal para comparar
-complejidad 7–10. libopus **no** es dependencia de la librería.
+`--disable-intrinsics`, configuración por defecto con `FLOAT_APPROX`). Durante
+E1–E2 se usó además una variante parcheada que descarta el análisis tonal. libopus
+**no** es dependencia de la librería.
+
+### E3 (análisis tonal; validación del encoder completo)
+
+| Criterio | Resultado |
+|---|---|
+| (b) Fidelidad | **287.272 / 287.272 paquetes idénticos byte a byte** contra libopus normal (con su análisis): la matriz CELT de E1 completa (87.668), 210 configuraciones aleatorias SILK/híbrido/CELT/auto (162.526) y 44 dirigidas (37.078) que incluyen duración experta (`efd`, el análisis lee por delante de la trama), tramas de 80/100/120 ms, DTX con detección de actividad del MLP, API float y cambios de bitrate con decisiones voz/música |
+| (a) Validez | decodifican en libopus (`final_range` igual) y en el decoder del port |
+| (c) Calidad | PESQ idéntico a libopus por defecto (mismos bytes) |
+| (g) Plataformas | Win64 y Linux64: 57/57 pruebas con los mismos CRC32, y bytes idénticos entre plataformas en las 33 configuraciones dirigidas de E2 (ya con análisis activo) |
 
 ### E2 (SILK e híbrido)
 
@@ -41,7 +49,7 @@ complejidad 7–10. libopus **no** es dependencia de la librería.
 
 PESQ de voz (mismo archivo, VoIP, 20 ms, CVBR, complejidad 10):
 
-| Frecuencia | kbps | Este port (E2) | libopus por defecto | Este port en E1 (CELT) |
+| Frecuencia | kbps | Este port (E2, sin análisis) | libopus por defecto | Este port en E1 (CELT) |
 |---|---|---|---|---|
 | 16 kHz (WB) | 12 | 3,556 | 3,545 | 2,735 |
 | 16 kHz (WB) | 16 | 4,038 | 4,038 | 3,191 |
@@ -122,6 +130,8 @@ se eliminaron.
 | `OpusSilkEncDSP` | Primitivas float (`silk/float/*_FLP.c`: Burg, Schur, autocorrelación warped, …) y `pitch_analysis_core_FLP.c` |
 | `OpusSilkEncFLP` | Análisis float del encoder: pitch, forma de ruido, LPC/LTP, ganancias, envoltorios a punto fijo (`silk/float/`) |
 | `OpusSilkEnc` | `silk_Encode`/`silk_InitEncoder` (`enc_API.c`), `encode_frame_FLP.c` con LBRR y control de tasa, `control_*.c`, `init_encoder.c`, `HP_variable_cutoff.c` |
+| `OpusAnalysisTables` | Ventana, DCT, bandas y pesos del MLP (generadas con `tools/gen_analysis_tables.py` desde `analysis.c` y `mlp_data.c`) |
+| `OpusAnalysis` | Análisis tonal y MLP (`analysis.c`, `mlp.c`) |
 | `OpusRepacketizer` | `opus_packet_pad`, repaquetizador (`repacketizer.c`, `opus.c`) |
 | `OpusEncoder` | `TOpusEncoder` (`opus_encoder.c`) |
 | `OggOpusWriter` | `TOggOpusWriter` (RFC 7845) |
@@ -152,29 +162,34 @@ truncarse a 107374 como en C.
   calculan en un temporal `Single` antes de sumarse, como hace C; los
   acumuladores `double` de C son `Double`. Las constantes `SILK_FIX_CONST` se
   tomaron del compilador C (truncamiento, no redondeo).
+- **Análisis tonal.** Las comparaciones que C hace en `double` (p. ej.
+  `highE > lowE + 7.5`) se hacen en `Double`; las constantes derivadas de
+  `M_PI` (`(float)(.5f/M_PI)`, `40.f*16.f*pi4`) se tomaron del compilador C.
+  `opus_encode` analiza el PCM int16 original (`downmix_int`): el port lo
+  pasa como float x/32768, conversión exacta, así que el análisis ve los
+  mismos valores.
 - `silk_float2int` (`lrintf`) es `Round` (redondeo al par más cercano). Las
   conversiones a `opus_int8`/`opus_int16` de C se reproducen con `ShortInt`/
   `SmallInt` (envolviendo como en C).
 
 ## Pruebas
 
-- `tests/src/OpusEncoderTests.dpr` (53 pruebas): codificador de rango y PVQ
-  (ida y vuelta con el decoder del port), 12 vectores de referencia de libopus
+- `tests/src/OpusEncoderTests.dpr` (57 pruebas): codificador de rango y PVQ
+  (ida y vuelta con el decoder del port), 14 vectores de referencia de libopus
   1.5.2 sobre señales sintéticas deterministas (CRC32 de los paquetes y
-  `final_range`; 7 CELT y 5 SILK/híbrido, con LBRR, estéreo, 10/20/40 ms y
-  CBR), decodificación, CBR/VBR, instancias intercaladas (CELT, SILK,
+  `final_range`; 7 CELT, 5 SILK/híbrido con LBRR, estéreo, 10/20/40 ms y
+  CBR, y 2 donde el análisis tonal decide el modo), decodificación, CBR/VBR, instancias intercaladas (CELT, SILK,
   híbrido), Ogg Opus (pre-skip y recorte exacto del final), compatibilidad,
   CTLs y relleno.
 - `tests/tools/opus_oracle.c` + `build_oracle.sh`: oráculo libopus (WSL/Linux):
-  `encode` (con `brcyc=b1,b2,...,N` para cambiar el bitrate cada N tramas),
+  `encode` (con `brcyc=b1,b2,...,N` para cambiar el bitrate cada N tramas y
+  `efd=` para OPUS_SET_EXPERT_FRAME_DURATION),
   `decode` y `fecdec` (decodificación con pérdidas y `decode_fec`).
 - `tests/tools/OpusEncTool.dpr`: espejo del oráculo (`encode`, `decode`,
   `compare` paquete a paquete, `gensig`) para comparar byte a byte.
 - `tests/tools/lbrr_vectors.py` → `tests/vectors/lbrr/`: vectores de FEC in-band
   (ver su README).
 
-Los vectores de complejidad ≥ 7 a ≥ 16 kHz corresponden a libopus sin análisis
-tonal; habrá que regenerarlos con el oráculo normal al cerrar E3.
 
 ## Licencia
 

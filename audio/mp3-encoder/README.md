@@ -10,11 +10,11 @@ ODG de PEAQ básico (GstPEAQ; 0 = transparente, −4 = muy molesto) sobre cinco 
 de 4–30 s a 44,1 kHz (dos músicas estéreo, voz, batería estéreo, castañuelas),
 decodificando con ffmpeg y remuestreando a 48 kHz. Media de las cinco:
 
-| CBR | antes de las correcciones | modelo MDCT | + regiones Huffman | + reparto de bits (defecto) | LAME 3.100 |
-|---|---:|---:|---:|---:|---:|
-| 96 kbps | — | −1.62 | −1.59 | −1.49 | −1.32 |
-| 128 kbps | −1.35 | −1.03 | −1.00 | −0.90 | −0.76 |
-| 192 kbps | — | −0.40 | −0.38 | −0.28 | −0.13 |
+| CBR | antes de las correcciones | correcciones | + regiones Huffman | + reparto de bits | + M/S (defecto) | LAME 3.100 |
+|---|---:|---:|---:|---:|---:|---:|
+| 96 kbps | — | −1.62 | −1.59 | −1.49 | **−1.30** | −1.32 |
+| 128 kbps | −1.35 | −1.03 | −1.00 | −0.90 | **−0.76** | −0.76 |
+| 192 kbps | — | −0.40 | −0.38 | −0.28 | **−0.18** | −0.13 |
 
 (El modelo FFT opcional da −1.59 / −1.02 / −0.38 sin las dos últimas mejoras.)
 
@@ -34,6 +34,14 @@ gránulos con transitorios piden al reservorio lo que de verdad necesitan: la
 batería pasa de −0.82 a −0.33 a 128 kbps (LAME −0.14) y la media mejora 0.1 en los
 tres bitrates. VBR no cambia (cuantiza al umbral sin reparto).
 
+M/S: el modo automático usaba M/S solo si S era débil (E(S) ≤ 0.3 E(M)) y el modelo
+estimaba menos bits que para L/R; como los umbrales de M/S son el mínimo de los de
+L, R y el propio, esa estimación es pesimista y la música estéreo quedaba casi
+toda en L/R (LAME: M/S en ~95 % de los frames). Ahora se usa M/S salvo que
+necesite más del doble de bits que L/R, lo que deja L/R para los casos en que M/S
+cuesta de verdad (un canal casi mudo, cuyo silencio M/S llenaría con el ruido del
+otro). Música 1 a 128 kbps: −1.81 → −1.45; batería −0.33 → −0.12 (LAME −0.14).
+
 Las dos correcciones de esta fecha (ver la historia al final) son la mejora: los
 cuartetos count1 iban con el índice de la tabla invertido y ffmpeg descartaba
 frames cuando el modo de canal cambiaba entre stereo y joint stereo. El modelo
@@ -43,8 +51,9 @@ media en CBR, pero peor en la batería, y en VBR reparte peor los bits (da a la
 música densa demasiados pocos). Por eso no es el modelo por defecto. La distancia
 que queda con LAME no es del modelo psicoacústico: a igual tasa media, ni el
 modelo ni sus parámetros (TMN/NMT, minval, ATH, control de pre-eco) la cambian;
-está sobre todo en la música densa (música 1 a 128 kbps: −1.81 frente a −1.32)
-y en la eficiencia de codificación que queda (scfsi, redondeo del cuantizador).
+queda en la música densa a 128 kbps y más (música 1: −1.45 frente a −1.32; a
+192 kbps la media −0.18 frente a −0.13). Redondear al nivel de reconstrucción más
+cercano en vez del sesgo 0.4054 se probó y empeora (0.03).
 
 ## Conmutación de ventana y pre-eco (2026-10-20)
 
@@ -75,11 +84,11 @@ quedar cerca de los bitrates de LAME en música estéreo (kbps / ODG de PEAQ):
 
 | Calidad | música 1 | LAME | música 2 | LAME | voz | LAME |
 |---|---|---|---|---|---|---|
-| V0 | 240 / 0.02 | 232 / 0.06 | 252 / −0.49 | 244 / −0.07 | 74 / −0.90 | 114 / −0.03 |
-| V2 | 195 / −0.43 | 180 / −0.26 | 196 / −1.08 | 191 / −0.27 | 59 / −1.55 | 87 / −0.25 |
-| V4 | 150 / −1.58 | 150 / −0.94 | 150 / −2.28 | 155 / −1.06 | 47 / −2.15 | 70 / −0.73 |
-| V6 | 116 / −3.29 | 121 / −1.79 | 115 / −3.03 | 103 / −2.34 | 39 / −2.59 | 51 / −1.80 |
-| V9 | 83 / −3.66 | 80 / −3.09 | 88 / −3.39 | 75 / −2.65 | 36 / −2.76 | 37 / −2.55 |
+| V0 | 239 / 0.09 | 232 / 0.06 | 256 / −0.38 | 244 / −0.07 | 72 / −0.90 | 114 / −0.03 |
+| V2 | 197 / −0.12 | 180 / −0.26 | 202 / −0.86 | 191 / −0.27 | 58 / −1.55 | 87 / −0.25 |
+| V4 | 155 / −0.84 | 150 / −0.94 | 155 / −1.66 | 155 / −1.06 | 46 / −2.15 | 70 / −0.73 |
+| V6 | 125 / −1.83 | 121 / −1.79 | 124 / −2.55 | 103 / −2.34 | 39 / −2.59 | 51 / −1.80 |
+| V9 | 91 / −3.05 | 80 / −3.09 | 105 / −2.72 | 75 / −2.65 | 36 / −2.76 | 37 / −2.55 |
 
 Con voz el VBR usa menos bits que LAME y la calidad cae en proporción: el umbral
 psicoacústico subestima lo que necesita la voz.

@@ -28,8 +28,9 @@
   Stereo
     EncodeFrameStereo : independent L/R (FRAME_CH_STEREO)
     EncodeFrameMS     : mid/side on the MDCT lines (FRAME_CH_JOINT, ms_stereo)
-    EncodeFrameAuto   : MS when the side energy is small compared to mid,
-                        L/R otherwise; decided per frame.  Every frame
+    EncodeFrameAuto   : MS unless the psychoacoustic model expects it to
+                        need more than twice the bits of L/R (one channel
+                        nearly silent); decided per frame.  Every frame
                         says joint stereo in its header and only the
                         ms_stereo bit of mode_extension changes, as LAME
                         does: some decoders (ffmpeg) take a channel mode
@@ -137,7 +138,7 @@ type
     PsySt     : array[0..3] of TPsyFFTState;
     PsyRatio  : array[0..ENC_GRANULES - 1, 0..3] of TPsyBandArr;
     Loop      : TLoopState;
-    AutoMSThreshold : Double;  { EncodeFrameAuto uses MS when E(S) <= thr * E(M) }
+    AutoMSRatio : Double;  { EncodeFrameAuto uses MS unless its bit estimate exceeds ratio x L/R's }
     LowpassHz : Integer;       { MDCT lines above this frequency are zeroed (0 = none) }
     LowpassLine : Integer;     { first zeroed line (576 = none) }
     { bit reservoir and output queue }
@@ -264,7 +265,7 @@ begin
   if AChannels = 1 then siBits := FRAME_SIDEINFO_MONO else siBits := FRAME_SIDEINFO_STEREO;
   dataBits      := AEnc.FrameBytes * 8 - 32 - siBits;
   AEnc.TargBits := dataBits div (ENC_GRANULES * AChannels);
-  AEnc.AutoMSThreshold := 0.3;
+  AEnc.AutoMSRatio := 2.0;
   AEnc.LastChannelMode := FRAME_CH_MONO;
   AEnc.SwitchMode := EncDefaultWindowSwitching;
 
@@ -965,37 +966,28 @@ function EncodeFrameAuto(var AEnc: TMP3Encoder;
   const APCM_L, APCM_R: T1152): TBytes;
 var
   Xr, X1, X2: TFrameXr;
-  g, i: Integer;
-  eM, eS, l, r, estLR, estMS: Double;
+  i: Integer;
+  estLR, estMS: Double;
   P1, P2: TFramePsy;
-  useMS: Boolean;
 begin
-  eM := 0.0; eS := 0.0;
   AnalyseFrame(AEnc, APCM_L, APCM_R, Xr);
-  for g := 0 to ENC_GRANULES - 1 do begin
-    for i := 0 to QUANT_GRANULE - 1 do begin
-      l := Xr[g][0][i]; r := Xr[g][1][i];
-      eM := eM + Sqr(l + r);
-      eS := eS + Sqr(l - r);
-    end;
+  { M/S unless the model expects it to need far more bits than L/R.  The
+    M/S thresholds are the minimum of the L, R and own thresholds, so its
+    estimate is pessimistic: comparing the plain estimates kept M/S out of
+    most stereo music (PEAQ: 0.1-0.2 worse than always M/S), while a factor
+    of 2 still leaves L/R to the cases where M/S really costs, such as one
+    channel (nearly) silent, whose noise M/S would spread to the other. }
+  X1 := Xr; X2 := Xr;
+  FramePsy(AEnc, X1, False, P1);
+  FramePsy(AEnc, X2, True, P2);
+  estLR := 0.0; estMS := 0.0;
+  for i := 0 to ENC_GRANULES * 2 - 1 do begin
+    estLR := estLR + P1.Est[i];
+    estMS := estMS + P2.Est[i];
   end;
-  { MS only when the side signal is clearly weaker, and then only if the
-    psychoacoustic model expects fewer bits for M/S than for L/R }
-  useMS := eS <= AEnc.AutoMSThreshold * eM;
-  if useMS then begin
-    X1 := Xr; X2 := Xr;
-    FramePsy(AEnc, X1, False, P1);
-    FramePsy(AEnc, X2, True, P2);
-    estLR := 0.0; estMS := 0.0;
-    for i := 0 to ENC_GRANULES * 2 - 1 do begin
-      estLR := estLR + P1.Est[i];
-      estMS := estMS + P2.Est[i];
-    end;
-    useMS := estMS < estLR;
-  end;
-  if useMS then begin
-    Result := EncodeFrameCore(AEnc, Xr, FRAME_CH_JOINT, 2);
-  end else
+  if estMS <= AEnc.AutoMSRatio * estLR then
+    Result := EncodeFrameCore(AEnc, Xr, FRAME_CH_JOINT, 2)
+  else
     Result := EncodeFrameCore(AEnc, Xr, FRAME_CH_JOINT, 0);
 end;
 

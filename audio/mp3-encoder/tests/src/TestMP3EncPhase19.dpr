@@ -530,12 +530,21 @@ begin
   EncodeFrameAuto(Enc, PCM, PCM_R);
   Check('RV20 identical channels -> joint stereo (MS)', Enc.LastMS);
 
-  { uncorrelated channels -> L/R }
+  { one silent channel -> L/R (M/S would spread the noise of L into R) }
   EncInitStereo(Enc, Cfg);
-  for i := 0 to 1151 do begin PCM[i] := Sine(1000, 0.3, i) * 32768; PCM_R[i] := Sine(1500, 0.3, i) * 32768; end;
-  EncodeFrameAuto(Enc, PCM, PCM_R);
-  EncodeFrameAuto(Enc, PCM, PCM_R);
-  Check('RV25 uncorrelated channels -> L/R stereo', not Enc.LastMS);
+  EncEnableReservoir(Enc, True);
+  All := nil;
+  mdbMax := 0;
+  for f := 0 to NFR - 1 do begin
+    for i := 0 to 1151 do begin PCM[i] := Input[f * 1152 + i] * 32768; PCM_R[i] := 0; end;
+    AppendBytes(All, EncodeFrameAuto(Enc, PCM, PCM_R));
+    if Enc.LastMS then Inc(mdbMax);
+  end;
+  AppendBytes(All, EncFlush(Enc));
+  Check('RV25 one silent channel -> L/R stereo', mdbMax = 0);
+  n := DecodeMP3(All, Dec);
+  snr := 0; for i := 0 to n - 1 do snr := Max(snr, Abs(Dec[1][i]));
+  Check('RV31 one silent channel stays silent', (n = NFR * 1152) and (snr = 0));
 
   { low bitrate robustness: 32 kbps mono }
   Cfg.BrIdx := 1; EncInit(Enc, Cfg);

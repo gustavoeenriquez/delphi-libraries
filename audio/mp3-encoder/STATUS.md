@@ -68,6 +68,9 @@ delay 528 + padding y la duración queda exacta).
 - Reparto de bits: demanda estimada ×2.5 (largos) / ×4 (cortos), medido contra los
   bits reales en modo calidad. ODG medio 96/128/192: −1.49 / −0.90 / −0.28
   (batería a 128: −0.82 → −0.33).
+- M/S salvo que estime más del doble de bits que L/R (antes: solo si E(S) ≤
+  0.3 E(M) y menos bits): ODG medio 96/128/192 −1.30 / −0.76 / −0.18, a la par de
+  LAME (−1.32 / −0.76 / −0.13). Fase 19: RV25 (canal mudo → L/R) y RV31.
 
 ## Pendiente / ideas
 
@@ -75,7 +78,10 @@ delay 528 + padding y la duración queda exacta).
 - La decisión automática M/S por bits estimados no siempre elige el modo de
   mejor SNR (en ruido sintético ancho elige L/R aunque M/S conserva mejor S).
 - Intensity stereo; MPEG-2/2.5 (tasas bajas de muestreo).
-- Distancia con LAME (PEAQ, 128 kbps: −0.90 frente a −0.76): sobre todo música
-  densa (música 1: −1.81 frente a −1.32). Candidatos: scfsi, redondeo del
-  cuantizador (LAME usa adj43), estrategias de amplificación del bucle externo.
+- CBR ya a la par de LAME en la media; queda música densa (música 1 a 128 kbps
+  −1.45 frente a −1.32) y 192 kbps (−0.18 frente a −0.13). Ideas: scfsi,
+  estrategias de amplificación del bucle externo. Probado sin ventaja: redondeo
+  al nivel más cercano (adj43).
+- VBR: a V5–V9 da más bitrate que LAME en música desde el cambio de M/S
+  (recalibrar NOISE_DB); con voz, menos bits y peor calidad.
 - VBR con voz: usa menos bits que LAME y la calidad cae en proporción.

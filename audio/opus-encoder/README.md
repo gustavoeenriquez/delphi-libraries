@@ -34,7 +34,7 @@ complejidad 7–10. libopus **no** es dependencia de la librería.
 | (c) Calidad | PESQ igual a libopus forzado a CELT (diferencia 0,000 a 8 kHz; ≤ 0,03 a 16 kHz, donde libopus además corre su análisis tonal). Frente a libopus por defecto (SILK en VoIP) la voz a 12–32 kbps queda 0,4–0,9 MOS por debajo: es lo que aportará E2 |
 | (d) Bitrate | CBR: tamaño exacto en todos los paquetes. CVBR: desvío medio +0,3 % a +3,3 % del objetivo, idéntico a libopus |
 | (e) Instancias | 3 encoders intercalados producen exactamente los mismos bytes que por separado |
-| (g) Plataformas | Win64 (Debug y Release). Linux64: pendiente del SDK en Delphi 13 |
+| (g) Plataformas | Win64 (Debug y Release) y Linux64 (Delphi 13, SDK ubuntu24.04, ejecutado en WSL): 40/40 y los mismos CRC32/`final_range` en los 7 vectores de referencia, es decir, bytes idénticos entre plataformas |
 
 PESQ de voz (mismo archivo, VoIP, 20 ms, CVBR, complejidad 10):
 

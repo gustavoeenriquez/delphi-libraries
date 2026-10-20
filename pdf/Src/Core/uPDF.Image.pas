@@ -6,7 +6,8 @@ interface
 
 uses
   System.SysUtils, System.Classes, System.Math,
-  uPDF.Types, uPDF.Errors, uPDF.Objects, uPDF.Filters, uPDF.ColorSpace;
+  uPDF.Types, uPDF.Errors, uPDF.Objects, uPDF.Filters, uPDF.ColorSpace,
+  uPDF.CCITTFax;
 
 type
   // -------------------------------------------------------------------------
@@ -39,6 +40,7 @@ type
     // CCITT parameters (only relevant when Encoding = CCITT)
     CCITTKFactor:    Integer;     // K param: <0=Group4, 0=Group3-1D, >0=Group3-2D
     CCITTBlackIs1:   Boolean;     // BlackIs1 param (default false)
+    CCITTParams:     TCCITTFaxParams;  // all the /DecodeParms entries
 
     // Computed helpers
     function BytesPerRow: Integer;       // after decode, before ColorSpace conversion
@@ -56,6 +58,9 @@ type
     FInfo:       TPDFImageInfo;
     FSamples:    TBytes;   // decoded raw samples OR JPEG/CCITT bytes
     FSMask:      TPDFImage;  // optional soft-mask channel (owns)
+    // Takes APixels (CCITTFaxDecode output) as 1-bit samples when they have
+    // the image size
+    function AcceptCCITT(const APixels: TBytes): Boolean;
   public
     constructor Create;
     destructor  Destroy; override;
@@ -366,6 +371,77 @@ function TPDFImage.IsJPEG: Boolean; begin Result := FInfo.Encoding = TPDFImageEn
 // Fill TPDFImageInfo from a dict (shared between XObject and inline)
 // -------------------------------------------------------------------------
 
+// Filter list and /DecodeParms list of an image dict (inline abbreviations
+// included); AParms has one entry (possibly nil) per filter.
+procedure GetImageFilters(ADict: TPDFDictionary; out AFilters: TArray<string>;
+  out AParms: TArray<TObject>);
+begin
+  AFilters := nil;
+  AParms   := nil;
+  var FilterObj := ADict.RawGet('Filter');
+  if FilterObj = nil then FilterObj := ADict.RawGet('F');
+  if FilterObj = nil then Exit;
+  FilterObj := FilterObj.Dereference;
+  if FilterObj.IsName then
+    AFilters := [FilterObj.AsName.TrimLeft(['/'])]
+  else if FilterObj.IsArray then
+  begin
+    var FA := TPDFArray(FilterObj);
+    SetLength(AFilters, FA.Count);
+    for var I := 0 to FA.Count - 1 do
+      AFilters[I] := FA.GetAsName(I).TrimLeft(['/']);
+  end;
+  SetLength(AParms, Length(AFilters));
+  var DPObj := ADict.RawGet('DecodeParms');
+  if DPObj = nil then DPObj := ADict.RawGet('DP');  // inline image abbreviation
+  if DPObj = nil then Exit;
+  DPObj := DPObj.Dereference;
+  if DPObj.IsDictionary then
+  begin
+    if Length(AParms) > 0 then AParms[0] := DPObj;
+  end
+  else if DPObj.IsArray then
+  begin
+    var DPA := TPDFArray(DPObj);
+    for var I := 0 to Min(DPA.Count, Length(AParms)) - 1 do
+      if DPA.Get(I).IsDictionary then
+        AParms[I] := DPA.Get(I);
+  end;
+end;
+
+// Encoding (from the last filter) and the CCITT parameters
+procedure FillImageEncoding(var AInfo: TPDFImageInfo; ADict: TPDFDictionary);
+var
+  Filters: TArray<string>;
+  Parms:   TArray<TObject>;
+begin
+  GetImageFilters(ADict, Filters, Parms);
+  var FilterName := '';
+  if Length(Filters) > 0 then FilterName := Filters[High(Filters)];
+
+  // Map filter to encoding
+  if FilterName.Contains('DCT') then
+    AInfo.Encoding := TPDFImageEncoding.JPEG
+  else if FilterName.Contains('JPX') then
+    AInfo.Encoding := TPDFImageEncoding.JPEG2000
+  else if FilterName.Contains('JBIG2') then
+    AInfo.Encoding := TPDFImageEncoding.JBIG2
+  else if FilterName.Contains('CCITTFax') or (FilterName = 'CCF') then
+    AInfo.Encoding := TPDFImageEncoding.CCITT
+  else
+    AInfo.Encoding := TPDFImageEncoding.Raw;
+
+  // SMask
+  AInfo.HasSMask := ADict.Contains('SMask');
+
+  // CCITT DecodeParms (those of the CCITT filter, the last one)
+  AInfo.CCITTParams := TCCITTFaxParams.Default;
+  if AInfo.Encoding = TPDFImageEncoding.CCITT then
+    AInfo.CCITTParams := CCITTParamsFromDict(Parms[High(Parms)]);
+  AInfo.CCITTKFactor  := AInfo.CCITTParams.K;
+  AInfo.CCITTBlackIs1 := AInfo.CCITTParams.BlackIs1;
+end;
+
 procedure FillImageInfoFromDict(var AInfo: TPDFImageInfo;
   ADict: TPDFDictionary; AResolver: IObjectResolver);
 begin
@@ -386,6 +462,7 @@ begin
     AInfo.ComponentCount := 1;
     AInfo.BitsPerComponent := 1;
     AInfo.ColorSpaceName := 'DeviceGray';
+    FillImageEncoding(AInfo, ADict);
     Exit;
   end;
 
@@ -416,67 +493,7 @@ begin
   else if AInfo.ColorSpaceName = 'DeviceCMYK' then AInfo.ComponentCount := 4
   else AInfo.ComponentCount := 3; // default
 
-  // Detect encoding from filter
-  var FilterObj := ADict.RawGet('Filter');
-  if FilterObj = nil then FilterObj := ADict.RawGet('F');
-  var FilterName := '';
-  if FilterObj <> nil then
-  begin
-    FilterObj := FilterObj.Dereference;
-    if FilterObj.IsName then
-      FilterName := FilterObj.AsName
-    else if FilterObj.IsArray then
-    begin
-      // Use outermost filter to determine encoding type
-      var FA := TPDFArray(FilterObj);
-      FilterName := FA.GetAsName(FA.Count - 1);
-    end;
-  end;
-
-  // Map filter to encoding
-  FilterName := FilterName.TrimLeft(['/']);
-  if FilterName.Contains('DCT') then
-    AInfo.Encoding := TPDFImageEncoding.JPEG
-  else if FilterName.Contains('JPX') then
-    AInfo.Encoding := TPDFImageEncoding.JPEG2000
-  else if FilterName.Contains('JBIG2') then
-    AInfo.Encoding := TPDFImageEncoding.JBIG2
-  else if FilterName.Contains('CCITTFax') or FilterName.Contains('CCF') then
-    AInfo.Encoding := TPDFImageEncoding.CCITT
-  else
-    AInfo.Encoding := TPDFImageEncoding.Raw;
-
-  // SMask
-  AInfo.HasSMask := ADict.Contains('SMask');
-
-  // CCITT DecodeParms (K, BlackIs1)
-  AInfo.CCITTKFactor  := 0;
-  AInfo.CCITTBlackIs1 := False;
-  if AInfo.Encoding = TPDFImageEncoding.CCITT then
-  begin
-    var DPObj := ADict.RawGet('DecodeParms');
-    if DPObj = nil then DPObj := ADict.RawGet('DP');  // inline image abbreviation
-    if DPObj <> nil then DPObj := DPObj.Dereference;
-    var DP: TPDFDictionary := nil;
-    if (DPObj <> nil) and DPObj.IsDictionary then
-      DP := TPDFDictionary(DPObj)
-    else if (DPObj <> nil) and DPObj.IsArray then
-    begin
-      // DecodeParms may be an array when multiple filters are stacked
-      var DPA := TPDFArray(DPObj);
-      for var I := 0 to DPA.Count - 1 do
-        if DPA.Get(I).IsDictionary then
-        begin
-          DP := TPDFDictionary(DPA.Get(I));
-          Break;
-        end;
-    end;
-    if DP <> nil then
-    begin
-      AInfo.CCITTKFactor  := DP.GetAsInteger('K', 0);
-      AInfo.CCITTBlackIs1 := DP.GetAsBoolean('BlackIs1', False);
-    end;
-  end;
+  FillImageEncoding(AInfo, ADict);
 end;
 
 // -------------------------------------------------------------------------
@@ -494,9 +511,15 @@ begin
 
   // Decode stream
   // JPEG: keep raw bytes; Skia decodes in DrawPDFImage.
-  // CCITT: keep raw bytes; we decode via WIC in Decode().
-  if Result.FInfo.Encoding in [TPDFImageEncoding.JPEG, TPDFImageEncoding.CCITT] then
+  // CCITT: the filter chain decodes it to 1-bit samples; if that fails
+  // (or /Columns does not match /Width), keep the raw bytes for Decode().
+  if Result.FInfo.Encoding = TPDFImageEncoding.JPEG then
     Result.FSamples := AStream.RawBytes
+  else if Result.FInfo.Encoding = TPDFImageEncoding.CCITT then
+  begin
+    if not Result.AcceptCCITT(AStream.DecodedBytes) then
+      Result.FSamples := AStream.RawBytes;
+  end
   else
     Result.FSamples := AStream.DecodedBytes;
 
@@ -528,27 +551,27 @@ begin
   begin
     // Apply filters (already decoded by lexer for simple cases)
     // For inline images with Flate/ASCII85, we need to decode here
-    var FilterObj := ADict.RawGet('Filter');
-    if FilterObj = nil then FilterObj := ADict.RawGet('F');
+    var Filters: TArray<string>;
+    var Parms:   TArray<TObject>;
+    GetImageFilters(ADict, Filters, Parms);
 
-    if FilterObj <> nil then
+    if Length(Filters) > 0 then
     begin
-      var FilterObj2 := FilterObj.Dereference;
-      var Filters: TArray<string>;
-      if FilterObj2.IsName then
-        Filters := [FilterObj2.AsName]
-      else if FilterObj2.IsArray then
-      begin
-        var FA := TPDFArray(FilterObj2);
-        SetLength(Filters, FA.Count);
-        for var I := 0 to FA.Count - 1 do
-          Filters[I] := FA.GetAsName(I);
-      end;
+      var Decoded: TBytes;
       try
-        Result.FSamples := TPDFFilterPipeline.Decode(AData, Filters, nil);
+        Decoded := TPDFFilterPipeline.Decode(AData, Filters, Parms);
       except
-        Result.FSamples := AData; // fallback: raw
+        Decoded := nil;
       end;
+      if Result.FInfo.Encoding = TPDFImageEncoding.CCITT then
+      begin
+        if not Result.AcceptCCITT(Decoded) then
+          Result.FSamples := AData;  // retried in Decode()
+      end
+      else if Decoded <> nil then
+        Result.FSamples := Decoded
+      else
+        Result.FSamples := AData; // fallback: raw
     end else
       Result.FSamples := AData;
   end;
@@ -558,9 +581,34 @@ end;
 // Decode  (called after construction if samples need post-processing)
 // -------------------------------------------------------------------------
 
+function TPDFImage.AcceptCCITT(const APixels: TBytes): Boolean;
+begin
+  Result := (FInfo.Width > 0) and (FInfo.Height > 0) and
+    (Length(APixels) = FInfo.Height * ((FInfo.Width + 7) div 8));
+  if not Result then Exit;
+  FSamples               := APixels;
+  FInfo.Encoding         := TPDFImageEncoding.Raw;
+  FInfo.BitsPerComponent := 1;
+  FInfo.ComponentCount   := 1;
+  if not FInfo.IsImageMask then
+    FInfo.ColorSpaceName := 'DeviceGray';
+end;
+
 procedure TPDFImage.Decode;
 begin
-  // Decode CCITT-compressed images via WIC (Windows only)
+  // CCITT data the filter chain could not decode: retry with the image
+  // size (files that omit /Columns), then via WIC (Windows only)
+  if FInfo.Encoding = TPDFImageEncoding.CCITT then
+  begin
+    var P := FInfo.CCITTParams;
+    P.Columns := FInfo.Width;
+    P.Rows    := FInfo.Height;
+    try
+      AcceptCCITT(CCITTFaxDecode(FSamples, P));
+    except
+      on ECCITTFaxError do ;
+    end;
+  end;
   {$IFDEF MSWINDOWS}
   if FInfo.Encoding = TPDFImageEncoding.CCITT then
   begin

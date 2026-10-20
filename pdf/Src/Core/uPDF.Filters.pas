@@ -6,7 +6,7 @@ interface
 
 uses
   System.SysUtils, System.Classes, System.ZLib,
-  uPDF.Types, uPDF.Errors;
+  uPDF.Types, uPDF.Errors, uPDF.CCITTFax;
 
 type
   // -------------------------------------------------------------------------
@@ -84,7 +84,7 @@ type
   end;
 
   // -------------------------------------------------------------------------
-  // CCITTFaxDecode  — stub (complex; full implementation in Phase 2+)
+  // CCITTFaxDecode  (Group 3 / Group 4 fax, decoder in uPDF.CCITTFax)
   // -------------------------------------------------------------------------
   TPDFCCITTFilter = class(TPDFFilter)
   public
@@ -128,10 +128,15 @@ procedure ApplyPNGPredictor(AInput: TStream; AOutput: TStream;
 procedure UndoPNGPredictor(AInput: TStream; AOutput: TStream;
   AColumns, AColors, ABitsPerComponent: Integer);
 
+// CCITTFaxDecode parameters from a /DecodeParms dictionary (TPDFDictionary
+// or nil); missing entries take the PDF defaults.
+function CCITTParamsFromDict(AParams: TObject): TCCITTFaxParams;
+
 implementation
 
 uses
-  System.Math;
+  System.Math,
+  uPDF.Objects;  // TPDFDictionary (implementation-only: uPDF.Objects uses this unit)
 
 // =========================================================================
 // Helpers
@@ -885,14 +890,40 @@ begin
 end;
 
 // =========================================================================
-// TPDFCCITTFilter — stub
+// TPDFCCITTFilter
 // =========================================================================
 
-procedure TPDFCCITTFilter.Decode(AInput: TStream; AOutput: TStream; AParams: TObject);
+function CCITTParamsFromDict(AParams: TObject): TCCITTFaxParams;
 begin
-  // TODO: Implement CCITT Group 3/4 decode
+  Result := TCCITTFaxParams.Default;
+  if not (AParams is TPDFDictionary) then Exit;
+  var D := TPDFDictionary(AParams);
+  Result.K                      := Integer(D.GetAsInteger('K', 0));
+  Result.Columns                := Integer(D.GetAsInteger('Columns', 1728));
+  Result.Rows                   := Integer(D.GetAsInteger('Rows', 0));
+  Result.EndOfLine              := D.GetAsBoolean('EndOfLine', False);
+  Result.EncodedByteAlign       := D.GetAsBoolean('EncodedByteAlign', False);
+  Result.EndOfBlock             := D.GetAsBoolean('EndOfBlock', True);
+  Result.BlackIs1               := D.GetAsBoolean('BlackIs1', False);
+  Result.DamagedRowsBeforeError := Integer(D.GetAsInteger('DamagedRowsBeforeError', 0));
+end;
+
+procedure TPDFCCITTFilter.Decode(AInput: TStream; AOutput: TStream; AParams: TObject);
+var
+  Data, Pixels: TBytes;
+begin
   AInput.Position := 0;
-  AOutput.CopyFrom(AInput, 0);
+  SetLength(Data, AInput.Size);
+  if Length(Data) > 0 then
+    AInput.ReadBuffer(Data[0], Length(Data));
+  try
+    Pixels := CCITTFaxDecode(Data, CCITTParamsFromDict(AParams));
+  except
+    on E: ECCITTFaxError do
+      raise EPDFFilterError.Create(E.Message);
+  end;
+  if Length(Pixels) > 0 then
+    AOutput.WriteBuffer(Pixels[0], Length(Pixels));
 end;
 
 procedure TPDFCCITTFilter.Encode(AInput: TStream; AOutput: TStream; AParams: TObject);

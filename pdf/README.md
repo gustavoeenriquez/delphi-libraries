@@ -621,13 +621,14 @@ PDFViewerControl1.ZoomFit;
 | `uPDF.Document` | `TPDFDocument` (open/create/save) · `TPDFPage` (geometry, resources, content stream) |
 | `uPDF.Crypto` | MD5, SHA-1, SHA-256/384/512, RC4, AES-128/256 primitives |
 | `uPDF.Encryption` | Standard security handler Rev 2/3/4/6 — RC4 + AES, user/owner auth |
-| `uPDF.Filters` | FlateDecode, ASCIIHex, ASCII85, LZW, RunLength, DCT (JPEG passthrough) |
+| `uPDF.Filters` | FlateDecode, ASCIIHex, ASCII85, LZW, RunLength, CCITTFax, DCT (JPEG passthrough) |
+| `uPDF.CCITTFax` | CCITT Group 3 / Group 4 fax decoder (T.4 / T.6) for `CCITTFaxDecode`: K < 0, 0, > 0, EOL / fill bits, `EncodedByteAlign`, `EndOfBlock`, `BlackIs1`, damaged-row recovery; pure Pascal, Win64 + Linux64 |
 | `uPDF.ContentStream` | Content-stream interpreter (all path/text/color/clip/transform/shading operators incl. `scn`/`SCN` pattern names and `sh` shading) |
 | `uPDF.GraphicsState` | Full graphics-state stack: CTM, colors, fonts, line params, clipping, pattern names |
 | `uPDF.ColorSpace` | DeviceGray/RGB/CMYK, CalGray/RGB, ICCBased, Indexed, Pattern, Separation |
 | `uPDF.Font` | Type0/1/3/TrueType + CIDFont: glyph widths, ToUnicode CMap, encoding maps |
 | `uPDF.FontCMap` | CMaps: predefined identities, embedded, Adobe-CNS1/GB1/Japan1/Korea1 |
-| `uPDF.Image` | `TPDFImage` — inline and XObject images; raw bytes + JPEG/Flate decode |
+| `uPDF.Image` | `TPDFImage` — inline and XObject images; raw bytes + JPEG/Flate/CCITT decode (CCITT image masks included; WIC kept as a Windows fallback) |
 | `uPDF.TextExtractor` | `TPDFTextExtractor` — fragments, line grouping, plain-text export |
 | `uPDF.ImageExtractor` | `TPDFImageExtractor` — enumerate and save embedded images per page |
 | `uPDF.TTFParser` | Binary TrueType/OpenType parser: tables `head`, `hhea`, `OS/2`, `cmap` (format 4), `hmtx`, `loca`, `glyf`; `CharToGlyph`, advance widths, embedding-permission check (`fsType`) |
@@ -671,7 +672,8 @@ PDFViewerControl1.ZoomFit;
 | TestTTFEmbeddedFont (widths, EncodeTextHex, CMap, subset bytes, PDF objects) | 51 ✅ |
 | TestPDFEmbeddedWriter (structure, content encoding, multi-page, conformance) | 40 ✅ |
 | TestDocumentSave (round-trip, page ops, metadata, LZW, encrypted save, pattern color space) | 76 ✅ |
-| **Total** | **398+ ✅** |
+| TestCCITT (hand-coded streams, 52 libtiff/MuPDF vectors, filter and `TPDFImage`; Win64 + Linux64) | 80 ✅ |
+| **Total** | **478+ ✅** |
 
 Run the tests:
 
@@ -684,7 +686,15 @@ msbuild pdf\Tests\TestAdvanced.dproj           /p:Config=Debug /p:Platform=Win64
 msbuild pdf\Tests\TestTTFParser.dproj          /p:Config=Debug /p:Platform=Win64
 msbuild pdf\Tests\TestTTFEmbeddedFont.dproj    /p:Config=Debug /p:Platform=Win64
 msbuild pdf\Tests\TestPDFEmbeddedWriter.dproj  /p:Config=Debug /p:Platform=Win64
+msbuild pdf\Tests\TestCCITT.dproj              /p:Config=Release /p:Platform=Win64
+msbuild pdf\Tests\TestCCITT.dproj              /p:Config=Release /p:Platform=Linux64
 ```
+
+The CCITT vectors in `Tests/data/ccitt` are regenerated with
+`python Tests/tools/gen_ccitt_vectors.py Tests/data/ccitt` (Pillow + PyMuPDF): libtiff
+encodes the fax data and MuPDF's `CCITTFaxDecode` output, checked against the source
+image, gives the expected SHA-1. The decoder was also compared with MuPDF on 2591
+CCITT images from 58 real scanned PDFs (all Group 4): identical filter output in every one.
 
 ---
 

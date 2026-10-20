@@ -7,6 +7,9 @@
     Polyphase analysis  (MP3EncPolyphase) : 32 PCM samples -> 32 subbands
     MDCT + antialias    (MP3EncMDCT)      : 36 subband samples -> 18 lines
     Psychoacoustics     (MP3EncPsy)       : allowed noise per scalefactor band
+                                            (on the MDCT lines; optionally
+                                            ISO model 2 on a 1024-point FFT
+                                            of the PCM for the long blocks)
     Noise shaping loop  (MP3EncLoop)      : global_gain + scalefactors so the
                                             Huffman data fits the bit budget
     Frame assembly      (MP3EncFrame)     : header + side info + main data
@@ -78,6 +81,13 @@ const
   ENC_DELAY          = 1104;  { analysis delay (528) + one granule of look-ahead }
   ENC_RESV_MAX_BITS  = 511 * 8;  { main_data_begin is a 9-bit byte offset }
   ENC_MAX_PART23     = 4095;     { part2_3_length is a 12-bit field }
+  ENC_PSY_HIST       = 2048;     { PCM history per channel for the FFT model }
+  { first history sample of the 1024-point FFT window of the granule being
+    transformed: the long MDCT of subband granules n-2 and n-1 is centred
+    1391.5 samples before the newest input sample (polyphase delay of
+    255.5 - 31 samples, half a subband block, one granule of look-ahead and
+    the granule itself) }
+  ENC_PSY_WIN0       = ENC_PSY_HIST - 1904;
 
 type
   T1152 = array[0..ENC_PCM_PER_FRAME - 1] of Double;
@@ -121,6 +131,11 @@ type
     TargBits  : Integer;   { mean main-data bits per granule per channel }
     FrameBytes: Integer;   { frame size in bytes }
     Psy       : TPsyModel;
+    { FFT psychoacoustic model (long blocks) of L, R, M and S }
+    PsyFFT    : Boolean;
+    PsyHist   : array[0..1, 0..ENC_PSY_HIST - 1] of Double;
+    PsySt     : array[0..3] of TPsyFFTState;
+    PsyRatio  : array[0..ENC_GRANULES - 1, 0..3] of TPsyBandArr;
     Loop      : TLoopState;
     AutoMSThreshold : Double;  { EncodeFrameAuto uses MS when E(S) <= thr * E(M) }
     LowpassHz : Integer;       { MDCT lines above this frequency are zeroed (0 = none) }
@@ -167,6 +182,12 @@ procedure EncSetWindowSwitching(var AEnc: TMP3Encoder; AMode: Integer);
 var
   { window switching mode given to every new encoder (EncInit*) }
   EncDefaultWindowSwitching: Integer = 0;
+  { psychoacoustic model of the long blocks for every new encoder:
+    0 = model on the MDCT lines (default), 1 = FFT model (ISO model 2).
+    Measured with PEAQ the two are on a par in CBR; the VBR quality scale
+    is calibrated for model 0 (model 1 gives tonal music more bits and
+    dense music fewer) }
+  EncDefaultPsyModel: Integer = 0;
 
 { Variable bitrate: AQuality 0 (best, ~230-260 kbps on stereo music) ..
   9 (smallest).  Enables the bit reservoir and sets a lowpass for the
@@ -232,7 +253,7 @@ end;
 
 procedure InitCommon(out AEnc: TMP3Encoder; const ACfg: TEncConfig; AChannels: Integer);
 var
-  dataBits, siBits: Integer;
+  dataBits, siBits, k: Integer;
 begin
   AEnc := Default(TMP3Encoder);
   AEnc.Cfg        := ACfg;
@@ -251,6 +272,8 @@ begin
   PolyphaseInit(AEnc.PolySt[0]);
   if AChannels > 1 then PolyphaseInit(AEnc.PolySt[1]);
   PsyInit(AEnc.Psy, ACfg.SrIdx);
+  AEnc.PsyFFT := EncDefaultPsyModel = 1;
+  for k := 0 to 3 do PsyFFTReset(AEnc.PsySt[k]);
   LoopInit(AEnc.Loop);
   { effective rate for the lowpass table: the LAME table is keyed by the
     total bitrate of a (joint) stereo stream; mono gets 1.5x its rate
@@ -462,6 +485,33 @@ begin
   end;
 end;
 
+{ FFT psychoacoustic model of the granule about to be transformed: the new
+  input granule AGr enters the PCM history, then the model runs on the
+  1024 samples centred on the MDCT of that granule (L and R; with stereo
+  also M and S, for mid/side coding). }
+procedure PsyGranule(var AEnc: TMP3Encoder; const APCM_L, APCM_R: T1152; AGr: Integer);
+var
+  ch, i: Integer;
+  buf: TPsyFFTBuf;
+begin
+  for ch := 0 to AEnc.Channels - 1 do begin
+    Move(AEnc.PsyHist[ch][576], AEnc.PsyHist[ch][0], (ENC_PSY_HIST - 576) * SizeOf(Double));
+    for i := 0 to 575 do
+      if ch = 0 then AEnc.PsyHist[0][ENC_PSY_HIST - 576 + i] := APCM_L[AGr * 576 + i]
+      else AEnc.PsyHist[1][ENC_PSY_HIST - 576 + i] := APCM_R[AGr * 576 + i];
+    for i := 0 to PSY_FFT_LONG - 1 do buf[i] := AEnc.PsyHist[ch][ENC_PSY_WIN0 + i];
+    PsyAnalyseFFT(AEnc.Psy, AEnc.PsySt[ch], buf, AEnc.PsyRatio[AGr][ch]);
+  end;
+  if AEnc.Channels = 2 then begin
+    for i := 0 to PSY_FFT_LONG - 1 do
+      buf[i] := (AEnc.PsyHist[0][ENC_PSY_WIN0 + i] + AEnc.PsyHist[1][ENC_PSY_WIN0 + i]) * ISQRT2;
+    PsyAnalyseFFT(AEnc.Psy, AEnc.PsySt[2], buf, AEnc.PsyRatio[AGr][2]);
+    for i := 0 to PSY_FFT_LONG - 1 do
+      buf[i] := (AEnc.PsyHist[0][ENC_PSY_WIN0 + i] - AEnc.PsyHist[1][ENC_PSY_WIN0 + i]) * ISQRT2;
+    PsyAnalyseFFT(AEnc.Psy, AEnc.PsySt[3], buf, AEnc.PsyRatio[AGr][3]);
+  end;
+end;
+
 { Analysis of one frame: the two new granules enter the look-ahead and the
   two granules before them are transformed into AXr. }
 procedure AnalyseFrame(var AEnc: TMP3Encoder; const APCM_L, APCM_R: T1152;
@@ -482,6 +532,7 @@ begin
       if late then AEnc.LatePrev := True;
     end;
     AEnc.BlockType[g] := DecideBlockType(AEnc, AEnc.ShortPrev, shortNew);
+    if AEnc.PsyFFT then PsyGranule(AEnc, APCM_L, APCM_R, g);
     for ch := 0 to AEnc.Channels - 1 do begin
       MDCTGranule(AEnc, ch, AEnc.BlockType[g], AXr[g][ch]);
       AEnc.SubOld[ch] := AEnc.SubPrev[ch];
@@ -594,8 +645,10 @@ begin
     if AEnc.BlockType[g] = 2 then begin
       ShortToSpec(AEnc.Cfg.SrIdx, AXr[g][c], spec);
       PsyAnalyseShort(AEnc.Psy, spec, psyS[k]);
-    end else
+    end else begin
       PsyAnalyse(AEnc.Psy, AXr[g][c], psyR[k]);
+      if AEnc.PsyFFT then PsyApplyRatio(AEnc.Psy, AEnc.PsyRatio[g][c], psyR[k]);
+    end;
   end;
   if AMS and (AEnc.Channels = 2) then begin
     { L = (M + S)/sqrt2 and R = (M - S)/sqrt2: the noise energies of M and S
@@ -633,6 +686,7 @@ begin
         for c := 0 to 1 do begin
           tmpL := psyR[g * 2 + c].Xmin;
           PsyAnalyse(AEnc.Psy, AXr[g][c], psyR[g * 2 + c]);
+          if AEnc.PsyFFT then PsyApplyRatio(AEnc.Psy, AEnc.PsyRatio[g][2 + c], psyR[g * 2 + c]);
           for j := 0 to PSY_BANDS - 1 do
             psyR[g * 2 + c].Xmin[j] := Min(psyR[g * 2 + c].Xmin[j], tmpL[j]);
           psyR[g * 2 + c].EstBits := PsyEstimateBits(AEnc.Psy, psyR[g * 2 + c].Energy, psyR[g * 2 + c].Xmin);

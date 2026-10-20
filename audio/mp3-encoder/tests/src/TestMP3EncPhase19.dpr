@@ -5,6 +5,7 @@
   automatic MS stereo and decode round trips through mp3-decoder.
 
   PS: MP3EncPsy      (ATH, Bark, spreading, thresholds, tonality)
+  PF: MP3EncPsy      (FFT model: partitions, tonal vs noise ratios)
   LP: MP3EncLoop     (scalefac_compress, loop budget, shaping, bit saving)
   RC: MP3EncRateCtrl (fast Huffman table choice)
   RV: MP3EncEncoder  (reservoir accounting, flush, lowpass, MS/LR, round trip)
@@ -145,6 +146,62 @@ begin
   s := 0; for b := 0 to PSY_BANDS - 1 do s := s + R.Energy[b];
   for i := 0 to 575 do s := s - Sqr(Xr[i]);
   Check('PS20 noise: energies sum to total', Abs(s) < 1e-9);
+end;
+
+{ FFT model: three granules (hop 576) of a signal, ratio of the last one. }
+procedure FFTRatio(const AM: TPsyModel; AKind: Integer; out ARatio: TPsyBandArr);
+var
+  St: TPsyFFTState;
+  Buf: TPsyFFTBuf;
+  g, i: Integer;
+begin
+  PsyFFTReset(St);
+  RandSeed := 11;
+  for g := 0 to 2 do begin
+    for i := 0 to PSY_FFT_LONG - 1 do
+      case AKind of
+        0: Buf[i] := 0.0;
+        1: Buf[i] := Sine(1000, 8000, g * 576 + i);
+      else Buf[i] := (Random - 0.5) * 16000;
+      end;
+    PsyAnalyseFFT(AM, St, Buf, ARatio);
+  end;
+end;
+
+procedure TestPsyFFT;
+var
+  M: TPsyModel;
+  RS, RT, RN: TPsyBandArr;
+  R: TPsyResult;
+  b: Integer;
+  ok: Boolean;
+begin
+  WriteLn('PF: MP3EncPsy FFT model');
+  PsyInit(M, 1);
+  Check('PF01 about 1/3 Bark partitions', (M.NPart > 50) and (M.NPart <= PSY_MAXPART));
+  Check('PF02 partitions cover the 512 lines', (M.PartLo[0] = 0) and (M.PartHi[M.NPart - 1] = PSY_FFT_LINES));
+  ok := True;
+  for b := 1 to PSY_BANDS - 1 do
+    if M.SfbFftLo[b] < M.SfbFftHi[b - 1] - 1 then ok := False;
+  Check('PF03 scalefactor bands map to increasing FFT lines', ok and (M.SfbFftHi[PSY_BANDS - 1] = PSY_FFT_LINES));
+
+  FFTRatio(M, 0, RS);
+  Check('PF04 silence: ratio 0', RS[6] = 0.0);
+  FFTRatio(M, 1, RT);
+  FFTRatio(M, 2, RN);
+  { 1 kHz is in sfb 6 at 48 kHz: a steady tone is predictable (tonal, ~29 dB
+    plus spreading), noise is not (6 dB, raised to minval = 24.5 - 8.5 Bark) }
+  Check('PF05 tone: threshold > 20 dB under the signal', (RT[6] > 0) and (RT[6] < 0.01));
+  Check('PF06 noise: threshold 10..20 dB under the signal', (RN[6] > 0.01) and (RN[6] < 0.1));
+  Check('PF07 noise more masking than tone', RN[6] > 10 * RT[6]);
+
+  { ratio applied to MDCT energies, ATH as the floor }
+  FillChar(R, SizeOf(R), 0);
+  R.Energy[6] := 0.25;
+  PsyApplyRatio(M, RN, R);
+  Check('PF08 apply: xmin = ratio * E / width', Abs(R.Xmin[6] - RN[6] * 0.25 / M.Width[6]) < 1e-15);
+  Check('PF09 apply: empty band at ATH', Abs(R.Xmin[12] - M.AthLin[12]) < 1e-20);
+  Check('PF10 apply: bit demand > 0', R.EstBits > 0);
 end;
 
 // ---------------------------------------------------------------------------
@@ -424,6 +481,42 @@ begin
   snr := SnrDb(Input, 0, Dec[0], ENC_DELAY + 529, 8 * 1152);
   WriteLn(Format('       32 kbps round trip SNR: %.1f dB', [snr]));
   Check('RV27 32k round trip SNR > 15 dB', (n = NFR * 1152) and (snr > 15));
+
+  { FFT psychoacoustic model: stereo (L, R, M and S analysed) and mono }
+  EncDefaultPsyModel := 1;
+  try
+    Cfg.BrIdx := 9; EncInitStereo(Enc, Cfg);
+    Check('RV28 FFT model selected', Enc.PsyFFT);
+    EncEnableReservoir(Enc, True);
+    All := nil;
+    for f := 0 to NFR - 1 do begin
+      for i := 0 to 1151 do begin
+        PCM[i]   := Input[f * 1152 + i] * 32768;
+        PCM_R[i] := InputR[f * 1152 + i] * 32768;
+      end;
+      AppendBytes(All, EncodeFrameAuto(Enc, PCM, PCM_R));
+    end;
+    AppendBytes(All, EncFlush(Enc));
+    n := DecodeMP3(All, Dec);
+    snr  := SnrDb(Input, 0, Dec[0], ENC_DELAY + 529, 8 * 1152);
+    snrR := SnrDb(InputR, 0, Dec[1], ENC_DELAY + 529, 8 * 1152);
+    WriteLn(Format('       FFT model stereo round trip SNR: L %.1f dB  R %.1f dB', [snr, snrR]));
+    Check('RV29 FFT model stereo round trip > 25 dB', (n = NFR * 1152) and (snr > 25) and (snrR > 25));
+    Cfg.BrIdx := 1; EncInit(Enc, Cfg);
+    EncEnableReservoir(Enc, True);
+    All := nil;
+    for f := 0 to NFR - 1 do begin
+      for i := 0 to 1151 do PCM[i] := Input[f * 1152 + i] * 32768;
+      AppendBytes(All, EncodeFrame(Enc, PCM));
+    end;
+    AppendBytes(All, EncFlush(Enc));
+    n := DecodeMP3(All, Dec);
+    snr := SnrDb(Input, 0, Dec[0], ENC_DELAY + 529, 8 * 1152);
+    WriteLn(Format('       FFT model 32 kbps round trip SNR: %.1f dB', [snr]));
+    Check('RV30 FFT model 32k round trip SNR > 15 dB', (n = NFR * 1152) and (snr > 15));
+  finally
+    EncDefaultPsyModel := 0;
+  end;
 end;
 
 // ---------------------------------------------------------------------------
@@ -435,6 +528,7 @@ begin
   GPassed := 0; GFailed := 0;
   try
     TestPsy;
+    TestPsyFFT;
     TestLoop;
     TestFastTables;
     TestEncoder;

@@ -57,12 +57,21 @@ delay 528 + padding y la duración queda exacta).
 - Fase 20 de tests (13 checks); fases 13, 18 y 19 actualizadas al nuevo retardo.
 - VBR: modo calidad por gránulo, bitrate mínimo por trama, cabecera Xing con TOC
   real y extensión LAME; calidades 0..9 calibradas contra LAME -V. Fase 21 (14 checks).
+- Evaluación con PEAQ (GstPEAQ). Corregidos el índice invertido de los cuartetos
+  count1 (6af75c4) y la alternancia stereo/joint stereo de la cabecera que hacía
+  descartar frames a ffmpeg (fbc120e): ODG medio a 128 kbps −1.35 → −1.03.
+- Modelo psicoacústico 2 de la ISO con FFT de 1024 puntos para bloques largos,
+  opcional (`EncDefaultPsyModel := 1`): a la par del modelo MDCT en CBR, peor
+  reparto en VBR. Fase 19 ampliada (PF01–PF10, RV28–RV30).
 
 ## Pendiente / ideas
 
 - ABR (bitrate medio objetivo).
 - La decisión automática M/S por bits estimados no siempre elige el modo de
   mejor SNR (en ruido sintético ancho elige L/R aunque M/S conserva mejor S).
-- Modelo psicoacústico con FFT y particiones más finas que las 22 bandas.
 - Intensity stereo; MPEG-2/2.5 (tasas bajas de muestreo).
-- Evaluación perceptual (PEAQ) además de la SNR.
+- Distancia con LAME (PEAQ, 128 kbps: −1.03 frente a −0.76): está en la
+  eficiencia de codificación, no en el modelo psicoacústico. Candidatos:
+  regiones Huffman óptimas por gránulo (hoy region0/1 fijas), scfsi, redondeo
+  del cuantizador y reparto de bits entre gránulos según la entropía perceptual.
+- VBR con voz: usa menos bits que LAME y la calidad cae en proporción.

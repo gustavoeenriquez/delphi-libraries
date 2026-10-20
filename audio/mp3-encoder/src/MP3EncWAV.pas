@@ -41,6 +41,7 @@ interface
 uses
   SysUtils,
   Classes,
+  System.Math,
   MP3EncEncoder,
   MP3EncID3,
   MP3EncID3v2,
@@ -112,6 +113,11 @@ function EncodeWAVStreamInfo(AWavIn, AMP3Out: TStream;
   extension (encoder delay = ENC_DELAY; padding = FrameCount*1152 - ENC_DELAY - TotalSamples). }
 function EncodeWAVStreamLame(AWavIn, AMP3Out: TStream;
   ABrIdx, APadding: Byte): Integer;
+
+{ Variable bitrate: AQuality 0 (best) .. 9 (smallest).  A Xing (VBR) header
+  frame with a seek table and the LAME gapless extension is prepended.
+  Returns the number of audio frames or -1 on error. }
+function EncodeWAVStreamVBR(AWavIn, AMP3Out: TStream; AQuality: Integer): Integer;
 
 implementation
 
@@ -381,8 +387,18 @@ end;
 
 // ---------------------------------------------------------------------------
 
+function EncodeWAVStreamEx(AWavIn, AMP3Out: TStream;
+  ABrIdx, APadding: Byte; AVbrQuality: Integer): Integer; forward;
+
 function EncodeWAVStream(AWavIn, AMP3Out: TStream;
   ABrIdx, APadding: Byte): Integer;
+begin
+  Result := EncodeWAVStreamEx(AWavIn, AMP3Out, ABrIdx, APadding, -1);
+end;
+
+{ AVbrQuality < 0: CBR at ABrIdx; 0..9: VBR }
+function EncodeWAVStreamEx(AWavIn, AMP3Out: TStream;
+  ABrIdx, APadding: Byte; AVbrQuality: Integer): Integer;
 var
   Reader : TWAVReader;
   Enc    : TMP3Encoder;
@@ -407,6 +423,7 @@ begin
   if Reader.Header.Channels >= 2 then begin
     EncInitStereo(Enc, Cfg);
     EncEnableReservoir(Enc, True);
+    if AVbrQuality >= 0 then EncEnableVBR(Enc, AVbrQuality);
     Result := 0;
     while WAVReaderReadFrameStereo(Reader, PCM_L, PCM_R, cnt) do begin
       Frame := EncodeFrameAuto(Enc, PCM_L, PCM_R);
@@ -423,6 +440,7 @@ begin
   end else begin
     EncInit(Enc, Cfg);
     EncEnableReservoir(Enc, True);
+    if AVbrQuality >= 0 then EncEnableVBR(Enc, AVbrQuality);
     Result := 0;
     while WAVReaderReadFrame(Reader, PCM, cnt) do begin
       Frame := EncodeFrame(Enc, PCM);
@@ -620,6 +638,92 @@ begin
     LTag.EncoderDelay   := ENC_DELAY;
     LTag.EncoderPadding := encPadding;
     LTag.VBRMethod      := LAME_VBR_CBR;
+    LTag.MusicLength    := Temp.Size;
+
+    if channels > 2 then channels := 2;
+    LameWriteFrame(AMP3Out, Cfg, channels, XTag, LTag);
+    Temp.Position := 0;
+    AMP3Out.CopyFrom(Temp, Temp.Size);
+  finally
+    Temp.Free;
+  end;
+end;
+
+// ---------------------------------------------------------------------------
+
+{$POINTERMATH ON}
+{ Byte offset of every MPEG1 Layer III frame in AData (header walk). }
+function FrameOffsets(const AData: TMemoryStream): TArray<Integer>;
+const
+  KBPS_TAB: array[0..15] of Integer = (0, 32, 40, 48, 56, 64, 80, 96, 112, 128, 160, 192, 224, 256, 320, 0);
+  SRT: array[0..3] of Integer = (44100, 48000, 32000, 0);
+var
+  p, len, br, sr: Integer;
+  b: PByte;
+begin
+  Result := nil;
+  b := AData.Memory;
+  p := 0;
+  while p + 4 <= AData.Size do begin
+    if (b[p] <> $FF) or ((b[p + 1] and $E0) <> $E0) then Break;
+    br := KBPS_TAB[b[p + 2] shr 4];
+    sr := SRT[(b[p + 2] shr 2) and 3];
+    if (br = 0) or (sr = 0) then Break;
+    len := 144000 * br div sr + ((b[p + 2] shr 1) and 1);
+    SetLength(Result, Length(Result) + 1);
+    Result[High(Result)] := p;
+    Inc(p, len);
+  end;
+end;
+
+function EncodeWAVStreamVBR(AWavIn, AMP3Out: TStream; AQuality: Integer): Integer;
+var
+  Reader      : TWAVReader;
+  Cfg         : TEncConfig;
+  XTag        : TXingTag;
+  LTag        : TLameTag;
+  Temp        : TMemoryStream;
+  ofs         : TArray<Integer>;
+  srIdx, channels, totalSamples, encPadding, i, f: Integer;
+begin
+  Result := -1;
+  if not WAVReaderOpen(AWavIn, Reader) then Exit;
+  srIdx := WAVSrIdx(Reader.Header.SampleRate);
+  if srIdx < 0 then Exit;
+  channels     := Reader.Header.Channels;
+  totalSamples := Reader.Header.SampleCount;
+  { the header frame itself: 128 kbps holds the Xing and LAME data in mono and stereo }
+  Cfg.SrIdx   := srIdx;
+  Cfg.BrIdx   := 9;
+  Cfg.Padding := 0;
+
+  AWavIn.Position := 0;
+  Temp := TMemoryStream.Create;
+  try
+    Result := EncodeWAVStreamEx(AWavIn, Temp, 9, 0, AQuality);
+    if Result < 0 then Exit;
+    encPadding := Result * 1152 - totalSamples - ENC_DELAY;
+    if encPadding < 0 then encPadding := 0;
+
+    { seek table: byte position (x 256 / size) of the frame at each percent }
+    ofs := FrameOffsets(Temp);
+    XTag            := Default(TXingTag);
+    XTag.IsVBR      := True;
+    XTag.Flags      := XING_FLAG_FRAMES or XING_FLAG_BYTES
+                     or XING_FLAG_TOC   or XING_FLAG_QUALITY;
+    XTag.FrameCount := Length(ofs);
+    XTag.FileSize   := Temp.Size;
+    XTag.Quality    := AQuality * 10;
+    for i := 0 to 99 do
+      if Length(ofs) > 0 then begin
+        f := (i * Length(ofs)) div 100;
+        XTag.TOC[i] := Min(255, Int64(ofs[f]) * 256 div Max(Temp.Size, 1));
+      end;
+
+    LTag                := Default(TLameTag);
+    LTag.EncoderDelay   := ENC_DELAY;
+    LTag.EncoderPadding := encPadding;
+    LTag.VBRMethod      := LAME_VBR_VBR;
     LTag.MusicLength    := Temp.Size;
 
     if channels > 2 then channels := 2;

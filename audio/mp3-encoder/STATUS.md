@@ -55,10 +55,12 @@ delay 528 + padding y la duración queda exacta).
 - Bucles: si ni con global_gain 255 caben los bits, el intento se descarta
   (antes devolvía más bits que el presupuesto → "main data overflow").
 - Fase 20 de tests (13 checks); fases 13, 18 y 19 actualizadas al nuevo retardo.
+- VBR: modo calidad por gránulo, bitrate mínimo por trama, cabecera Xing con TOC
+  real y extensión LAME; calidades 0..9 calibradas contra LAME -V. Fase 21 (14 checks).
 
 ## Pendiente / ideas
 
-- VBR/ABR (el bucle ya ahorra bits; faltaría la lógica de tasa).
+- ABR (bitrate medio objetivo).
 - La decisión automática M/S por bits estimados no siempre elige el modo de
   mejor SNR (en ruido sintético ancho elige L/R aunque M/S conserva mejor S).
 - Modelo psicoacústico con FFT y particiones más finas que las 22 bandas.

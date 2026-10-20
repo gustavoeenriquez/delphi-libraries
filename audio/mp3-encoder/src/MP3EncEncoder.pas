@@ -37,6 +37,14 @@
     attack (last third of the granule, where the start window is zero) only
     makes the next granule short.  Both channels share the block type.
 
+  VBR (EncEnableVBR)
+    Every granule is quantized in "quality mode": the coarsest quantization
+    whose noise stays under the psychoacoustic threshold, shifted by the VBR
+    quality (0 best .. 9 smallest files).  The frame then gets the lowest
+    bitrate index whose main data, together with the bit reservoir, holds
+    those bits.  When even 320 kbps is not enough the frame is coded as CBR
+    at 320 kbps.
+
   PCM input: 1152 samples per channel per call, oldest first, +-32768 scale.
   Encoder delay: ENC_DELAY (1104) samples (polyphase + MDCT overlap + one
   granule of look-ahead for the window switching).
@@ -100,6 +108,12 @@ type
     BlockType : array[0..ENC_GRANULES - 1] of Integer;  { of the frame being coded }
     SwitchMode: Integer;   { 0 = automatic, 1 = always long, 2 = always short }
     ShortGranules: Integer;  { statistics: granules coded with short blocks }
+    { VBR }
+    Vbr       : Boolean;
+    VbrQuality: Integer;   { 0 (best) .. 9 }
+    VbrNoiseScale: Double; { allowed noise x this factor }
+    LastBrIdx : Integer;   { bitrate index of the last encoded frame }
+    BrHist    : array[1..14] of Integer;  { frames per bitrate index }
     TargBits  : Integer;   { mean main-data bits per granule per channel }
     FrameBytes: Integer;   { frame size in bytes }
     Psy       : TPsyModel;
@@ -148,6 +162,11 @@ procedure EncSetWindowSwitching(var AEnc: TMP3Encoder; AMode: Integer);
 var
   { window switching mode given to every new encoder (EncInit*) }
   EncDefaultWindowSwitching: Integer = 0;
+
+{ Variable bitrate: AQuality 0 (best, ~230-260 kbps on stereo music) ..
+  9 (smallest).  Enables the bit reservoir and sets a lowpass for the
+  quality.  The configured BrIdx is ignored (each frame picks its own). }
+procedure EncEnableVBR(var AEnc: TMP3Encoder; AQuality: Integer);
 
 { Default lowpass frequency (Hz) for a stream bitrate (kbps, LAME table;
   mono streams pass 1.5x their bitrate).  0 = no lowpass. }
@@ -281,6 +300,29 @@ end;
 procedure EncSetWindowSwitching(var AEnc: TMP3Encoder; AMode: Integer);
 begin
   AEnc.SwitchMode := AMode;
+end;
+
+procedure EncEnableVBR(var AEnc: TMP3Encoder; AQuality: Integer);
+const
+  { equivalent (stereo) bitrate of each quality, for the lowpass table }
+  EQ_KBPS: array[0..9] of Integer = (256, 224, 192, 176, 160, 128, 112, 96, 80, 64);
+  { allowed noise relative to the masking threshold (dB); calibrated so that
+    stereo music lands near the bitrates of LAME -V0 .. -V9 }
+  NOISE_DB: array[0..9] of Double = (0, 2, 4, 6, 8, 9.5, 11, 11.5, 12, 12.5);
+var
+  kb: Integer;
+begin
+  AQuality := EnsureRange(AQuality, 0, 9);
+  AEnc.Vbr := True;
+  AEnc.VbrQuality := AQuality;
+  AEnc.VbrNoiseScale := Power(10.0, NOISE_DB[AQuality] / 10.0);
+  EncEnableReservoir(AEnc, True);
+  kb := EQ_KBPS[AQuality];
+  if AEnc.Channels = 1 then kb := kb * 3 div 4;
+  if AEnc.Channels = 1 then
+    EncSetLowpass(AEnc, EncDefaultLowpassHz(kb * 3 div 2))
+  else
+    EncSetLowpass(AEnc, EncDefaultLowpassHz(kb));
 end;
 
 procedure EncEnableReservoir(var AEnc: TMP3Encoder; AEnable: Boolean);
@@ -613,7 +655,8 @@ function EncodeFrameCore(var AEnc: TMP3Encoder; var AXr: TFrameXr;
 var
   n, k, g, c, siBits, regionBytes, mainBits: Integer;
   pool, nominal, carry, remaining, spare, extra, want, over, maxb, minb, used: Integer;
-  usedTotal, usedBytes, newResv, stuffing, j: Integer;
+  usedTotal, usedBytes, newResv, stuffing, j, brIdx, padding, b, w: Integer;
+  vbrDone: Boolean;
   est   : array[0..3] of Double;
   targ  : array[0..3] of Double;
   xmin  : array[0..3] of TPsyBandArr;
@@ -629,15 +672,50 @@ begin
   Result := nil;
   n := ENC_GRANULES * AEnc.Channels;
   if AEnc.Channels = 1 then siBits := FRAME_SIDEINFO_MONO else siBits := FRAME_SIDEINFO_STEREO;
-  regionBytes := AEnc.FrameBytes - 4 - siBits div 8;
-  mainBits    := regionBytes * 8;
+  brIdx   := AEnc.Cfg.BrIdx;
+  padding := AEnc.Cfg.Padding;
 
   FramePsy(AEnc, AXr, (AChannelMode = FRAME_CH_JOINT) and (AEnc.Channels = 2), FP);
   for k := 0 to n - 1 do begin
     est[k] := FP.Est[k];
     xmin[k] := FP.Xmin[k];
     xminS[k] := FP.XminS[k];
+    if AEnc.Vbr then begin
+      for j := 0 to PSY_BANDS - 1 do xmin[k][j] := xmin[k][j] * AEnc.VbrNoiseScale;
+      for j := 0 to QUANT_SFB_SMAX - 1 do
+        for w := 0 to 2 do xminS[k][j][w] := xminS[k][j][w] * AEnc.VbrNoiseScale;
+    end;
   end;
+
+  SI := Default(TFrameSideInfo);
+  vbrDone := False;
+  usedTotal := 0;
+  if AEnc.Vbr then begin
+    { quality mode: the fewest bits that keep the noise under the threshold }
+    padding := 0;
+    for k := 0 to n - 1 do begin
+      g := k div AEnc.Channels; c := k mod AEnc.Channels;
+      if AEnc.BlockType[g] = 2 then
+        used := LoopEncodeGranuleShort(AEnc.Loop, AEnc.QState, AXr[g][c], xminS[k],
+          ENC_MAX_PART23, 0, AEnc.Cfg.SrIdx, SI.Gr[g][c], AEnc.LastStats[g][c])
+      else
+        used := LoopEncodeGranule(AEnc.Loop, AEnc.QState, AXr[g][c], xmin[k],
+          ENC_MAX_PART23, 0, AEnc.Cfg.SrIdx, SI.Gr[g][c], AEnc.LastStats[g][c], AEnc.BlockType[g]);
+      Inc(usedTotal, used);
+    end;
+    { lowest bitrate whose frame (plus the reservoir) holds them }
+    for b := 1 to 14 do
+      if AEnc.ResvBits + (EncFrameBytes(b, AEnc.Cfg.SrIdx, 0) - 4 - siBits div 8) * 8 >= usedTotal then begin
+        brIdx := b; vbrDone := True; Break;
+      end;
+    if not vbrDone then begin
+      brIdx := 14;            { too many bits even at 320 kbps: CBR at 320 }
+      SI := Default(TFrameSideInfo);
+      usedTotal := 0;
+    end;
+  end;
+  regionBytes := EncFrameBytes(brIdx, AEnc.Cfg.SrIdx, padding) - 4 - siBits div 8;
+  mainBits    := regionBytes * 8;
 
   { nominal bit targets proportional to the estimated demand }
   mean := mainBits / n;
@@ -653,11 +731,10 @@ begin
   for k := 0 to n - 1 do targ[k] := targ[k] * mainBits / sumT;
 
   { encode granules sequentially; unused bits flow to the next ones }
-  SI := Default(TFrameSideInfo);
   SI.MainDataBegin := AEnc.ResvBits div 8;
   pool  := AEnc.ResvBits + mainBits;
   carry := 0;
-  usedTotal := 0;
+  if not vbrDone then
   for k := 0 to n - 1 do begin
     g := k div AEnc.Channels; c := k mod AEnc.Channels;
     nominal := Round(targ[k]) + carry;
@@ -703,9 +780,11 @@ begin
   FCfg.VersionBits     := FRAME_VER_MPEG1;
   FCfg.LayerBits       := FRAME_LAY_III;
   FCfg.ProtectionBit   := FRAME_NO_CRC;
-  FCfg.BitrateIndex    := AEnc.Cfg.BrIdx;
+  FCfg.BitrateIndex    := brIdx;
   FCfg.SamplerateIndex := AEnc.Cfg.SrIdx;
-  FCfg.Padding         := AEnc.Cfg.Padding;
+  FCfg.Padding         := padding;
+  AEnc.LastBrIdx := brIdx;
+  Inc(AEnc.BrHist[brIdx]);
   FCfg.ChannelMode     := AChannelMode;
   FCfg.ModeExt         := AModeExt;
   FCfg.Original        := 1;

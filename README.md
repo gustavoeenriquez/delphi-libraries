@@ -51,7 +51,7 @@ permissive **BSD 3-clause** license (see [Upstream attributions](#upstream-attri
 | `audio/g722-codec` | ✅ | ✅ | ITU-T G.722 SB-ADPCM, 16 kHz, 64/56/48 kbit/s, bit-exact vs ITU test vectors |
 | `audio/g729-codec` | ✅ | ✅ | ITU-T G.729 Annex A + Annex B decoder (SID/comfort noise), 8 kbit/s, written from the Recommendation text (floating point, interoperable, not bit-exact) |
 | `audio/audio-codec` | ✅ | — | Unified `IAudioDecoder` factory (auto-detect format) |
-| `audio/mp3-encoder` | — | ✅ | MPEG-1 Layer III CBR, mono/stereo/joint, short blocks (window switching), bit reservoir |
+| `audio/mp3-encoder` | — | ✅ | MPEG-1 Layer III CBR/VBR, mono/stereo/joint, short blocks (window switching), bit reservoir, Xing/LAME tag |
 
 ### Test coverage
 

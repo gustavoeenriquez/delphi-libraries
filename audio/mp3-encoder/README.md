@@ -21,6 +21,26 @@ ffmpeg; menor es mejor; LAME 3.100 como referencia):
 En música y voz reales los bloques cortos se activan en 1.7–7 % de los gránulos
 (LAME: 0.1–3.5 %).
 
+## VBR (2026-10-20)
+
+`EncEnableVBR(Enc, Calidad)` (0 = mejor … 9 = archivos más pequeños, como `-V` de
+LAME) o `EncodeWAVFileVBR` / `EncodeWAVStreamVBR`. Cada gránulo se cuantiza con la
+cuantización más gruesa cuyo ruido queda bajo el umbral psicoacústico desplazado por
+la calidad, y la trama toma el bitrate más bajo que, con el reservorio, aloja esos
+bits. El archivo lleva cabecera Xing (VBR) con número de tramas, bytes, tabla de
+búsqueda real y extensión LAME (gapless). La escala de calidad está calibrada para
+quedar cerca de los bitrates de LAME en música estéreo:
+
+| Calidad | música 1 (kbps / SNR) | LAME | música 2 (kbps / SNR) | LAME |
+|---|---|---|---|---|
+| V0 | 240 / 28.9 dB | 232 / 27.9 dB | 252 / 46.6 dB | 244 / 36.6 dB |
+| V2 | 195 / 24.1 dB | 180 / 23.7 dB | 196 / 42.0 dB | 191 / 32.4 dB |
+| V4 | 150 / 17.8 dB | 150 / 20.7 dB | 150 / 34.3 dB | 155 / 29.8 dB |
+| V6 | 116 kbps | 121 kbps | 115 kbps | 102 kbps |
+| V9 | 82 kbps | 80 kbps | 88 kbps | 75 kbps |
+
+Con voz mono el VBR usa menos bits que LAME (V2: 59 frente a 87 kbps) con SNR mayor.
+
 ## Corrección del joint stereo (2026-10-20)
 
 Los umbrales de M/S se calculaban sobre M y S y se usaba el **mayor** para ambos:
@@ -54,7 +74,7 @@ Los archivos los decodifican sin errores ffmpeg y `mp3-decoder` (idénticos entr
 sí a 93 dB). La SNR no mide calidad perceptual; el modelo psicoacústico reparte
 el ruido bajo el umbral de enmascaramiento, como LAME.
 
-Limitaciones: solo MPEG-1 (32/44.1/48 kHz), sin VBR, sin intensity stereo,
+Limitaciones: solo MPEG-1 (32/44.1/48 kHz), sin ABR, sin intensity stereo,
 sin bloques mixtos. Partición psicoacústica = bandas de scalefactor (22 largas,
 13 × 3 cortas; no usa FFT independiente).
 
@@ -99,11 +119,13 @@ así que los decodificadores gapless (ffmpeg, LAME) recuperan la duración exact
 
 ## Tests
 
-`tests/src/TestMP3EncPhase1..20.dpr` (un programa por fase, 856 checks; la 19
+`tests/src/TestMP3EncPhase1..21.dpr` (un programa por fase, 870 checks; la 19
 cubre el modelo psicoacústico, el bucle, el reservorio, MS automático y round trips
 decodificados con `mp3-decoder`; la 20, bloques cortos (round trips solo cortos y
 automáticos, secuencia legal de ventanas, pre-eco frente a solo bloques largos,
-bucle corto) y la conservación del canal S en M/S). `../mp3-roundtrip` decodifica cualquier MP3
+bucle corto) y la conservación del canal S en M/S; la 21, VBR (tasas por trama,
+orden de tamaños por calidad, reservorio, round trips y cabecera Xing con tabla de
+búsqueda y datos gapless). `../mp3-roundtrip` decodifica cualquier MP3
 con `audio-codec` y lo vuelve a codificar.
 
 ## Historia de los errores corregidos (2026-10-13)

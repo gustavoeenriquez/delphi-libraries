@@ -464,7 +464,8 @@ var
   Tmp64: Int64;
   MinInv: Integer;
 begin
-  MinInv := Round((1.0 / SILK_MAX_PREDICTION_POWER_GAIN) * (Int64(1) shl 30) + 0.5);
+  // SILK_FIX_CONST(1.0f / MAX_PREDICTION_POWER_GAIN, 30): the C cast truncates -> 107374
+  MinInv := Trunc((1.0 / SILK_MAX_PREDICTION_POWER_GAIN) * (Int64(1) shl 30) + 0.5);
   InvGainQ30 := 1 shl 30;
   K := Order - 1;
   while K > 0 do

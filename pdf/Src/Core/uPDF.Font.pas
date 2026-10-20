@@ -6,7 +6,7 @@ interface
 
 uses
   System.SysUtils, System.Classes, System.Generics.Collections, System.Math,
-  uPDF.Types, uPDF.Errors, uPDF.Objects;
+  uPDF.Types, uPDF.Errors, uPDF.Objects, uPDF.StdFonts;
 
 type
   // -------------------------------------------------------------------------
@@ -124,15 +124,18 @@ type
   TPDFSimpleFont = class(TPDFFont)
   protected
     FEncoding:     TPDFFontEncodingKind;
+    FBaseEncoding: TPDFStdEncoding;               // codes not in Differences
     FDifferences:  TDictionary<Integer, string>;  // charcode → glyph name
-    FGlyphNameToUnicode: TDictionary<string, string>;
   public
     constructor Create; override;
     destructor  Destroy; override;
 
     procedure SetDifferences(ADiffs: TPDFDictionary);
+    // Glyph name of a code: Differences, then the base encoding ('' if unknown)
+    function  GlyphName(ACharCode: Integer): string;
     function  CharCodeToUnicode(ACharCode: Integer): string; override;
     property  Encoding: TPDFFontEncodingKind read FEncoding write FEncoding;
+    property  BaseEncoding: TPDFStdEncoding read FBaseEncoding write FBaseEncoding;
   end;
 
   TPDFType1Font   = class(TPDFSimpleFont);
@@ -206,6 +209,8 @@ type
       AResolver: IObjectResolver); static;
     class procedure LoadDescriptor(AFont: TPDFFont; ADescDict: TPDFDictionary;
       AResolver: IObjectResolver); static;
+    class procedure LoadSimpleEncoding(AFont: TPDFSimpleFont;
+      AFontDict: TPDFDictionary); static;
     class procedure LoadWidthsSimple(AFont: TPDFSimpleFont;
       AFontDict: TPDFDictionary); static;
     class procedure LoadWidthsCID(AFont: TPDFCIDFont;
@@ -351,45 +356,13 @@ end;
 constructor TPDFSimpleFont.Create;
 begin
   inherited;
-  FEncoding   := TPDFFontEncodingKind.Standard;
-  FDifferences := TDictionary<Integer, string>.Create;
-  // Build glyph name → Unicode table (Adobe Glyph List, partial)
-  FGlyphNameToUnicode := TDictionary<string, string>.Create;
-  // Most common entries:
-  FGlyphNameToUnicode.Add('space',     ' ');
-  FGlyphNameToUnicode.Add('period',    '.');
-  FGlyphNameToUnicode.Add('comma',     ',');
-  FGlyphNameToUnicode.Add('hyphen',    '-');
-  FGlyphNameToUnicode.Add('parenleft', '(');
-  FGlyphNameToUnicode.Add('parenright',')');
-  FGlyphNameToUnicode.Add('quotedbl',  '"');
-  FGlyphNameToUnicode.Add('quoteleft', #$2018);
-  FGlyphNameToUnicode.Add('quoteright',#$2019);
-  FGlyphNameToUnicode.Add('quotedblleft', #$201C);
-  FGlyphNameToUnicode.Add('quotedblright',#$201D);
-  FGlyphNameToUnicode.Add('endash',    #$2013);
-  FGlyphNameToUnicode.Add('emdash',    #$2014);
-  FGlyphNameToUnicode.Add('bullet',    #$2022);
-  FGlyphNameToUnicode.Add('ellipsis',  #$2026);
-  FGlyphNameToUnicode.Add('fi',        #$FB01);
-  FGlyphNameToUnicode.Add('fl',        #$FB02);
-  FGlyphNameToUnicode.Add('ae',        #$00E6);
-  FGlyphNameToUnicode.Add('AE',        #$00C6);
-  FGlyphNameToUnicode.Add('oe',        #$0153);
-  FGlyphNameToUnicode.Add('OE',        #$0152);
-  FGlyphNameToUnicode.Add('germandbls',#$00DF);
-  // a-z, A-Z map to themselves
-  for var C := Ord('a') to Ord('z') do
-    FGlyphNameToUnicode.TryAdd(Char(C), Char(C));
-  for var C := Ord('A') to Ord('Z') do
-    FGlyphNameToUnicode.TryAdd(Char(C), Char(C));
-  for var C := Ord('0') to Ord('9') do
-    FGlyphNameToUnicode.TryAdd(Char(C), Char(C));
+  FEncoding     := TPDFFontEncodingKind.Standard;
+  FBaseEncoding := TPDFStdEncoding.Standard;
+  FDifferences  := TDictionary<Integer, string>.Create;
 end;
 
 destructor TPDFSimpleFont.Destroy;
 begin
-  FGlyphNameToUnicode.Free;
   FDifferences.Free;
   inherited;
 end;
@@ -402,56 +375,23 @@ begin
   // Actual loading is done in TPDFFontFactory.Build
 end;
 
+function TPDFSimpleFont.GlyphName(ACharCode: Integer): string;
+begin
+  if not FDifferences.TryGetValue(ACharCode, Result) then
+    Result := StdEncodingGlyph(FBaseEncoding, ACharCode);
+end;
+
 function TPDFSimpleFont.CharCodeToUnicode(ACharCode: Integer): string;
 begin
   // Priority 1: ToUnicode CMap
   if FToUnicode.TryGetValue(ACharCode, Result) then Exit;
 
-  // Priority 2: Differences array → glyph name → AGL
-  var GlyphName: string;
-  if FDifferences.TryGetValue(ACharCode, GlyphName) then
-  begin
-    if FGlyphNameToUnicode.TryGetValue(GlyphName, Result) then Exit;
-    // Try parsing 'uniXXXX' or 'uXXXX' glyph names
-    if GlyphName.StartsWith('uni') and (Length(GlyphName) = 7) then
-    begin
-      var Hex := GlyphName.Substring(3);
-      var V: Integer;
-      if TryStrToInt('$' + Hex, V) then
-      begin
-        Result := Char(V);
-        Exit;
-      end;
-    end;
-    if GlyphName.StartsWith('u') and (Length(GlyphName) in [5, 6, 7]) then
-    begin
-      var Hex := GlyphName.Substring(1);
-      var V: Integer;
-      if TryStrToInt('$' + Hex, V) and (V >= $20) then
-      begin
-        Result := Char(V);
-        Exit;
-      end;
-    end;
-  end;
+  // Priority 2: glyph name (Differences or base encoding) → Adobe Glyph List
+  Result := GlyphNameToUnicode(GlyphName(ACharCode));
+  if Result <> '' then Exit;
 
-  // Priority 3: Encoding-based fallback
-  case FEncoding of
-    TPDFFontEncodingKind.WinAnsi,
-    TPDFFontEncodingKind.Standard:
-      if (ACharCode >= 32) and (ACharCode <= 255) then
-        Result := Char(ACharCode)
-      else
-        Result := '';
-    TPDFFontEncodingKind.MacRoman:
-    begin
-      // MacRoman high bytes differ from Latin-1; partial mapping
-      if ACharCode < 128 then Result := Char(ACharCode)
-      else Result := Char(ACharCode); // simplified
-    end;
-  else
-    Result := inherited CharCodeToUnicode(ACharCode);
-  end;
+  // Priority 3: unknown glyph name or no encoding — treat as Latin-1
+  Result := inherited CharCodeToUnicode(ACharCode);
 end;
 
 // =========================================================================
@@ -601,65 +541,25 @@ begin
 
   Subtype := AFontDict.GetAsName('Subtype');
 
-  if (Subtype = 'Type1') or (Subtype = 'MMType1') then
+  if (Subtype = 'Type1') or (Subtype = 'MMType1') or (Subtype = 'TrueType') then
   begin
-    var F := TPDFType1Font.Create;
-    F.FFontType := TPDFFontType.Type1;
-    F.FName     := AFontDict.GetAsName('BaseFont');
-    LoadWidthsSimple(F, AFontDict);
-    LoadToUnicode(F, AFontDict, AResolver);
-    EncObj := AFontDict.Get('Encoding');
-    if EncObj <> nil then
+    var F: TPDFSimpleFont;
+    if Subtype = 'TrueType' then
     begin
-      if EncObj.IsName then
-      begin
-        var EN := EncObj.AsName;
-        if EN = 'WinAnsiEncoding'    then F.FEncoding := TPDFFontEncodingKind.WinAnsi
-        else if EN = 'MacRomanEncoding' then F.FEncoding := TPDFFontEncodingKind.MacRoman
-        else F.FEncoding := TPDFFontEncodingKind.Standard;
-      end else if EncObj.IsDictionary then
-      begin
-        var EncDict := TPDFDictionary(EncObj);
-        var BaseEnc := EncDict.GetAsName('BaseEncoding');
-        if BaseEnc = 'WinAnsiEncoding'  then F.FEncoding := TPDFFontEncodingKind.WinAnsi
-        else if BaseEnc = 'MacRomanEncoding' then F.FEncoding := TPDFFontEncodingKind.MacRoman
-        else F.FEncoding := TPDFFontEncodingKind.Standard;
-        // Load Differences array
-        var DiffArr := EncDict.GetAsArray('Differences');
-        if DiffArr <> nil then
-        begin
-          var Code := 0;
-          for var I := 0 to DiffArr.Count - 1 do
-          begin
-            var Item := DiffArr.Items(I);
-            if Item.IsInteger then
-              Code := Item.AsInteger
-            else if Item.IsName then
-            begin
-              F.FDifferences.AddOrSetValue(Code, Item.AsName);
-              Inc(Code);
-            end;
-          end;
-          if F.FDifferences.Count > 0 then
-            F.FEncoding := TPDFFontEncodingKind.Differences;
-        end;
-      end;
+      F := TPDFTrueTypeFont.Create;
+      F.FFontType := TPDFFontType.TrueType;
+    end else
+    begin
+      F := TPDFType1Font.Create;
+      F.FFontType := TPDFFontType.Type1;
     end;
+    F.FName := AFontDict.GetAsName('BaseFont');
     DescObj := AFontDict.Get('FontDescriptor');
     if (DescObj <> nil) and DescObj.IsDictionary then
       LoadDescriptor(F, TPDFDictionary(DescObj), AResolver);
-    Result := F;
-  end
-  else if Subtype = 'TrueType' then
-  begin
-    var F := TPDFTrueTypeFont.Create;
-    F.FFontType := TPDFFontType.TrueType;
-    F.FName     := AFontDict.GetAsName('BaseFont');
-    LoadWidthsSimple(F, AFontDict);
     LoadToUnicode(F, AFontDict, AResolver);
-    DescObj := AFontDict.Get('FontDescriptor');
-    if (DescObj <> nil) and DescObj.IsDictionary then
-      LoadDescriptor(F, TPDFDictionary(DescObj), AResolver);
+    LoadSimpleEncoding(F, AFontDict);
+    LoadWidthsSimple(F, AFontDict);
     Result := F;
   end
   else if Subtype = 'Type3' then
@@ -741,8 +641,9 @@ begin
     var F := TPDFType1Font.Create;
     F.FFontType := TPDFFontType.Type1;
     F.FName     := AFontDict.GetAsName('BaseFont');
-    LoadWidthsSimple(F, AFontDict);
     LoadToUnicode(F, AFontDict, AResolver);
+    LoadSimpleEncoding(F, AFontDict);
+    LoadWidthsSimple(F, AFontDict);
     Result := F;
   end;
 end;
@@ -788,6 +689,91 @@ begin
   AFont.FDescriptor.FontFile3   := LoadFontFile('FontFile3');
 end;
 
+class procedure TPDFFontFactory.LoadSimpleEncoding(AFont: TPDFSimpleFont;
+  AFontDict: TPDFDictionary);
+const
+  SYMBOLIC    = 4;
+  NONSYMBOLIC = 32;
+
+  function NamedEncoding(const AName: string; out AKind: TPDFFontEncodingKind;
+    out ABase: TPDFStdEncoding): Boolean;
+  begin
+    Result := True;
+    if AName = 'WinAnsiEncoding' then
+    begin
+      AKind := TPDFFontEncodingKind.WinAnsi;
+      ABase := TPDFStdEncoding.WinAnsi;
+    end else if AName = 'MacRomanEncoding' then
+    begin
+      AKind := TPDFFontEncodingKind.MacRoman;
+      ABase := TPDFStdEncoding.MacRoman;
+    end else if AName = 'StandardEncoding' then
+    begin
+      AKind := TPDFFontEncodingKind.Standard;
+      ABase := TPDFStdEncoding.Standard;
+    end else
+      Result := False;
+  end;
+
+var
+  Kind: TPDFFontEncodingKind;
+  Base: TPDFStdEncoding;
+begin
+  // Implicit base encoding (ISO 32000-1, 9.6.6): the font's built-in one. For
+  // a Type1 font that is StandardEncoding unless it is Symbol/ZapfDingbats;
+  // symbolic TrueType fonts map codes straight to glyphs, and the other
+  // TrueType fonts are in practice written for WinAnsi.
+  var Std := StdFontIndex(AFont.FName);
+  if Std >= 0 then
+    AFont.FBaseEncoding := StdFontEncoding(Std)
+  else if AFont.FFontType <> TPDFFontType.TrueType then
+    AFont.FBaseEncoding := TPDFStdEncoding.Standard
+  else if (AFont.FDescriptor.Flags and SYMBOLIC <> 0) and
+          (AFont.FDescriptor.Flags and NONSYMBOLIC = 0) then
+    AFont.FBaseEncoding := TPDFStdEncoding.None
+  else
+    AFont.FBaseEncoding := TPDFStdEncoding.WinAnsi;
+  AFont.FEncoding := TPDFFontEncodingKind.Standard;
+
+  var EncObj := AFontDict.Get('Encoding');
+  if EncObj = nil then Exit;
+  if EncObj.IsName then
+  begin
+    if NamedEncoding(EncObj.AsName, Kind, Base) then
+    begin
+      AFont.FEncoding     := Kind;
+      AFont.FBaseEncoding := Base;
+    end;
+  end else if EncObj.IsDictionary then
+  begin
+    var EncDict := TPDFDictionary(EncObj);
+    if NamedEncoding(EncDict.GetAsName('BaseEncoding'), Kind, Base) then
+    begin
+      AFont.FEncoding     := Kind;
+      AFont.FBaseEncoding := Base;
+    end;
+    // Load Differences array
+    var DiffArr := EncDict.GetAsArray('Differences');
+    if DiffArr <> nil then
+    begin
+      var Code := 0;
+      for var I := 0 to DiffArr.Count - 1 do
+      begin
+        var Item := DiffArr.Items(I);
+        if Item.IsInteger then
+          Code := Item.AsInteger
+        else if Item.IsName then
+        begin
+          AFont.FDifferences.AddOrSetValue(Code, Item.AsName);
+          Inc(Code);
+        end;
+      end;
+      if AFont.FDifferences.Count > 0 then
+        AFont.FEncoding := TPDFFontEncodingKind.Differences;
+    end;
+  end;
+end;
+
 class procedure TPDFFontFactory.LoadWidthsSimple(AFont: TPDFSimpleFont;
   AFontDict: TPDFDictionary);
 begin
@@ -800,14 +786,32 @@ begin
   if (DescObj <> nil) and DescObj.IsDictionary then
     Missing := TPDFDictionary(DescObj).GetAsReal('MissingWidth', 0);
 
-  if WArr = nil then Exit;
-
   var Widths: TArray<Single>;
-  SetLength(Widths, WArr.Count);
-  for var I := 0 to WArr.Count - 1 do
-    Widths[I] := WArr.GetAsReal(I);
+  if (WArr <> nil) and (WArr.Count > 0) then
+  begin
+    SetLength(Widths, WArr.Count);
+    for var I := 0 to WArr.Count - 1 do
+      Widths[I] := WArr.GetAsReal(I);
+    AFont.FWidths := TPDFFontWidths.Create(FirstChar, LastChar, Widths, Missing);
+    Exit;
+  end;
 
-  AFont.FWidths := TPDFFontWidths.Create(FirstChar, LastChar, Widths, Missing);
+  // No /Widths: the 14 standard fonts take their AFM metrics (9.6.2.2); any
+  // other font is approximated by the standard font closest to its flags.
+  var Std := StdFontSubstitute(AFont.FDescriptor.Flags, AFont.FName);
+  SetLength(Widths, 256);
+  for var C := 0 to 255 do
+  begin
+    var G := AFont.GlyphName(C);
+    if (G = '') and (AFont.FBaseEncoding = TPDFStdEncoding.None) then
+      G := StdEncodingGlyph(StdFontEncoding(Std), C);
+    var W: Integer;
+    if (G <> '') and StdGlyphWidth(Std, G, W) then
+      Widths[C] := W
+    else
+      Widths[C] := Missing;
+  end;
+  AFont.FWidths := TPDFFontWidths.Create(0, 255, Widths, Missing);
 end;
 
 class procedure TPDFFontFactory.LoadWidthsCID(AFont: TPDFCIDFont;

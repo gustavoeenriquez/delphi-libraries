@@ -48,6 +48,7 @@ type
   TG729LsfState = record
     PrevL: array[0..3] of TLsf;   // l^(m-1) .. l^(m-4)
     LastMode: Integer;            // L0 of the last good frame
+    LastNoise: Boolean;           // last frame used the Annex B (SID) predictor
     procedure Init;
     procedure Push(const L: TLsf);
   end;
@@ -81,6 +82,17 @@ function LpToLsf(const A: TLpc; out W: TLsf): Boolean;
 procedure AdaptiveVector(Exc: PDouble; K, T: Integer);
 // Integer and fractional pitch parts -> (k, t) used by AdaptiveVector
 procedure PitchToKT(IntT, Frac: Integer; out K, T: Integer);
+
+// MA predictor coefficient p(i,k); Noise selects the Annex B SID predictor (B.18)
+function MaCoef(Noise: Boolean; Mode, K, I: Integer): Double;
+function MaSum(Noise: Boolean; Mode, I: Integer): Double;     // 1 - sum_k p(i,k)
+
+// Annex B SID frame (Table B.2): 15 bits + 1 zero bit in two octets
+procedure UnpackSid(Data: PByte; out L0, L1, L2, Gain: Integer);
+procedure PackSid(L0, L1, L2, Gain: Integer; Data: PByte);
+function SidGainDb(Index: Integer): Double;                   // B.4.2.1 levels, -12..66 dB
+function SidGainIndex(Db: Double): Integer;                   // nearest level
+procedure SidLsfDecode(var St: TG729LsfState; L0, L1, L2: Integer; out W: TLsf);
 
 procedure DecodeFixedCodebook(C, S: Integer; out Code: array of Double);
 procedure DecodePitch1(P1: Integer; out IntT, Frac: Integer);
@@ -163,6 +175,46 @@ begin
   W.Put(P.C2, 13); W.Put(P.S2, 4); W.Put(P.GA2, 3); W.Put(P.GB2, 4);
 end;
 
+procedure UnpackSid(Data: PByte; out L0, L1, L2, Gain: Integer);
+var
+  R: TBitReader;
+begin
+  R.Data := Data; R.Pos := 0;
+  L0 := R.Get(1); L1 := R.Get(5); L2 := R.Get(4); Gain := R.Get(5);
+end;
+
+procedure PackSid(L0, L1, L2, Gain: Integer; Data: PByte);
+var
+  W: TBitWriter;
+begin
+  FillChar(Data^, G729_SID_BYTES, 0);
+  W.Data := Data; W.Pos := 0;
+  W.Put(L0, 1); W.Put(L1, 5); W.Put(L2, 4); W.Put(Gain, 5);
+end;
+
+// 32 levels: -12 dB, then -4..16 dB in 4 dB steps, then 18..66 dB in 2 dB steps
+function SidGainDb(Index: Integer): Double;
+begin
+  if Index <= 0 then Result := -12
+  else if Index <= 6 then Result := -4 + 4 * (Index - 1)
+  else Result := 18 + 2 * (Index - 7);
+end;
+
+function SidGainIndex(Db: Double): Integer;
+var
+  I: Integer;
+  Best: Double;
+begin
+  Result := 0;
+  Best := MaxDouble;
+  for I := 0 to 31 do
+    if Abs(SidGainDb(I) - Db) < Best then
+    begin
+      Best := Abs(SidGainDb(I) - Db);
+      Result := I;
+    end;
+end;
+
 // Parity of the six most significant bits of the 8-bit index P1
 function PitchParity(P1: Integer): Integer;
 var
@@ -183,6 +235,7 @@ begin
     for I := 0 to G729_ORDER - 1 do
       PrevL[K][I] := (I + 1) * Pi / 11;
   LastMode := 0;
+  LastNoise := False;
 end;
 
 procedure TG729LsfState.Push(const L: TLsf);
@@ -231,16 +284,32 @@ begin
   if W[G729_ORDER - 1] > 3.135 then W[G729_ORDER - 1] := 3.135;
 end;
 
+function MaCoef(Noise: Boolean; Mode, K, I: Integer): Double;
+begin
+  if Noise and (Mode = 1) then
+    Result := (0.6 * MA_PRED[0][K][I] + 0.4 * MA_PRED[1][K][I]) / 32768
+  else
+    Result := MA_PRED[Mode][K][I] / 32768;
+end;
+
+function MaSum(Noise: Boolean; Mode, I: Integer): Double;
+var
+  K: Integer;
+begin
+  Result := 1;
+  for K := 0 to 3 do Result := Result - MaCoef(Noise, Mode, K, I);
+end;
+
 // Weighted sum of the current codeword and the MA memory (equation 20)
-procedure LsfPredict(const St: TG729LsfState; Mode: Integer; const L: TLsf; out W: TLsf);
+procedure LsfPredict(const St: TG729LsfState; Noise: Boolean; Mode: Integer; const L: TLsf; out W: TLsf);
 var
   I, K: Integer;
 begin
   for I := 0 to G729_ORDER - 1 do
   begin
-    W[I] := MA_PRED_SUM[Mode][I] / 32768 * L[I];
+    W[I] := MaSum(Noise, Mode, I) * L[I];
     for K := 0 to 3 do
-      W[I] := W[I] + MA_PRED[Mode][K][I] / 32768 * St.PrevL[K][I];
+      W[I] := W[I] + MaCoef(Noise, Mode, K, I) * St.PrevL[K][I];
   end;
 end;
 
@@ -255,9 +324,28 @@ begin
     L[I] := (LSPCB1[L1][I] + LSPCB2[L3][I]) / 8192;
   LsfRearrange(L, 0.0012);
   LsfRearrange(L, 0.0006);
-  LsfPredict(St, L0, L, W);
+  LsfPredict(St, False, L0, L, W);
   St.Push(L);
   St.LastMode := L0;
+  St.LastNoise := False;
+  LsfStabilize(W);
+end;
+
+procedure SidLsfDecode(var St: TG729LsfState; L0, L1, L2: Integer; out W: TLsf);
+var
+  L: TLsf;
+  I: Integer;
+begin
+  for I := 0 to 4 do
+    L[I] := (LSPCB1[SID_L1_PTR[L1]][I] + LSPCB2[SID_L2_PTR[0][L2]][I]) / 8192;
+  for I := 5 to 9 do
+    L[I] := (LSPCB1[SID_L1_PTR[L1]][I] + LSPCB2[SID_L2_PTR[1][L2]][I]) / 8192;
+  LsfRearrange(L, 0.0012);
+  LsfRearrange(L, 0.0006);
+  LsfPredict(St, True, L0, L, W);
+  St.Push(L);
+  St.LastMode := L0;
+  St.LastNoise := True;
   LsfStabilize(W);
 end;
 
@@ -271,8 +359,8 @@ begin
   begin
     S := W[I];
     for K := 0 to 3 do
-      S := S - MA_PRED[St.LastMode][K][I] / 32768 * St.PrevL[K][I];
-    L[I] := S / (MA_PRED_SUM[St.LastMode][I] / 32768);
+      S := S - MaCoef(St.LastNoise, St.LastMode, K, I) * St.PrevL[K][I];
+    L[I] := S / MaSum(St.LastNoise, St.LastMode, I);
   end;
   St.Push(L);
 end;

@@ -1,9 +1,12 @@
-"""Extract the numeric codebook tables of G.729 (TAB_LD8A.C, ITU-T) into a
-Pascal unit. Only numbers are taken; no code."""
+"""Extract the numeric codebook tables of G.729 (TAB_LD8A.C and the Annex B
+tab_dtx.c, ITU-T) into a Pascal unit. Only numbers are taken; no code.
+Usage: gentables.py TAB_LD8A.C G729Tables.pas tab_dtx.c"""
 import re, sys
 
 src, dst = sys.argv[1], sys.argv[2]
-s = open(src, encoding='latin-1').read().replace('\r', '')
+s = ''
+for f in [src] + sys.argv[3:]:
+    s += open(f, encoding='latin-1').read().replace('\r', '') + '\n'
 s = re.sub(r'/\*.*?\*/', '', s, flags=re.S)
 
 WANT = [
@@ -19,6 +22,10 @@ WANT = [
     ('map2', 'GB_MAP', (16,), 'GB index -> transmitted codeword'),
     ('imap1', 'GA_IMAP', (8,), 'Transmitted GA codeword -> index'),
     ('imap2', 'GB_IMAP', (16,), 'Transmitted GB codeword -> index'),
+    # Annex B (tab_dtx.c)
+    ('PtrTab_1', 'SID_L1_PTR', (32,), 'Annex B: SID first-stage index -> row of LSPCB1'),
+    ('PtrTab_2', 'SID_L2_PTR', (2, 16), 'Annex B: SID second-stage index -> rows of LSPCB2 (low part, high part)'),
+    ('lbf_corr', 'VAD_LBF_CORR', (13,), 'Annex B: autocorrelation of the VAD low-band filter, Q15'),
 ]
 
 def numbers(name):
@@ -50,9 +57,10 @@ unit = '''unit G729Tables;
   G729Tables.pas - Numeric tables of ITU-T G.729 / G.729 Annex A
 
   The Recommendation text does not list the codebook values; they are part
-  of the ITU-T reference material (file TAB_LD8A.C of the G.729 software
-  package, Release 3, (c) ITU-T and the original authors: AT&T, France
-  Telecom, NTT, Universite de Sherbrooke). Only the numbers are reproduced
+  of the ITU-T reference material (files TAB_LD8A.C and tab_dtx.c of the
+  G.729 software package, Release 3, (c) ITU-T and the original authors:
+  AT&T, France Telecom, NTT, Universite de Sherbrooke, Rockwell
+  International). Only the numbers are reproduced
   here, because bit-stream interoperability requires these exact values.
   Generated automatically; do not edit by hand.
 

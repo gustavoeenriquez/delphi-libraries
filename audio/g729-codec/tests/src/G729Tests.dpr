@@ -16,6 +16,9 @@ program G729Tests;
     T08  Decoder vs G.729A reference output (.BIT -> .PST), segmental SNR
     T09  Decoder accepts full G.729 bit streams (main-body vectors)
     T10  Encoder vs reference encoder: same quality with the same decoder
+  Annex B (decoder side):
+    T11  SID frames: comfort noise level follows the SID gain, frame types
+    T12  ITU Annex A+B streams (tstseq): speech SNR and comfort-noise level
 
   The codec is a floating-point implementation written from the text of the
   Recommendation; it is not bit-exact with the fixed-point reference, so the
@@ -173,6 +176,46 @@ begin
 end;
 
 { T01-T04 unit level }
+
+// Decodes an Annex B serial stream; Kinds receives one letter per frame
+// (S speech, D SID, N untransmitted, X erased) and Types the decoded type
+function DecodeSerialB(const Bits: TArray<SmallInt>; out Types: TArray<TG729FrameType>): TArray<SmallInt>;
+var
+  Dec: TG729Decoder;
+  Pos, Size, I, F: Integer;
+  Frame: array[0..9] of Byte;
+  Bad: Boolean;
+  FT: TG729FrameType;
+begin
+  Dec := TG729Decoder.Create;
+  try
+    Pos := 0; F := 0;
+    while Pos + 2 <= Length(Bits) do
+    begin
+      Size := Bits[Pos + 1];
+      SetLength(Result, (F + 1) * G729_FRAME);
+      SetLength(Types, F + 1);
+      FillChar(Frame, SizeOf(Frame), 0);
+      Bad := Word(Bits[Pos]) <> $6B21;
+      for I := 0 to Size - 1 do
+        case Word(Bits[Pos + 2 + I]) of
+          $81: if I < 80 then Frame[I shr 3] := Frame[I shr 3] or (128 shr (I and 7));
+          $7F: ;
+        else
+          Bad := True;
+        end;
+      if Bad then FT := g729Lost
+      else if Size = 80 then FT := g729Speech
+      else if Size = 16 then FT := g729SID
+      else FT := g729NoData;
+      Types[F] := Dec.DecodeFrame(FT, @Frame[0], @Result[F * G729_FRAME]);
+      Inc(Pos, 2 + Size);
+      Inc(F);
+    end;
+  finally
+    Dec.Free;
+  end;
+end;
 
 procedure TestT01_Bits;
 var
@@ -576,6 +619,116 @@ begin
   end;
 end;
 
+procedure TestT11_Sid;
+var
+  Enc: TG729Encoder;
+  Dec: TG729Decoder;
+  X, Y: TArray<SmallInt>;
+  Bits: TBytes;
+  Sid: array[0..1] of Byte;
+  Pay: array[0..21] of Byte;
+  F: Integer;
+  T: TG729FrameType;
+  L1, L2: Double;
+  Ok: Boolean;
+begin
+  WriteLn('T11: SID frames and comfort noise');
+  X := SyntheticSpeech(8000);
+  Enc := TG729Encoder.Create;
+  Dec := TG729Decoder.Create;
+  try
+    Bits := Enc.Encode(X);
+    SetLength(Y, 200 * G729_FRAME);
+    for F := 0 to 49 do Dec.Decode(@Bits[F * 10], 10, @Y[F * 80]);
+    // SID with gain index 10 (20 dB), then untransmitted frames
+    PackSid(0, 5, 3, 10, @Sid[0]);
+    T := Dec.Decode(@Sid[0], 2, @Y[50 * 80]);
+    Check(T = g729SID, 'a 2-octet frame is decoded as SID');
+    Ok := True;
+    for F := 51 to 99 do
+      if F mod 5 = 0 then Dec.Decode(@Sid[0], 2, @Y[F * 80])     // repeated SID: the MA
+      else if Dec.Decode(nil, 0, @Y[F * 80]) <> g729NoData then  // memory converges
+        Ok := False;
+    Check(Ok, 'missing frames after a SID continue the comfort noise (B.27)');
+    // same spectrum, 20 dB louder
+    PackSid(0, 5, 3, 20, @Sid[0]);
+    for F := 100 to 149 do
+      if F mod 5 = 0 then Dec.Decode(@Sid[0], 2, @Y[F * 80])
+      else Dec.Decode(nil, 0, @Y[F * 80]);
+    L1 := 20 * Log10(Rms(Y, 70 * 80, 30 * 80) + 1E-9);
+    L2 := 20 * Log10(Rms(Y, 120 * 80, 30 * 80) + 1E-9);
+    Check((L1 > 10) and (L2 - L1 > 16) and (L2 - L1 < 24),
+      Format('comfort noise level follows the SID gain (%.1f -> %.1f dB)', [L1, L2]));
+    // back to speech
+    T := Dec.Decode(@Bits[10 * 10], 10, @Y[150 * 80]);
+    Check(T = g729Speech, 'speech resumes after the pause');
+    T := Dec.Decode(nil, 0, @Y[151 * 80]);
+    Check(T = g729Lost, 'a missing frame after speech is concealed');
+    // RTP payload: two speech frames and a SID
+    Move(Bits[0], Pay[0], 20);
+    PackSid(1, 7, 2, 12, @Pay[20]);
+    Dec.Reset;
+    Check(Dec.DecodePayload(@Pay[0], 22, @Y[0]) = 240, 'DecodePayload: 2 frames + SID -> 240 samples');
+  finally
+    Enc.Free; Dec.Free;
+  end;
+end;
+
+procedure TestT12_ItuAnnexB;
+const
+  Files: array[0..5, 0..1] of string = (
+    ('tstseq1a.bit', 'tstseq1a.out'), ('tstseq2a.bit', 'tstseq2a.out'),
+    ('tstseq3a.bit', 'tstseq3a.out'), ('tstseq4a.bit', 'tstseq4a.out'),
+    ('tstseq5.bit', 'tstseq5a.out'), ('tstseq6.bit', 'tstseq6a.out'));
+var
+  Dir, FBit, FOut: string;
+  K, F, I, NS, NC: Integer;
+  Y, Ref: TArray<SmallInt>;
+  Types: TArray<TG729FrameType>;
+  S1, E1, Er, SpSnr, CnDiff, CnAbs: Double;
+begin
+  WriteLn('T12: ITU Annex A+B streams');
+  Dir := SamplesDir + 'itu-g729b' + PathDelim;
+  for K := 0 to High(Files) do
+  begin
+    FBit := FindFile(Dir, Files[K, 0]);
+    FOut := FindFile(Dir, Files[K, 1]);
+    if (FBit = '') or (FOut = '') then begin Skip(Files[K, 0] + ' (vectors not found)'); Continue; end;
+    Y := DecodeSerialB(LoadWords(FBit), Types);
+    Ref := LoadWords(FOut);
+    SpSnr := 0; NS := 0; CnDiff := 0; CnAbs := 0; NC := 0;
+    for F := 0 to Min(Length(Types), Length(Ref) div 80) - 1 do
+    begin
+      S1 := 0; E1 := 0; Er := 0;
+      for I := F * 80 to F * 80 + 79 do
+      begin
+        S1 := S1 + Sqr(Double(Ref[I]));
+        Er := Er + Sqr(Double(Y[I]));
+        E1 := E1 + Sqr(Double(Ref[I]) - Y[I]);
+      end;
+      if Types[F] in [g729Speech, g729Lost] then
+      begin
+        if S1 > 80000 then
+        begin
+          SpSnr := SpSnr + EnsureRange(10 * Log10((S1 + 1) / (E1 + 1)), -10, 60);
+          Inc(NS);
+        end;
+      end
+      else
+      begin
+        CnDiff := CnDiff + 10 * Log10(Er / 80 + 1) - 10 * Log10(S1 / 80 + 1);
+        CnAbs := CnAbs + Abs(10 * Log10(Er / 80 + 1) - 10 * Log10(S1 / 80 + 1));
+        Inc(NC);
+      end;
+    end;
+    if NS > 0 then SpSnr := SpSnr / NS;
+    if NC > 0 then begin CnDiff := CnDiff / NC; CnAbs := CnAbs / NC; end;
+    Check((SpSnr >= 28) and (Abs(CnDiff) <= 1.5) and (CnAbs <= 2.5),
+      Format('%s: speech %.1f dB (%d frames), comfort noise level %.2f dB (mean abs %.2f dB) (%d frames)',
+        [Files[K, 0], SpSnr, NS, CnDiff, CnAbs, NC]));
+  end;
+end;
+
 begin
   Passed := 0;
   Failed := 0;
@@ -592,6 +745,8 @@ begin
   TestT08_ItuDecoder;
   TestT09_FullG729;
   TestT10_ItuEncoder;
+  TestT11_Sid;
+  TestT12_ItuAnnexB;
 
   WriteLn;
   WriteLn(Format('Results: %d passed, %d failed, %d skipped', [Passed, Failed, Skipped]));

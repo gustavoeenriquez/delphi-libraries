@@ -1,4 +1,4 @@
-# g729-codec — Códec ITU-T G.729 Anexo A (CS-ACELP, 8 kbit/s) en Delphi puro
+# g729-codec — Códec ITU-T G.729 Anexo A (+ decoder del Anexo B) en Delphi puro
 
 Encoder y decoder G.729A en Object Pascal, sin DLLs. Tramas de 10 ms: 80 muestras int16 a 8 kHz
 ⇄ 10 octetos. El bitstream es el estándar de G.729, así que el decoder también acepta tramas de
@@ -11,10 +11,11 @@ G.729 completo y cualquier decoder G.729 o G.729A decodifica lo que produce el e
   referencia de la ITU.
 - **Tablas (`G729Tables.pas`):** el texto de la norma no incluye los valores de los codebooks
   (LSP L1/L2/L3, predictor MA, filtro de interpolación b30, codebooks de ganancia GA/GB y sus
-  mapas). Esos números se tomaron de `TAB_LD8A.C`, el archivo de tablas del paquete de software
-  de la ITU (G.729 Release 3; © ITU-T y los autores originales: AT&T, France Telecom, NTT y la
-  Universidad de Sherbrooke), porque la interoperabilidad exige esos valores exactos. Solo se
-  copiaron los datos numéricos, con `tools/gentables.py`. Las ventanas de análisis, la ventana de
+  mapas; en el Anexo B, los subconjuntos de codebook de la trama SID y el filtro de baja banda del
+  VAD). Esos números se tomaron de `TAB_LD8A.C` y `tab_dtx.c`, los archivos de tablas del paquete
+  de software de la ITU (G.729 Release 3; © ITU-T y los autores originales: AT&T, France Telecom,
+  NTT, la Universidad de Sherbrooke y Rockwell International), porque la interoperabilidad exige
+  esos valores exactos. Solo se copiaron los datos numéricos, con `tools/gentables.py`. Las ventanas de análisis, la ventana de
   lag y los demás coeficientes se calculan con las fórmulas del texto.
 - **Patentes:** las de G.729/G.729A vencieron y el programa de licencias se cerró (~2017).
 
@@ -28,8 +29,9 @@ G.729 completo y cualquier decoder G.729 o G.729A decodifica lo que produce el e
 | Encoder G.729A | ✅ | misma calidad que el encoder de referencia (±0,2 dB de SNR segmental, con el mismo decoder) |
 | Interoperabilidad | ✅ | el decoder de referencia de la ITU decodifica nuestro bitstream: 26–41 dB frente a nuestro decoder, el mismo nivel que con bitstreams oficiales |
 | Bit-exactitud con la referencia de punto fijo | ❌ | no aplica: es una implementación en punto flotante (ver abajo) |
-| Anexo B (VAD/DTX/CNG, tramas SID de 2 octetos) | 🚧 | pendiente; por ahora una trama SID se trata como trama perdida |
-| Win64 y Linux64 | ✅ | 42/42 tests en ambas plataformas |
+| Anexo B, decoder: tramas SID, ruido de confort (CNG), tramas no transmitidas y borradas (B.4.4, B.4.5) | ✅ | vectores A+B `tstseq1-6`: voz 29–41 dB frente a la referencia; nivel del ruido de confort a ±0,3 dB de media (±1,2–2,1 dB trama a trama, es ruido) |
+| Anexo B, encoder (VAD/DTX, generación de SID) | ❌ | no implementado (ver abajo); el encoder siempre envía tramas de voz, lo que es válido aunque el troncal negocie `annexb=yes` |
+| Win64 y Linux64 | ✅ | 54/54 tests en ambas plataformas |
 
 ### Por qué no es bit-exacto
 
@@ -46,6 +48,33 @@ y está verificada en los dos sentidos.
 equivalente (si la síntesis sale del rango de 16 bits, la historia de excitación se divide entre 4
 y se repite la subtrama), pero la salida no sigue a la referencia en ese vector extremo.
 
+### Anexo B
+
+**Decoder (implementado).** Decodifica la trama SID (15 bits: predictor, 1.ª y 2.ª etapa LSF,
+ganancia de 5 bits con los niveles de B.4.2.1, de −12 a 66 dB) y genera el ruido de confort de
+B.4.4: excitación ACELP con retardo y pulsos aleatorios, ganancias resueltas con (B.20–B.22) y
+mezcla con ruido gaussiano (B.23–B.26, α = 0,6), suavizado de la ganancia objetivo (B.19) y
+filtros LPC interpolados desde la SID. Las tramas borradas siguen B.27 (tras voz se ocultan; tras
+SID o una trama no transmitida continúa el ruido) y la pérdida de la primera SID se recupera con
+la última trama activa válida (B.4.5).
+
+Lo que el texto deja abierto se resolvió contra los vectores A+B:
+- La SID también actualiza la memoria MA del predictor de LSF; si no, la voz que sigue a una
+  pausa pierde 1,5–3 dB frente a la referencia.
+- (B.22) dice `Max{0,5, √(K/A)}`, pero el texto pide limitar la ganancia adaptativa y garantizar
+  una solución real de (B.21): se usa el mínimo de los dos valores.
+- Para recuperar una SID perdida, la energía de la excitación de la última trama activa se
+  desplaza +7 dB antes de cuantizarla. El texto no define la escala de ese término; el valor se
+  calibró con `tstseq6`, el único caso de los vectores.
+- La secuencia aleatoria y el generador gaussiano (suma de 12 uniformes) son propios: el ruido no
+  tiene por qué coincidir muestra a muestra, y se valida por nivel.
+
+**Encoder (no implementado).** El VAD de B.3 se define con 28 constantes de decisión (Tabla B.1)
+expresadas en punto fijo sin indicar su formato Q, y su filtro de baja banda tampoco se describe
+en el texto. Hacerlo desde la norma exigiría reconstruir esas escalas por ingeniería inversa del
+coder de referencia. Como un encoder sin DTX que envía siempre tramas de voz es válido aunque el
+troncal anuncie `annexb=yes`, se dejó fuera.
+
 ## API
 
 ```pascal
@@ -59,7 +88,11 @@ Bytes := Enc.Encode(PCMArray);
 
 Dec := TG729Decoder.Create;
 T := Dec.Decode(@Frame[0], 10, @PCM[0]);   // trama de voz -> 80 muestras (T = g729Speech)
-T := Dec.Decode(nil, 0, @PCM[0]);          // trama perdida -> ocultación (T = g729Lost)
+T := Dec.Decode(@Sid[0], 2, @PCM[0]);      // trama SID (Anexo B) -> ruido de confort (g729SID)
+T := Dec.Decode(nil, 0, @PCM[0]);          // trama que falta: tras voz -> ocultación (g729Lost);
+                                           // tras SID/pausa -> sigue el ruido (g729NoData)
+T := Dec.DecodeFrame(g729NoData, nil, @PCM[0]);  // tipo explícito, si el transporte distingue
+                                                 // "no transmitida" (DTX) de "perdida"
 M := Dec.DecodePayload(@Pkt[0], Len, @PCM[0]);  // payload RTP con varias tramas (80 muestras c/u)
 
 Enc.Reset; Dec.Reset;
@@ -75,9 +108,10 @@ Enc.Reset; Dec.Reset;
 Payload type estático 18, `G729/8000`. Cada paquete lleva una o varias tramas de 10 octetos
 seguidas (20 ms = 20 octetos es lo habitual), con el bit más significativo de cada parámetro
 primero, en el orden de la Tabla 8 de la norma. Con `annexb=yes` puede llegar al final una trama
-SID de 2 octetos: `DecodePayload` ya la separa, pero hasta implementar el Anexo B se decodifica
-como trama perdida. Si el troncal anuncia `annexb=yes` y no queremos DTX, en SDP se responde
-`a=fmtp:18 annexb=no`.
+SID de 2 octetos, que `DecodePayload` decodifica como ruido de confort. Durante una pausa con DTX
+no llegan paquetes: por cada 10 ms sin datos llama a `Decode(nil, 0, ...)`, que tras una SID
+continúa el ruido. Nuestro encoder no genera SID: puede anunciarse `annexb=yes` para recibir
+DTX del troncal (lo decodificamos) y enviar siempre voz, o `annexb=no` si se prefiere.
 
 ## Implementación
 
@@ -101,7 +135,7 @@ de las ganancias (8 × 16). Aun así consume ~0,1 ms por trama de 10 ms en un PC
 
 ## Tests
 
-`tests/src/G729Tests.dpr` (42 tests):
+`tests/src/G729Tests.dpr` (54 tests):
 
 | Test | Contenido |
 |---|---|
@@ -112,15 +146,17 @@ de las ganancias (8 × 16). Aun así consume ~0,1 ms por trama de 10 ms en un PC
 | T08 | Decoder frente a las salidas de referencia del Anexo A (umbrales de SNR segmental por vector) |
 | T09 | Decoder del Anexo A con bitstreams de G.729 completo |
 | T10 | Encoder frente al encoder de referencia, con el mismo decoder |
+| T11 | Tramas SID: tipo de trama, continuidad del ruido, nivel según la ganancia SID, vuelta a voz, `DecodePayload` con SID |
+| T12 | Vectores A+B `tstseq1-6` (con DTX y borrados): SNR de la voz y nivel del ruido de confort |
 
-Los vectores de la ITU **no se redistribuyen**. Para correr T08–T10, descarga el software de la
+Los vectores de la ITU **no se redistribuyen**. Para correr T08–T10 y T12, descarga el software de la
 Recomendación (https://www.itu.int/rec/T-REC-G.729-201206-I/en, "Software", zip de 18 MB) y copia:
 
 - `Software/G729_Release3/g729AnnexA/test_vectors/*` → `samples/itu-g729a/`
 - `Software/G729_Release3/g729/test_vectors/*` → `samples/itu-g729/`
 - `Software/G729_Release3/g729AnnexB/test_vectors/*` → `samples/itu-g729b/` (para el Anexo B)
 
-Esas carpetas están en `.gitignore`. Si faltan, T08–T10 se saltan y el resto corre igual.
+Esas carpetas están en `.gitignore`. Si faltan, T08–T10 y T12 se saltan y el resto corre igual.
 
 ## Compilación
 

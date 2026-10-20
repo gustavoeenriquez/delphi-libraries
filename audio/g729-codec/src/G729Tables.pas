@@ -4,9 +4,10 @@ unit G729Tables;
   G729Tables.pas - Numeric tables of ITU-T G.729 / G.729 Annex A
 
   The Recommendation text does not list the codebook values; they are part
-  of the ITU-T reference material (file TAB_LD8A.C of the G.729 software
-  package, Release 3, (c) ITU-T and the original authors: AT&T, France
-  Telecom, NTT, Universite de Sherbrooke). Only the numbers are reproduced
+  of the ITU-T reference material (files TAB_LD8A.C and tab_dtx.c of the
+  G.729 software package, Release 3, (c) ITU-T and the original authors:
+  AT&T, France Telecom, NTT, Universite de Sherbrooke, Rockwell
+  International). Only the numbers are reproduced
   here, because bit-stream interoperability requires these exact values.
   Generated automatically; do not edit by hand.
 
@@ -245,6 +246,17 @@ const
 
   // Transmitted GB codeword -> index
   GB_IMAP: array[0..15] of SmallInt = (2, 14, 3, 13, 0, 15, 1, 12, 6, 10, 7, 9, 4, 11, 5, 8);
+
+  // Annex B: SID first-stage index -> row of LSPCB1
+  SID_L1_PTR: array[0..31] of SmallInt = (96, 52, 20, 54, 86, 114, 82, 68, 36, 121, 48, 92, 18, 120, 94, 124, 50, 125, 4, 100, 28, 76, 12, 117, 81, 22, 90, 116, 127, 21, 108, 66);
+
+  // Annex B: SID second-stage index -> rows of LSPCB2 (low part, high part)
+  SID_L2_PTR: array[0..1, 0..15] of SmallInt = (
+    (31, 21, 9, 3, 10, 2, 19, 26, 4, 3, 11, 29, 15, 27, 21, 12),
+    (16, 1, 0, 0, 8, 25, 22, 20, 19, 23, 20, 31, 4, 31, 20, 31));
+
+  // Annex B: autocorrelation of the VAD low-band filter, Q15
+  VAD_LBF_CORR: array[0..12] of SmallInt = (7869, 7011, 4838, 2299, 321, -660, -782, -484, -164, 3, 39, 21, 4);
 
 implementation
 

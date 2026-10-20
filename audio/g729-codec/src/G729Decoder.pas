@@ -45,17 +45,33 @@ type
     FTiltMem: Double;
     FAgc: Double;
     FHpX1, FHpX2, FHpY1, FHpY2: Double;
-    FLastWasSID: Boolean;
+    // Annex B (comfort noise generation)
+    FPrevType: Integer;             // type of the previous frame: 0 untransmitted, 1 active, 2 SID
+    FSidW: TLsf;                    // LSF of the last SID
+    FSidGain: Double;               // G~sid
+    FCngGain: Double;               // G~t (smoothed target gain)
+    FCngSeed: Word;
+    FActW: TLsf;                    // LSF of the last valid active frame
+    FActEnergyDb: Double;           // excitation energy of the last valid active frame
     function NextRandom: Integer;
+    function NextCngRandom: Integer;
+    function CngGauss: Double;
     procedure DecodeParams(const P: TG729Params; Erased: Boolean; Output: PSmallInt);
+    procedure DecodeCng(NewSid: Boolean; const Sid: array of Integer; Output: PSmallInt);
+    procedure SynthAndPost(Sf: Integer; const A: TLpc; IntT: Integer; Exc: PDouble; Output: PSmallInt);
     function Synthesize(const A: TLpc; Exc: PDouble; out Syn: array of Double): Boolean;
     procedure PostFilter(const A: TLpc; IntT: Integer; const Prev, S: array of Double; Output: PSmallInt);
   public
     constructor Create;
     procedure Reset;
-    // Decodes one frame: Len = 10 (speech), 2 (Annex B SID) or 0/nil (lost frame).
-    // Always writes 80 samples (8 kHz) to Output.
+    // Decodes one frame: Len = 10 (speech), 2 (Annex B SID) or 0/nil (missing frame).
+    // A missing frame after speech is concealed (4.4); after a SID or an untransmitted
+    // frame it continues the comfort noise (B.4.5). Always writes 80 samples (8 kHz).
+    // Returns how the frame was decoded.
     function Decode(Data: PByte; Len: Integer; Output: PSmallInt): TG729FrameType; overload;
+    // Explicit frame type, for streams that distinguish an untransmitted (DTX) frame
+    // (g729NoData) from an erased one (g729Lost). Data is used for g729Speech/g729SID.
+    function DecodeFrame(FrameType: TG729FrameType; Data: PByte; Output: PSmallInt): TG729FrameType;
     function Decode(const Data: array of Byte; out Samples: TArray<SmallInt>): TG729FrameType; overload;
     // Decodes an RTP payload (RFC 3551): N frames of 10 octets, optionally followed
     // by one 2-octet SID frame. Returns the number of samples written (80 per frame).
@@ -78,6 +94,12 @@ const
   // output high-pass filter (equation 91)
   HP_B0 = 0.93980581; HP_B1 = -1.8795834; HP_B2 = 0.93980581;
   HP_A1 = 1.9330735; HP_A2 = -0.93589199;
+  CNG_SEED = 11111;
+  CNG_ALPHA = 0.6;
+  // Offset between the excitation energy of the last active frame and the SID
+  // level used when the first SID of a pause is lost (B.4.5). The text does not
+  // define the scale of that energy term; calibrated on the ITU vector tstseq6.
+  SID_RECOVERY_DB = 7.0;
 
 { TG729Decoder }
 
@@ -107,7 +129,28 @@ begin
   FTiltMem := 0;
   FAgc := 1.0;
   FHpX1 := 0; FHpX2 := 0; FHpY1 := 0; FHpY2 := 0;
-  FLastWasSID := False;
+  FPrevType := 1;
+  FSidW := FPrevW;
+  FActW := FPrevW;
+  FSidGain := 0;
+  FCngGain := 0;
+  FCngSeed := CNG_SEED;
+  FActEnergyDb := -12;
+end;
+
+function TG729Decoder.NextCngRandom: Integer;
+begin
+  FCngSeed := Word(31821 * FCngSeed + 13849);
+  Result := FCngSeed;
+end;
+
+// Zero-mean, unit-variance pseudo-Gaussian value (sum of 12 uniform values)
+function TG729Decoder.CngGauss: Double;
+var
+  I: Integer;
+begin
+  Result := -6;
+  for I := 1 to 12 do Result := Result + NextCngRandom / 65536;
 end;
 
 function TG729Decoder.NextRandom: Integer;
@@ -123,11 +166,10 @@ var
   Sf, I, N, IntT, Frac, IntT1, K, T, C, S, GA, GB: Integer;
   Exc: PDouble;
   Code: array[0..G729_SUBFR - 1] of Double;
-  Syn: array[0..G729_SUBFR - 1] of Double;
-  PrevSyn: array[0..G729_ORDER - 1] of Double;
-  Gp, Gc, Gamma: Double;
+  Gp, Gc, Gamma, Energy: Double;
   BadPitch: Boolean;
 begin
+  Energy := 0;
   // LP filter parameters (4.1.1 / 4.4.1)
   if Erased then
   begin
@@ -201,24 +243,129 @@ begin
     FPrevGc := Gc;
     FBeta := EnsureRange(Gp, 0.2, 0.8);
 
-    // excitation (75) and LP synthesis (77)
+    // excitation (75), LP synthesis (77) and post-processing
     for N := 0 to G729_SUBFR - 1 do
-      Exc[N] := Gp * Exc[N] + Gc * Code[N];
-    Move(FSyn, PrevSyn, SizeOf(PrevSyn));
-    if not Synthesize(A[Sf], Exc, Syn) then
     begin
-      // the synthesis left the 16-bit range: scale down the excitation
-      // history (as the reference decoder does on overflow) and redo it
-      Move(PrevSyn, FSyn, SizeOf(PrevSyn));
-      for N := 0 to EXC_OFS + Sf * G729_SUBFR + G729_SUBFR - 1 do
-        FExcBuf[N] := FExcBuf[N] * 0.25;
-      Synthesize(A[Sf], Exc, Syn);
+      Exc[N] := Gp * Exc[N] + Gc * Code[N];
+      Energy := Energy + Sqr(Exc[N]);
     end;
-
-    PostFilter(A[Sf], IntT, PrevSyn, Syn, Output + Sf * G729_SUBFR);
+    SynthAndPost(Sf, A[Sf], IntT, Exc, Output + Sf * G729_SUBFR);
   end;
 
+  // Annex B: remember the last valid active frame (SID recovery, B.4.5)
+  if not Erased then
+  begin
+    FActW := W;
+    FActEnergyDb := 10 * Log10(Max(Energy / G729_FRAME, 1E-10));
+  end;
   // shift the excitation history
+  Move(FExcBuf[G729_FRAME], FExcBuf[0], EXC_OFS * SizeOf(Double));
+end;
+
+procedure TG729Decoder.SynthAndPost(Sf: Integer; const A: TLpc; IntT: Integer; Exc: PDouble;
+  Output: PSmallInt);
+var
+  Syn: array[0..G729_SUBFR - 1] of Double;
+  PrevSyn: array[0..G729_ORDER - 1] of Double;
+  N: Integer;
+begin
+  Move(FSyn, PrevSyn, SizeOf(PrevSyn));
+  if not Synthesize(A, Exc, Syn) then
+  begin
+    // the synthesis left the 16-bit range: scale down the excitation
+    // history (as the reference decoder does on overflow) and redo it
+    Move(PrevSyn, FSyn, SizeOf(PrevSyn));
+    for N := 0 to EXC_OFS + Sf * G729_SUBFR + G729_SUBFR - 1 do
+      FExcBuf[N] := FExcBuf[N] * 0.25;
+    Synthesize(A, Exc, Syn);
+  end;
+  PostFilter(A, IntT, PrevSyn, Syn, Output);
+end;
+
+// Comfort noise generation (B.4.4). NewSid: Sid = (L0, L1, L2, gain index) was received.
+procedure TG729Decoder.DecodeCng(NewSid: Boolean; const Sid: array of Integer; Output: PSmallInt);
+var
+  Q, QI: TLsf;
+  A: array[0..1] of TLpc;
+  Sf, I, N, Lag, C, S: Integer;
+  Exc: PDouble;
+  Ea, Ef, Ex2: array[0..G729_SUBFR - 1] of Double;
+  EnA, Cross, K, AA, GaMax, Ga, Gf, B, Cc, Disc, R1, R2, E1, E2, E3, Alpha, Beta: Double;
+begin
+  if NewSid then
+  begin
+    // the SID codeword also enters the MA memory of the LSF predictor
+    SidLsfDecode(FLsf, Sid[0], Sid[1], Sid[2], FSidW);
+    FSidGain := Power(10, SidGainDb(Sid[3]) / 20);
+  end
+  else if FPrevType = 1 then
+  begin
+    // the first SID of the inactive period was lost: rebuild it from the
+    // last valid active frame (B.4.5)
+    FSidW := FActW;
+    FSidGain := Power(10, SidGainDb(SidGainIndex(FActEnergyDb + SID_RECOVERY_DB)) / 20);
+  end;
+  // target gain smoothing (B.19)
+  if FPrevType = 1 then FCngGain := FSidGain
+  else FCngGain := 7 / 8 * FCngGain + 1 / 8 * FSidGain;
+
+  // LP filters: SID LSP as current LSP, interpolated with the previous frame
+  LsfToLsp(FSidW, Q);
+  for I := 0 to G729_ORDER - 1 do QI[I] := 0.5 * (FPrevQ[I] + Q[I]);
+  LspToLp(QI, A[0]);
+  LspToLp(Q, A[1]);
+  FPrevQ := Q;
+  FPrevW := FSidW;
+
+  K := G729_SUBFR * Sqr(FCngGain);
+  for Sf := 0 to 1 do
+  begin
+    Exc := @FExcBuf[EXC_OFS + Sf * G729_SUBFR];
+    // adaptive excitation of unity gain at a random lag in [40, 103]
+    Lag := 40 + NextCngRandom mod 64;
+    AdaptiveVector(Exc, Lag, 0);
+    for N := 0 to G729_SUBFR - 1 do Ea[N] := Exc[N];
+    // random ACELP fixed excitation
+    C := NextCngRandom and $1FFF;
+    S := NextCngRandom and $F;
+    DecodeFixedCodebook(C, S, Ef);
+    EnA := 0; Cross := 0;
+    for N := 0 to G729_SUBFR - 1 do
+    begin
+      EnA := EnA + Sqr(Ea[N]);
+      Cross := Cross + Ea[N] * Ef[N];
+    end;
+    // random adaptive gain, limited so that (B.21) has a real solution and the
+    // adaptive gain stays small (B.22; the bound is the smaller of the two values)
+    AA := EnA - Sqr(Cross) / 4;
+    GaMax := 0.5;
+    if (AA > 0) and (Sqrt(K / AA) < GaMax) then GaMax := Sqrt(K / AA);
+    Ga := GaMax * (NextCngRandom / 65536);
+    B := Ga * Cross / 2;
+    Cc := (EnA * Sqr(Ga) - K) / 4;
+    Disc := Max(Sqr(B) - 4 * Cc, 0);
+    R1 := (-B + Sqrt(Disc)) / 2;
+    R2 := (-B - Sqrt(Disc)) / 2;
+    if Abs(R1) <= Abs(R2) then Gf := R1 else Gf := R2;
+    // mixture with a Gaussian excitation (B.23 - B.26)
+    E1 := 0; E2 := 0; E3 := 0;
+    for N := 0 to G729_SUBFR - 1 do
+    begin
+      Exc[N] := Ga * Ea[N] + Gf * Ef[N];
+      Ex2[N] := CngGauss;
+      E1 := E1 + Sqr(Exc[N]);
+      E2 := E2 + Sqr(Ex2[N]);
+      E3 := E3 + Exc[N] * Ex2[N];
+    end;
+    Alpha := CNG_ALPHA;
+    Disc := Sqr(Alpha * E3) - E2 * (Sqr(Alpha) - 1) * E1;
+    if (E2 > 0) and (Disc >= 0) then Beta := (-Alpha * E3 + Sqrt(Disc)) / E2 else Beta := -1;
+    if Beta < 0 then begin Beta := 0; Alpha := 1; end;
+    for N := 0 to G729_SUBFR - 1 do
+      Exc[N] := Alpha * Exc[N] + Beta * Ex2[N];
+
+    SynthAndPost(Sf, A[Sf], Lag, Exc, Output + Sf * G729_SUBFR);
+  end;
   Move(FExcBuf[G729_FRAME], FExcBuf[0], EXC_OFS * SizeOf(Double));
 end;
 
@@ -357,22 +504,51 @@ begin
   Move(FRes[G729_SUBFR], FRes[0], RES_OFS * SizeOf(Double));
 end;
 
-function TG729Decoder.Decode(Data: PByte; Len: Integer; Output: PSmallInt): TG729FrameType;
+function TG729Decoder.DecodeFrame(FrameType: TG729FrameType; Data: PByte;
+  Output: PSmallInt): TG729FrameType;
 var
   P: TG729Params;
+  Sid: array[0..3] of Integer;
 begin
-  FillChar(P, SizeOf(P), 0);
-  if (Data <> nil) and (Len >= G729_FRAME_BYTES) then
-  begin
-    UnpackFrame(Data, P);
-    DecodeParams(P, False, Output);
-    Result := g729Speech;
-  end
+  // an erased frame takes the type of the previous one (B.27)
+  if FrameType = g729Lost then
+    if FPrevType = 1 then Result := g729Lost else Result := g729NoData
   else
-  begin
-    DecodeParams(P, True, Output);
-    Result := g729Lost;
+    Result := FrameType;
+  FillChar(P, SizeOf(P), 0);
+  FillChar(Sid, SizeOf(Sid), 0);
+  case Result of
+    g729Speech:
+      begin
+        UnpackFrame(Data, P);
+        DecodeParams(P, False, Output);
+        FCngSeed := CNG_SEED;     // the CNG generator restarts at each active frame
+        FPrevType := 1;
+      end;
+    g729Lost:
+      DecodeParams(P, True, Output);
+    g729SID:
+      begin
+        UnpackSid(Data, Sid[0], Sid[1], Sid[2], Sid[3]);
+        DecodeCng(True, Sid, Output);
+        FPrevType := 2;
+      end;
+    g729NoData:
+      begin
+        DecodeCng(False, Sid, Output);
+        FPrevType := 0;
+      end;
   end;
+end;
+
+function TG729Decoder.Decode(Data: PByte; Len: Integer; Output: PSmallInt): TG729FrameType;
+begin
+  if (Data <> nil) and (Len >= G729_FRAME_BYTES) then
+    Result := DecodeFrame(g729Speech, Data, Output)
+  else if (Data <> nil) and (Len >= G729_SID_BYTES) then
+    Result := DecodeFrame(g729SID, Data, Output)
+  else
+    Result := DecodeFrame(g729Lost, nil, Output);
 end;
 
 function TG729Decoder.Decode(const Data: array of Byte; out Samples: TArray<SmallInt>): TG729FrameType;

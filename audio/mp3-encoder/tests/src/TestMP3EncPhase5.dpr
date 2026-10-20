@@ -241,15 +241,15 @@ begin
     { BigValues=1, pair [0,0], table=1 → 1 bit }
     Gr.Ix[0] := 0; Gr.Ix[1] := 0;
     Check('HB03 pair(0,0) t1 → 1 bit', FrameHuffmanBits(Gr) = 1);
-    { Count1=1 quad (1,0,1,0), table 32: p=1+0+4+0=5, CT32L[5]=6, +2 signs → 8 }
+    { Count1=1 quad (1,0,1,0), table 32: hcod index 8v+4w+2x+y = 10, CT32L[10]=5, +2 signs → 7 }
     Gr := MakeGr(210);
     Gr.Count1            := 1;
     Gr.Count1TableSelect := 0;  { table 32 }
     Gr.Ix[0] := 1; Gr.Ix[1] := 0; Gr.Ix[2] := 1; Gr.Ix[3] := 0;
-    Check('HB04 quad(1,0,1,0) t32 → 8 bits', FrameHuffmanBits(Gr) = 8);
+    Check('HB04 quad(1,0,1,0) t32 → 7 bits', FrameHuffmanBits(Gr) = 7);  { hcod 1010 = 00110 + 2 signs }
     { negative sign doesn't change count — sign is 1 extra bit already included }
     Gr.Ix[0] := -1;
-    Check('HB05 quad(-1,0,1,0) same 8 bits', FrameHuffmanBits(Gr) = 8);
+    Check('HB05 quad(-1,0,1,0) same 7 bits', FrameHuffmanBits(Gr) = 7);
     { Two big-values pairs, both (1,1) with t1: 5+5=10 bits }
     Gr := MakeGr(210);
     Gr.BigValues := 2;

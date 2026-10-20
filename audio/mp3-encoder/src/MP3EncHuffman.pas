@@ -540,7 +540,7 @@ begin
   end;
 
   H := GTab[ATable];
-  p := AV + (AW shl 1) + (AX shl 2) + (AY shl 3);
+  p := (AV shl 3) + (AW shl 2) + (AX shl 1) + AY;   { ISO hcod index: v w x y, v most significant }
   code  := H.CodP[p];
   cbits := H.LenP[p];
 
@@ -568,7 +568,7 @@ begin
   end;
 
   H    := GTab[ATable];
-  p    := AV + (AW shl 1) + (AX shl 2) + (AY shl 3);
+  p    := (AV shl 3) + (AW shl 2) + (AX shl 1) + AY;
   bits := H.LenP[p];
   if AV <> 0 then Inc(bits);
   if AW <> 0 then Inc(bits);

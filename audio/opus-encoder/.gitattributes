@@ -1,0 +1,2 @@
+# Scripts que se ejecutan en Linux/WSL: siempre LF
+*.sh text eol=lf

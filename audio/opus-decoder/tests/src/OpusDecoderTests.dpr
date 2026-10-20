@@ -51,7 +51,8 @@ end;
 
 function SamplesDir: string;
 begin
-  Result := ExtractFilePath(ParamStr(0)) + '..\..\..\..\samples\';
+  Result := ExtractFilePath(ParamStr(0)) + '..' + PathDelim + '..' + PathDelim + '..' + PathDelim +
+    '..' + PathDelim + 'samples' + PathDelim;
 end;
 
 // ---------------------------------------------------------------------------

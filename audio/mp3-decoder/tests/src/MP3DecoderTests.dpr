@@ -572,7 +572,8 @@ begin
   WriteLn;
 
   var SamplePath := ExpandFileName(
-    ExtractFilePath(ParamStr(0)) + '..\..\..\..\samples\file_7461.mp3');
+    ExtractFilePath(ParamStr(0)) + '..' + PathDelim + '..' + PathDelim + '..' + PathDelim +
+    '..' + PathDelim + 'samples' + PathDelim + 'file_7461.mp3');
 
   TestBitStream;
   TestHdrValid;

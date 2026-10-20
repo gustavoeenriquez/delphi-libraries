@@ -16,8 +16,7 @@ Por cada caso escribe:
 
 La señal de entrada es sintética (OpusEncTool gensig kind=speech), así que los
 vectores se pueden distribuir. Los paquetes del encoder Delphi se comprueban
-idénticos byte a byte a los de libopus 1.5.2 con los mismos parámetros y sin el
-análisis tonal (opus_oracle_noan), que el port incorpora en la etapa E3.
+idénticos byte a byte a los de libopus 1.5.2 con los mismos parámetros.
 """
 import os
 import shutil
@@ -30,7 +29,6 @@ TOOL = sys.argv[1]
 OUT = sys.argv[2]
 ODIR = sys.argv[3] if len(sys.argv) > 3 else '~/opus-oracle'
 ORACLE = 'wsl -e bash -lc "' + ODIR + '/opus_oracle {args}"'
-ORACLE_NOAN = 'wsl -e bash -lc "' + ODIR + '/opus_oracle_noan {args}"'
 SECONDS = 6
 
 # (nombre, fs, bitrate, modo, dtx)
@@ -99,7 +97,7 @@ def main():
         ours = os.path.join(tmp, name + '.our.opk')
         ref = os.path.join(tmp, name + '.ref.opk')
         run('"%s" encode "%s" "%s" %s' % (TOOL, raw, ours, args))
-        run(ORACLE_NOAN.format(args='encode %s %s %s' % (wsl_path(raw), wsl_path(ref), args)))
+        run(ORACLE.format(args='encode %s %s %s' % (wsl_path(raw), wsl_path(ref), args)))
         pk = read_opk(ours)
         if pk != read_opk(ref):
             sys.exit('%s: los paquetes Delphi difieren de libopus' % name)
@@ -121,7 +119,7 @@ def main():
             f.write('caso: %s\n' % name)
             f.write('señal: OpusEncTool gensig kind=speech, %d s, mono, %d Hz%s\n' % (
                 SECONDS, fs, ', silencio en 2.0-3.6 s y 4.6-5.4 s' if dtx else ''))
-            f.write('encoder: TOpusEncoder (idéntico byte a byte a libopus 1.5.2 sin análisis tonal)\n')
+            f.write('encoder: TOpusEncoder (idéntico byte a byte a libopus 1.5.2)\n')
             f.write('parámetros: %s\n' % args)
             f.write('modos en el flujo: %s\n' % ', '.join(modes))
             f.write('paquetes: %d (20 ms); perdidos: %d (k %% 10 == 9 y ráfaga k = %d,%d)\n' % (

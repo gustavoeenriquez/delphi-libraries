@@ -7,9 +7,9 @@
       (opus-decoder), incluidos Laplace, ICDF, enteros y bits crudos.
   PV  PVQ: encode_pulses -> decode_pulses para varios (N, K).
   GV  vectores de referencia de libopus 1.5.2: señales sintéticas deterministas
-      codificadas con el oráculo (tests/tools/opus_oracle, variante sin
-      análisis para complejidad >= 7) -> número de paquetes, bytes, CRC32 y
-      XOR de final_range deben ser idénticos (byte a byte).
+      codificadas con el oráculo (tests/tools/opus_oracle, con el análisis
+      tonal de libopus) -> número de paquetes, bytes, CRC32 y XOR de
+      final_range deben ser idénticos (byte a byte).
   DE  todos los paquetes se decodifican con el decoder del port, con la
       duración correcta.
   CB  CBR: todos los paquetes del tamaño exacto.
@@ -107,28 +107,28 @@ type
   TPackets = TArray<TBytes>;
 
 const
-  CASES: array[0..11] of TCase = (
+  CASES: array[0..13] of TCase = (
     (Name: 'A chirp 48k mono lowdelay 20ms CBR 64k cx0'; Kind: tsChirp; Fs: 48000; Ch: 1; Samples: 48000;
      App: oaRestrictedLowDelay; Ms10: 200; Bitrate: 64000; Vbr: False; Cvbr: True; Cx: 0; Mode: MODE_CELT_ONLY; Fec: 0; Loss: 0;
      NPk: 50; Bytes: 8000; Crc: $430BA29F; RngXor: $6AFD7B7A),
     (Name: 'B music 48k stereo audio 20ms CVBR 96k cx10'; Kind: tsMusicLike; Fs: 48000; Ch: 2; Samples: 48000;
      App: oaAudio; Ms10: 200; Bitrate: 96000; Vbr: True; Cvbr: True; Cx: 10; Mode: MODE_CELT_ONLY; Fec: 0; Loss: 0;
-     NPk: 50; Bytes: 12050; Crc: $E52DE5D7; RngXor: $4A8D9FAD),
+     NPk: 50; Bytes: 12200; Crc: $B7833CB0; RngXor: $4167A7FD),
     (Name: 'C speech 16k mono voip 20ms CVBR 24k cx5'; Kind: tsSpeechLike; Fs: 16000; Ch: 1; Samples: 16000;
      App: oaVoip; Ms10: 200; Bitrate: 24000; Vbr: True; Cvbr: True; Cx: 5; Mode: MODE_CELT_ONLY; Fec: 0; Loss: 0;
      NPk: 50; Bytes: 3050; Crc: $EEDBF762; RngXor: $7F85C420),
     (Name: 'D music 48k stereo lowdelay 2.5ms CBR 128k cx10'; Kind: tsMusicLike; Fs: 48000; Ch: 2; Samples: 24000;
      App: oaRestrictedLowDelay; Ms10: 25; Bitrate: 128000; Vbr: False; Cvbr: True; Cx: 10; Mode: MODE_CELT_ONLY; Fec: 0; Loss: 0;
-     NPk: 200; Bytes: 8000; Crc: $988E9B00; RngXor: $13D6BD63),
+     NPk: 200; Bytes: 8000; Crc: $95599146; RngXor: $3ADC4678),
     (Name: 'E speech 48k mono audio 60ms VBR 32k cx9'; Kind: tsSpeechLike; Fs: 48000; Ch: 1; Samples: 57600;
      App: oaAudio; Ms10: 600; Bitrate: 32000; Vbr: True; Cvbr: False; Cx: 9; Mode: MODE_CELT_ONLY; Fec: 0; Loss: 0;
-     NPk: 20; Bytes: 4780; Crc: $87AC7650; RngXor: $5A130F00),
+     NPk: 20; Bytes: 4767; Crc: $A1615DBF; RngXor: $77268B40),
     (Name: 'F speech 8k mono voip 10ms CBR 16k cx10'; Kind: tsSpeechLike; Fs: 8000; Ch: 1; Samples: 8000;
      App: oaVoip; Ms10: 100; Bitrate: 16000; Vbr: False; Cvbr: True; Cx: 10; Mode: MODE_CELT_ONLY; Fec: 0; Loss: 0;
      NPk: 100; Bytes: 2000; Crc: $B12B557B; RngXor: $0647D209),
     (Name: 'G music 24k stereo audio 10ms CVBR 48k cx8'; Kind: tsMusicLike; Fs: 24000; Ch: 2; Samples: 24000;
      App: oaAudio; Ms10: 100; Bitrate: 48000; Vbr: True; Cvbr: True; Cx: 8; Mode: MODE_CELT_ONLY; Fec: 0; Loss: 0;
-     NPk: 100; Bytes: 6100; Crc: $0CA3D93A; RngXor: $16C70163),
+     NPk: 100; Bytes: 6100; Crc: $0C7C9D1F; RngXor: $5AC2CB9A),
     (Name: 'H speech 16k mono voip 20ms VBR 16k cx10 auto (SILK WB)'; Kind: tsSpeechLike; Fs: 16000; Ch: 1;
      Samples: 16000; App: oaVoip; Ms10: 200; Bitrate: 16000; Vbr: True; Cvbr: True; Cx: 10;
      Mode: OPUS_AUTO; Fec: 0; Loss: 0;
@@ -148,7 +148,15 @@ const
     (Name: 'L speech 16k mono voip 10ms CBR 20k cx2 SILK'; Kind: tsSpeechLike; Fs: 16000; Ch: 1;
      Samples: 16000; App: oaVoip; Ms10: 100; Bitrate: 20000; Vbr: False; Cvbr: True; Cx: 2;
      Mode: MODE_SILK_ONLY; Fec: 0; Loss: 0;
-     NPk: 100; Bytes: 2500; Crc: $D343547D; RngXor: $1F4184C2));
+     NPk: 100; Bytes: 2500; Crc: $D343547D; RngXor: $1F4184C2),
+    (Name: 'M music 48k mono audio 20ms 24k cx10 auto (analysis: hybrid -> CELT)'; Kind: tsMusicLike; Fs: 48000;
+     Ch: 1; Samples: 96000; App: oaAudio; Ms10: 200; Bitrate: 24000; Vbr: True; Cvbr: True; Cx: 10;
+     Mode: OPUS_AUTO; Fec: 0; Loss: 0;
+     NPk: 100; Bytes: 6358; Crc: $11799A7D; RngXor: $7DCDDC4A),
+    (Name: 'N speech 48k mono audio 20ms 20k cx10 auto (analysis, hybrid)'; Kind: tsSpeechLike; Fs: 48000;
+     Ch: 1; Samples: 96000; App: oaAudio; Ms10: 200; Bitrate: 20000; Vbr: True; Cvbr: True; Cx: 10;
+     Mode: OPUS_AUTO; Fec: 0; Loss: 0;
+     NPk: 100; Bytes: 5189; Crc: $8E1FE97B; RngXor: $20469FC9));
 
 function NewEncoder(const C: TCase): TOpusEncoder;
 begin

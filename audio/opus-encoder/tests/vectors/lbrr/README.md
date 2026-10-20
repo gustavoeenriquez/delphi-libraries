@@ -36,6 +36,7 @@ LBRR, que debe caer en PLC.
 
 Señal: sintética (`OpusEncTool gensig kind=speech`, 6 s); en el caso DTX con
 silencio digital en 2,0–3,6 s y 4,6–5,4 s. Los paquetes son idénticos byte a
-byte a los de libopus 1.5.2 con los mismos parámetros y sin análisis tonal.
+byte a los de libopus 1.5.2 con los mismos parámetros (incluido el análisis
+tonal).
 
 Datos de prueba bajo la misma licencia que las pruebas del repositorio (CC0).

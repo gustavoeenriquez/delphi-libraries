@@ -143,6 +143,7 @@ begin
     Enc.LsbDepth := StrToInt(GetArg('lsb', '24'));
     Enc.PhaseInversionDisabled := GetArg('pinv', '0') = '1';
     Enc.PredictionDisabled := GetArg('pred', '0') = '1';
+    Enc.ExpertFrameDuration := StrToInt(GetArg('efd', '5000'));
     S := GetArg('fch', 'auto');
     if S = 'auto' then Enc.ForceChannels := OPUS_AUTO else Enc.ForceChannels := StrToInt(S);
 

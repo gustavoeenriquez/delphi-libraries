@@ -12,6 +12,7 @@
       br=32000|auto|max vbr=1 cvbr=1 cx=10 mode=auto|celt|silk|hybrid
       bw=auto|nb|mb|wb|swb|fb maxbw=fb loss=0 fec=0 dtx=0 sig=auto|voice|music
       float=0 lsb=24 pinv=0 pred=0 fch=auto
+      efd=5000 (OPUS_SET_EXPERT_FRAME_DURATION; ms= fija lo que se pasa en cada llamada)
       brcyc=b1,b2,...,N   (cambia el bitrate cíclicamente cada N tramas)
     opus_oracle decode in.opk out.raw fs=48000 ch=1
     opus_oracle fecdec in.bin out.raw fs=16000 ch=1 ms=20
@@ -108,6 +109,7 @@ static int do_encode(int argc, char **argv)
    opus_encoder_ctl(enc, OPUS_SET_PHASE_INVERSION_DISABLED(atoi(getarg(argc, argv, "pinv", "0"))));
    opus_encoder_ctl(enc, OPUS_SET_PREDICTION_DISABLED(atoi(getarg(argc, argv, "pred", "0"))));
    opus_encoder_ctl(enc, OPUS_SET_FORCE_CHANNELS(fch));
+   opus_encoder_ctl(enc, OPUS_SET_EXPERT_FRAME_DURATION(atoi(getarg(argc, argv, "efd", "5000"))));
 
    FILE *fi = fopen(argv[2], "rb");
    FILE *fo = fopen(argv[3], "wb");

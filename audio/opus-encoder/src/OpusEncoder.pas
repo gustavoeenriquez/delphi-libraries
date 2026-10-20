@@ -6,12 +6,10 @@ unit OpusEncoder;
 
   Port of libopus 1.5.2 src/opus_encoder.c (float build).
 
-  Stage E1: CELT-only. The mode/bandwidth/channel decision logic is ported
-  as in libopus, but until the SILK encoder is available (stage E2) every
-  frame is coded in CELT-only mode, and the tonality analysis (analysis.c,
-  stage E3) is not run, i.e. the encoder behaves like libopus with
-  OPUS_SET_FORCE_MODE(MODE_CELT_ONLY) and without analysis. In-band FEC and
-  SILK DTX need SILK and are accepted but have no effect yet.
+  SILK, hybrid and CELT modes, mode/bandwidth/channel decisions, in-band
+  FEC (LBRR), DTX and the redundant CELT frames of mode transitions follow
+  libopus. The tonality analysis (analysis.c) is not run yet (stage E3), so
+  the encoder behaves like libopus whose analysis_info is never valid.
 
   Copyright (c) 2010-2011 Xiph.Org Foundation, Skype Limited.
   Written by Jean-Marc Valin and Koen Vos.
@@ -32,7 +30,8 @@ uses
   OpusCeltEncMath,
   OpusCeltEnc,
   OpusRepacketizer,
-  OpusEncTypes;
+  OpusEncTypes,
+  OpusSilkEncDefs;
 
 const
   OPUS_MAX_PACKET_BYTES = 1276;
@@ -41,6 +40,7 @@ type
   TOpusEncoder = class
   private
     FCelt               : TCeltEncoder;
+    FSilk               : PSilkEncoder;
     FSilkMode           : TSilkEncControl;
     FApplication        : Integer;
     FChannels           : Integer;
@@ -92,7 +92,7 @@ type
       OutDataBytes, LsbDepth: Integer; FloatApi: Boolean): Integer;
     function  EncodeFrameNative(Pcm: PSingle; FrameSize: Integer; Data: PByte;
       MaxDataBytes: Integer; FloatApi, FirstFrame: Boolean; const AnalysisInfo: TAnalysisInfo;
-      IsSilence: Boolean; Redundancy, CeltToSilk, Prefill: Boolean; EquivRate: Integer;
+      IsSilence: Boolean; Redundancy, CeltToSilk: Boolean; Prefill: Integer; EquivRate: Integer;
       ToCelt: Boolean): Integer;
     procedure SetBitrate(Value: Integer);
     function  GetBitrate: Integer;
@@ -166,7 +166,7 @@ function OpusFrameSizeSelect(FrameSize, VariableDuration, Fs: Integer): Integer;
 implementation
 
 uses
-  OpusSilkMath;
+  OpusSilkMath, OpusSilkEnc;
 
 const
   MAX_ENCODER_BUFFER = 480;
@@ -179,8 +179,16 @@ const
   INV16384: Single = 1.0 / 16384;
   INV2P28: Single = 1.0 / 268435456;
 
-  // SILK encoder availability: CELT-only until stage E2
-  SILK_ENCODER_AVAILABLE = False;
+  FEC_THRESHOLDS: array[0..9] of Integer = (
+    12000, 1000, 14000, 1000, 16000, 1000, 20000, 1000, 22000, 1000);
+  HYBRID_RATE_TABLE: array[0..6, 0..4] of Integer = (
+    (0, 0, 0, 0, 0),
+    (12000, 10000, 10000, 11000, 11000),
+    (16000, 13500, 13500, 15000, 15000),
+    (20000, 16000, 16000, 18000, 18000),
+    (24000, 18000, 18000, 21000, 21000),
+    (32000, 22000, 22000, 28000, 28000),
+    (64000, 38000, 38000, 50000, 50000));
 
   MONO_VOICE_BANDWIDTH_THRESHOLDS: array[0..7] of Integer = (
     9000, 700, 9000, 700, 13500, 1000, 14000, 2000);
@@ -426,6 +434,99 @@ begin
   Result := False;
 end;
 
+function DecideFec(UseInBandFEC, PacketLossPerc, LastFec, Mode: Integer; var Bandwidth: Integer;
+  Rate: Integer): Integer;
+var
+  OrigBandwidth, Hysteresis, LBRRRateThresBps: Integer;
+begin
+  if (UseInBandFEC = 0) or (PacketLossPerc = 0) or (Mode = MODE_CELT_ONLY) then
+    Exit(0);
+  OrigBandwidth := Bandwidth;
+  while True do
+  begin
+    LBRRRateThresBps := FEC_THRESHOLDS[2 * (Bandwidth - OPUS_BANDWIDTH_NARROWBAND)];
+    Hysteresis := FEC_THRESHOLDS[2 * (Bandwidth - OPUS_BANDWIDTH_NARROWBAND) + 1];
+    if LastFec = 1 then LBRRRateThresBps := LBRRRateThresBps - Hysteresis;
+    if LastFec = 0 then LBRRRateThresBps := LBRRRateThresBps + Hysteresis;
+    LBRRRateThresBps := SilkSMULWB(LBRRRateThresBps * (125 - Min(PacketLossPerc, 25)), 655);
+    if Rate > LBRRRateThresBps then
+      Exit(1)
+    else if PacketLossPerc <= 5 then
+      Exit(0)
+    else if Bandwidth > OPUS_BANDWIDTH_NARROWBAND then
+      Dec(Bandwidth)
+    else
+      Break;
+  end;
+  Bandwidth := OrigBandwidth;
+  Result := 0;
+end;
+
+function ComputeSilkRateForHybrid(Rate, Bandwidth: Integer; Frame20ms, Vbr: Boolean;
+  Fec, Channels: Integer): Integer;
+var
+  Entry, I, N, Lo, Hi, X0, X1: Integer;
+begin
+  Rate := Rate div Channels;
+  Entry := 1 + Ord(Frame20ms) + 2 * Fec;
+  N := Length(HYBRID_RATE_TABLE);
+  I := 1;
+  while I < N do
+  begin
+    if HYBRID_RATE_TABLE[I, 0] > Rate then Break;
+    Inc(I);
+  end;
+  if I = N then
+  begin
+    Result := HYBRID_RATE_TABLE[I - 1, Entry];
+    Result := Result + (Rate - HYBRID_RATE_TABLE[I - 1, 0]) div 2;
+  end
+  else
+  begin
+    Lo := HYBRID_RATE_TABLE[I - 1, Entry];
+    Hi := HYBRID_RATE_TABLE[I, Entry];
+    X0 := HYBRID_RATE_TABLE[I - 1, 0];
+    X1 := HYBRID_RATE_TABLE[I, 0];
+    Result := (Lo * (X1 - Rate) + Hi * (Rate - X0)) div (X1 - X0);
+  end;
+  if not Vbr then
+    Result := Result + 100;
+  if Bandwidth = OPUS_BANDWIDTH_SUPERWIDEBAND then
+    Result := Result + 300;
+  Result := Result * Channels;
+  if (Channels = 2) and (Rate >= 12000) then
+    Result := Result - 1000;
+end;
+
+function ComputeRedundancyBytes(MaxDataBytes, BitrateBps, FrameRate, Channels: Integer): Integer;
+var
+  RedundancyBytesCap, RedundancyRate, BaseBits, AvailableBits: Integer;
+begin
+  BaseBits := 40 * Channels + 20;
+  RedundancyRate := BitrateBps + BaseBits * (200 - FrameRate);
+  RedundancyRate := 3 * RedundancyRate div 2;
+  Result := RedundancyRate div 1600;
+  AvailableBits := MaxDataBytes * 8 - 2 * BaseBits;
+  RedundancyBytesCap := (AvailableBits * 240 div (240 + 48000 div FrameRate) + BaseBits) div 8;
+  Result := Min(Result, RedundancyBytesCap);
+  if Result > 4 + 8 * Channels then
+    Result := Min(257, Result)
+  else
+    Result := 0;
+end;
+
+function Float2Int16(X: Single): SmallInt;
+const
+  SCALE: Single = 32768.0;
+  LO: Single = -32768.0;
+  HI: Single = 32767.0;
+begin
+  X := X * SCALE;
+  if X < LO then X := LO;
+  if X > HI then X := HI;
+  Result := SmallInt(Round(X));
+end;
+
 function OpusFrameSizeSelect(FrameSize, VariableDuration, Fs: Integer): Integer;
 var
   NewSize: Integer;
@@ -471,7 +572,9 @@ begin
   FStreamChannels := Channels;
   FFs := SampleRate;
 
-  FillChar(FSilkMode, SizeOf(FSilkMode), 0);
+  New(FSilk);
+  if SilkInitEncoder(FSilk^, FSilkMode) <> 0 then
+    raise EArgumentException.Create('TOpusEncoder: SILK init failed');
   FSilkMode.NChannelsAPI := Channels;
   FSilkMode.NChannelsInternal := Channels;
   FSilkMode.APISampleRate := FFs;
@@ -512,6 +615,7 @@ end;
 destructor TOpusEncoder.Destroy;
 begin
   FCelt.Free;
+  Dispose(FSilk);
   inherited;
 end;
 
@@ -542,12 +646,12 @@ begin
 end;
 
 procedure TOpusEncoder.Reset;
+var
+  Dummy: TSilkEncControl;
 begin
   ResetState;
   FCelt.Reset;
-  // silk_InitEncoder(): the SILK outputs read by the Opus layer go back to 0
-  FSilkMode.AllowBandwidthSwitch := 0;
-  FSilkMode.InWBmodeWithoutVariableLP := 0;
+  SilkInitEncoder(FSilk^, Dummy);
 end;
 
 function TOpusEncoder.UserBitrateToBitrate(FrameSize, MaxDataBytes: Integer): Integer;
@@ -647,7 +751,8 @@ var
   BandwidthThresholds: array[0..7] of Integer;
   VoiceThr, MusicThr: PInteger;
   StereoWidth: Single;
-  Redundancy, CeltToSilk, ToCelt, Prefill, IsSilence: Boolean;
+  Redundancy, CeltToSilk, ToCelt, IsSilence: Boolean;
+  Prefill: Integer;
   AnalysisInfo: TAnalysisInfo;
   EncFrameSize, NbFrames, MaxHeaderBytes, RepacketizeLen, MaxLenSum, TotSize, TmpLen,
   DtxCount, CurrMax: Integer;
@@ -656,6 +761,7 @@ var
   Rp: TOpusRepacketizer;
   BakToMono: Integer;
   FirstFrame, FrameToCelt, FrameRedundancy: Boolean;
+  DummySilk: TSilkEncControl;
 begin
   MaxDataBytes := Min(OPUS_MAX_PACKET_BYTES, OutDataBytes);
   FRangeFinal := 0;
@@ -663,7 +769,7 @@ begin
   Redundancy := False;
   CeltToSilk := False;
   ToCelt := False;
-  Prefill := False;
+  Prefill := 0;
   if (FrameSize <= 0) or (MaxDataBytes <= 0) then
     Exit(OPUS_BAD_ARG);
   if (MaxDataBytes = 1) and (FFs = FrameSize * 10) then
@@ -824,9 +930,6 @@ begin
     FMode := MODE_CELT_ONLY;
   if FLfe then
     FMode := MODE_CELT_ONLY;
-  // Stage E1: no SILK encoder yet, every frame is CELT-only
-  if not SILK_ENCODER_AVAILABLE then
-    FMode := MODE_CELT_ONLY;
 
   if (FPrevMode > 0) and
      (((FMode <> MODE_CELT_ONLY) and (FPrevMode = MODE_CELT_ONLY)) or
@@ -859,7 +962,10 @@ begin
     FSilkMode.Complexity, FSilkMode.PacketLossPercentage);
 
   if (FMode <> MODE_CELT_ONLY) and (FPrevMode = MODE_CELT_ONLY) then
-    Prefill := True;   // (silk_InitEncoder: stage E2)
+  begin
+    SilkInitEncoder(FSilk^, DummySilk);
+    Prefill := 1;
+  end;
 
   // Automatic (rate-dependent) bandwidth selection
   if (FMode = MODE_CELT_ONLY) or FFirst or (FSilkMode.AllowBandwidthSwitch <> 0) then
@@ -918,8 +1024,8 @@ begin
     FBandwidth := OPUS_BANDWIDTH_NARROWBAND;
   // (detected bandwidth from the analysis: stage E3)
 
-  // decide_fec(): FEC is never used in CELT-only mode
-  FSilkMode.LBRRCoded := 0;
+  FSilkMode.LBRRCoded := DecideFec(FSilkMode.UseInBandFEC, FSilkMode.PacketLossPercentage,
+    FSilkMode.LBRRCoded, FMode, FBandwidth, EquivRate);
   FCelt.LsbDepth := LsbDepth;
 
   if (FMode = MODE_CELT_ONLY) and (FBandwidth = OPUS_BANDWIDTH_MEDIUMBAND) then
@@ -1001,25 +1107,32 @@ end;
 
 function TOpusEncoder.EncodeFrameNative(Pcm: PSingle; FrameSize: Integer; Data: PByte;
   MaxDataBytes: Integer; FloatApi, FirstFrame: Boolean; const AnalysisInfo: TAnalysisInfo;
-  IsSilence: Boolean; Redundancy, CeltToSilk, Prefill: Boolean; EquivRate: Integer;
+  IsSilence: Boolean; Redundancy, CeltToSilk: Boolean; Prefill: Integer; EquivRate: Integer;
   ToCelt: Boolean): Integer;
 const
   K1E9: Single = 1e9;
+  INV1024: Single = 1.0 / 1024;
 var
-  Ret, NbComprBytes, RedundancyBytes, CutoffHz, HpFreqSmth1, FrameRate, CurrBandwidth,
-  DelayCompensation, TotalBuffer, Activity, EndBand, StartBand: Integer;
+  I, Ret, NBytes, BytesTarget, NbComprBytes, RedundancyBytes, CutoffHz, HpFreqSmth1, FrameRate,
+  CurrBandwidth, DelayCompensation, TotalBuffer, Activity, EndBand, StartBand, MaxRedundancy: Integer;
+  TotalBitRate, CeltRate, EffectiveMaxRate, OtherBits, MaxBitRate, PrefillOffset, Zero, Err, N2, N4: Integer;
   RedundantRng: Cardinal;
   HBGain, G1, G2, Sum: Single;
   Enc: TEcEnc;
-  PcmBuf: array of Single;
+  PcmBuf, TmpPrefill: array of Single;
+  PcmSilk: array of SmallInt;
   ApplyPadding: Boolean;
   Payload: PByte;
+  Dummy: array[0..1] of Byte;
+  Info: TSilkInfo;
+  DummyEnc: TEcEnc;
 begin
   FRangeFinal := 0;
   Ret := 0;
-  RedundancyBytes := 0;   // (stage E3)
+  RedundancyBytes := 0;
   RedundantRng := 0;
   StartBand := 0;
+  NBytes := 0;
   CurrBandwidth := FBandwidth;
   if FApplication = OPUS_APPLICATION_RESTRICTED_LOWDELAY then
     DelayCompensation := 0
@@ -1033,9 +1146,23 @@ begin
     Activity := 0;
   // (activity from the tonality analysis: stage E3)
 
-  // Stage E1 (CELT-only): no SILK bandwidth switch and no redundant CELT
-  // frame (Redundancy/CeltToSilk/Prefill are used from stage E3 on).
-  FSilkBwSwitch := 0;
+  // For the first frame at a new SILK bandwidth
+  if FSilkBwSwitch <> 0 then
+  begin
+    Redundancy := True;
+    CeltToSilk := True;
+    FSilkBwSwitch := 0;
+    Prefill := 2;
+  end;
+  if FMode = MODE_CELT_ONLY then
+    Redundancy := False;
+  if Redundancy then
+  begin
+    RedundancyBytes := ComputeRedundancyBytes(MaxDataBytes, FBitrateBps, FrameRate, FStreamChannels);
+    if RedundancyBytes = 0 then
+      Redundancy := False;
+  end;
+  BytesTarget := Min(MaxDataBytes - RedundancyBytes, FBitrateBps * FrameSize div (FFs * 8)) - 1;
 
   Payload := Data + 1;
   EcEncInit(Enc, Payload, MaxDataBytes - 1);
@@ -1045,8 +1172,10 @@ begin
     Move(FDelayBuffer[(FEncoderBuffer - TotalBuffer) * FChannels], PcmBuf[0],
       TotalBuffer * FChannels * SizeOf(Single));
 
-  // Only the CELT-only path exists in stage E1: hp_freq_smth1 is constant
-  HpFreqSmth1 := SilkLin2Log(VARIABLE_HP_MIN_CUTOFF_HZ) shl 8;
+  if FMode = MODE_CELT_ONLY then
+    HpFreqSmth1 := SilkLin2Log(VARIABLE_HP_MIN_CUTOFF_HZ) shl 8
+  else
+    HpFreqSmth1 := FSilk.state_Fxx[0].sCmn.variable_HP_smth1_Q15;
   FVariableHPSmth2Q15 := SilkSMLAWB(FVariableHPSmth2Q15, HpFreqSmth1 - FVariableHPSmth2Q15, 983);
   CutoffHz := SilkLog2Lin(Sar32(FVariableHPSmth2Q15, 8));
 
@@ -1066,8 +1195,120 @@ begin
     end;
   end;
 
+  // SILK processing
   HBGain := 1.0;
-  // (SILK processing: stage E2)
+  if FMode <> MODE_CELT_ONLY then
+  begin
+    SetLength(PcmSilk, FChannels * Max(FrameSize, FEncoderBuffer));
+    TotalBitRate := 8 * BytesTarget * FrameRate;
+    if FMode = MODE_HYBRID then
+    begin
+      FSilkMode.BitRate := ComputeSilkRateForHybrid(TotalBitRate, CurrBandwidth, FFs = 50 * FrameSize,
+        FUseVbr, FSilkMode.LBRRCoded, FStreamChannels);
+      CeltRate := TotalBitRate - FSilkMode.BitRate;
+      G1 := -CeltRate * INV1024;
+      HBGain := F_ONE - CeltExp2(G1);
+    end
+    else
+      FSilkMode.BitRate := TotalBitRate;
+    FSilkMode.PayloadSizeMs := 1000 * FrameSize div FFs;
+    FSilkMode.NChannelsAPI := FChannels;
+    FSilkMode.NChannelsInternal := FStreamChannels;
+    if CurrBandwidth = OPUS_BANDWIDTH_NARROWBAND then
+      FSilkMode.DesiredInternalSampleRate := 8000
+    else if CurrBandwidth = OPUS_BANDWIDTH_MEDIUMBAND then
+      FSilkMode.DesiredInternalSampleRate := 12000
+    else
+      FSilkMode.DesiredInternalSampleRate := 16000;
+    if FMode = MODE_HYBRID then
+      FSilkMode.MinInternalSampleRate := 16000
+    else
+      FSilkMode.MinInternalSampleRate := 8000;
+    FSilkMode.MaxInternalSampleRate := 16000;
+    if FMode = MODE_SILK_ONLY then
+    begin
+      EffectiveMaxRate := FrameRate * MaxDataBytes * 8;
+      if FrameRate > 50 then
+        EffectiveMaxRate := EffectiveMaxRate * 2 div 3;
+      if EffectiveMaxRate < 8000 then
+      begin
+        FSilkMode.MaxInternalSampleRate := 12000;
+        FSilkMode.DesiredInternalSampleRate := Min(12000, FSilkMode.DesiredInternalSampleRate);
+      end;
+      if EffectiveMaxRate < 7000 then
+      begin
+        FSilkMode.MaxInternalSampleRate := 8000;
+        FSilkMode.DesiredInternalSampleRate := Min(8000, FSilkMode.DesiredInternalSampleRate);
+      end;
+    end;
+    FSilkMode.UseCBR := Ord(not FUseVbr);
+    FSilkMode.MaxBits := (MaxDataBytes - 1) * 8;
+    if Redundancy and (RedundancyBytes >= 2) then
+    begin
+      FSilkMode.MaxBits := FSilkMode.MaxBits - (RedundancyBytes * 8 + 1);
+      if FMode = MODE_HYBRID then
+        FSilkMode.MaxBits := FSilkMode.MaxBits - 20;
+    end;
+    if FSilkMode.UseCBR <> 0 then
+    begin
+      if FMode = MODE_HYBRID then
+      begin
+        OtherBits := SmallInt(Max(0, FSilkMode.MaxBits - FSilkMode.BitRate * FrameSize div FFs));
+        FSilkMode.MaxBits := Max(0, FSilkMode.MaxBits - OtherBits * 3 div 4);
+        FSilkMode.UseCBR := 0;
+      end;
+    end
+    else
+    begin
+      if FMode = MODE_HYBRID then
+      begin
+        MaxBitRate := ComputeSilkRateForHybrid(FSilkMode.MaxBits * FFs div FrameSize, CurrBandwidth,
+          FFs = 50 * FrameSize, FUseVbr, FSilkMode.LBRRCoded, FStreamChannels);
+        FSilkMode.MaxBits := MaxBitRate * FrameSize div FFs;
+      end;
+    end;
+    if Prefill <> 0 then
+    begin
+      Zero := 0;
+      PrefillOffset := FChannels * (FEncoderBuffer - FDelayCompensation - FFs div 400);
+      GainFade(@FDelayBuffer[PrefillOffset], @FDelayBuffer[PrefillOffset], 0, F_ONE, CELT_OVERLAP_SIZE,
+        FFs div 400, FChannels, @CELT_WINDOW120[0], FFs);
+      FillChar(FDelayBuffer[0], PrefillOffset * SizeOf(Single), 0);
+      for I := 0 to FEncoderBuffer * FChannels - 1 do
+        PcmSilk[I] := Float2Int16(FDelayBuffer[I]);
+      FillChar(DummyEnc, SizeOf(DummyEnc), 0);
+      SilkEncode(FSilk^, FSilkMode, @PcmSilk[0], FEncoderBuffer, DummyEnc, Zero, Prefill, Activity);
+      FSilkMode.OpusCanSwitch := 0;
+    end;
+    for I := 0 to FrameSize * FChannels - 1 do
+      PcmSilk[I] := Float2Int16(PcmBuf[TotalBuffer * FChannels + I]);
+    Ret := SilkEncode(FSilk^, FSilkMode, @PcmSilk[0], FrameSize, Enc, NBytes, 0, Activity);
+    if Ret <> 0 then
+      Exit(OPUS_INTERNAL_ERROR);
+    if FMode = MODE_SILK_ONLY then
+    begin
+      if FSilkMode.InternalSampleRate = 8000 then
+        CurrBandwidth := OPUS_BANDWIDTH_NARROWBAND
+      else if FSilkMode.InternalSampleRate = 12000 then
+        CurrBandwidth := OPUS_BANDWIDTH_MEDIUMBAND
+      else if FSilkMode.InternalSampleRate = 16000 then
+        CurrBandwidth := OPUS_BANDWIDTH_WIDEBAND;
+    end;
+    FSilkMode.OpusCanSwitch := Ord((FSilkMode.SwitchReady <> 0) and not FNonfinalFrame);
+    if NBytes = 0 then
+    begin
+      FRangeFinal := 0;
+      Data[0] := GenToc(FMode, FFs div FrameSize, CurrBandwidth, FStreamChannels);
+      Exit(1);
+    end;
+    if FSilkMode.OpusCanSwitch <> 0 then
+    begin
+      RedundancyBytes := ComputeRedundancyBytes(MaxDataBytes, FBitrateBps, FrameRate, FStreamChannels);
+      Redundancy := RedundancyBytes <> 0;
+      CeltToSilk := False;
+      FSilkBwSwitch := 1;
+    end;
+  end;
 
   // CELT processing
   EndBand := 21;
@@ -1087,6 +1328,11 @@ begin
     else
       FCelt.SetPrediction(2);
   end;
+
+  SetLength(TmpPrefill, FChannels * FFs div 400);
+  if (FMode <> MODE_SILK_ONLY) and (FMode <> FPrevMode) and (FPrevMode > 0) then
+    Move(FDelayBuffer[(FEncoderBuffer - TotalBuffer - FFs div 400) * FChannels], TmpPrefill[0],
+      FChannels * (FFs div 400) * SizeOf(Single));
 
   if FChannels * (FEncoderBuffer - (FrameSize + TotalBuffer)) > 0 then
   begin
@@ -1126,31 +1372,131 @@ begin
     end;
   end;
 
-  // (SILK/hybrid redundancy signalling: stages E2/E3)
+  if (FMode <> MODE_CELT_ONLY) and
+     (EcTell(Enc) + 17 + 20 * Ord(FMode = MODE_HYBRID) <= 8 * (MaxDataBytes - 1)) then
+  begin
+    if FMode = MODE_HYBRID then
+      EcEncBitLogp(Enc, Ord(Redundancy), 12);
+    if Redundancy then
+    begin
+      EcEncBitLogp(Enc, Ord(CeltToSilk), 1);
+      if FMode = MODE_HYBRID then
+        MaxRedundancy := (MaxDataBytes - 1) - Sar32(EcTell(Enc) + 8 + 3 + 7, 3)
+      else
+        MaxRedundancy := (MaxDataBytes - 1) - Sar32(EcTell(Enc) + 7, 3);
+      RedundancyBytes := Min(MaxRedundancy, RedundancyBytes);
+      RedundancyBytes := Min(257, Max(2, RedundancyBytes));
+      if FMode = MODE_HYBRID then
+        EcEncUInt(Enc, RedundancyBytes - 2, 256);
+    end;
+  end
+  else
+    Redundancy := False;
+
+  if not Redundancy then
+  begin
+    FSilkBwSwitch := 0;
+    RedundancyBytes := 0;
+  end;
   if FMode <> MODE_CELT_ONLY then
     StartBand := 17;
 
-  NbComprBytes := (MaxDataBytes - 1) - RedundancyBytes;
-  EcEncShrink(Enc, NbComprBytes);
+  if FMode = MODE_SILK_ONLY then
+  begin
+    Ret := Sar32(EcTell(Enc) + 7, 3);
+    EcEncDone(Enc);
+    NbComprBytes := Ret;
+  end
+  else
+  begin
+    NbComprBytes := (MaxDataBytes - 1) - RedundancyBytes;
+    EcEncShrink(Enc, NbComprBytes);
+  end;
 
-  FCelt.SetAnalysis(AnalysisInfo);
+  if Redundancy or (FMode <> MODE_SILK_ONLY) then
+    FCelt.SetAnalysis(AnalysisInfo);
+  if FMode = MODE_HYBRID then
+  begin
+    Info.SignalType := FSilkMode.SignalType;
+    Info.Offset := FSilkMode.Offset;
+    FCelt.SetSilkInfo(Info);
+  end;
+
+  // 5 ms redundant frame for CELT->SILK
+  if Redundancy and CeltToSilk then
+  begin
+    FCelt.StartBand := 0;
+    FCelt.Vbr := False;
+    FCelt.Bitrate := OPUS_BITRATE_MAX;
+    Err := FCelt.EncodeWithEc(@PcmBuf[0], FFs div 200, Payload + NbComprBytes, RedundancyBytes, nil);
+    if Err < 0 then
+      Exit(OPUS_INTERNAL_ERROR);
+    RedundantRng := FCelt.FinalRange;
+    FCelt.Reset;
+  end;
+
   FCelt.StartBand := StartBand;
 
   if FMode <> MODE_SILK_ONLY then
   begin
     FCelt.Vbr := FUseVbr;
-    if FUseVbr then
+    if FMode = MODE_HYBRID then
     begin
-      FCelt.Vbr := True;
-      FCelt.VbrConstraint := FVbrConstraint;
-      FCelt.Bitrate := FBitrateBps;
+      if FUseVbr then
+      begin
+        FCelt.Bitrate := FBitrateBps - FSilkMode.BitRate;
+        FCelt.VbrConstraint := False;
+      end;
+    end
+    else
+    begin
+      if FUseVbr then
+      begin
+        FCelt.Vbr := True;
+        FCelt.VbrConstraint := FVbrConstraint;
+        FCelt.Bitrate := FBitrateBps;
+      end;
+    end;
+    if (FMode <> FPrevMode) and (FPrevMode > 0) then
+    begin
+      FCelt.Reset;
+      FCelt.EncodeWithEc(@TmpPrefill[0], FFs div 400, @Dummy[0], 2, nil);
+      FCelt.SetPrediction(0);
     end;
     if EcTell(Enc) <= 8 * NbComprBytes then
     begin
       Ret := FCelt.EncodeWithEc(@PcmBuf[0], FrameSize, nil, NbComprBytes, @Enc);
       if Ret < 0 then
         Exit(OPUS_INTERNAL_ERROR);
+      if Redundancy and CeltToSilk and (FMode = MODE_HYBRID) and (NbComprBytes <> Ret) then
+      begin
+        Move(Payload[NbComprBytes], Payload[Ret], RedundancyBytes);
+        NbComprBytes := Ret + RedundancyBytes;
+      end;
     end;
+  end;
+
+  // 5 ms redundant frame for SILK->CELT
+  if Redundancy and not CeltToSilk then
+  begin
+    N2 := FFs div 200;
+    N4 := FFs div 400;
+    FCelt.Reset;
+    FCelt.StartBand := 0;
+    FCelt.SetPrediction(0);
+    FCelt.Vbr := False;
+    FCelt.Bitrate := OPUS_BITRATE_MAX;
+    if FMode = MODE_HYBRID then
+    begin
+      NbComprBytes := Ret;
+      EcEncShrink(Enc, NbComprBytes);
+    end;
+    FCelt.EncodeWithEc(@PcmBuf[FChannels * (FrameSize - N2 - N4)], N4, @Dummy[0], 2, nil);
+    Err := FCelt.EncodeWithEc(@PcmBuf[FChannels * (FrameSize - N2)], N2, Payload + NbComprBytes,
+      RedundancyBytes, nil);
+    if Err < 0 then
+      Exit(OPUS_INTERNAL_ERROR);
+    RedundantRng := FCelt.FinalRange;
   end;
 
   Data[0] := GenToc(FMode, FFs div FrameSize, CurrBandwidth, FStreamChannels);
@@ -1184,6 +1530,11 @@ begin
     Data[1] := 0;
     Ret := 1;
     FRangeFinal := 0;
+  end
+  else if (FMode = MODE_SILK_ONLY) and not Redundancy then
+  begin
+    while (Ret > 2) and (Data[Ret] = 0) do
+      Dec(Ret);
   end;
   Ret := Ret + 1 + RedundancyBytes;
   ApplyPadding := not FUseVbr;
@@ -1370,8 +1721,13 @@ end;
 
 function TOpusEncoder.GetInDTX: Boolean;
 begin
-  // (SILK DTX: stage E2)
-  if FUseDtx then
+  if (FSilkMode.UseDTX <> 0) and ((FPrevMode = MODE_SILK_ONLY) or (FPrevMode = MODE_HYBRID)) then
+  begin
+    Result := FSilk.state_Fxx[0].sCmn.noSpeechCounter >= NB_SPEECH_FRAMES_BEFORE_DTX;
+    if Result and (FSilkMode.NChannelsInternal = 2) and (FSilk.prev_decode_only_middle = 0) then
+      Result := FSilk.state_Fxx[1].sCmn.noSpeechCounter >= NB_SPEECH_FRAMES_BEFORE_DTX;
+  end
+  else if FUseDtx then
     Result := FNbNoActivityMsQ1 >= NB_SPEECH_FRAMES_BEFORE_DTX * 20 * 2
   else
     Result := False;

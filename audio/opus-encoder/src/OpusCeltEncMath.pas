@@ -77,6 +77,7 @@ function  RemoveDoubling(X: PSingle; MaxPeriod, MinPeriod, N: Integer;
   var T0_: Integer; PrevPeriod: Integer; PrevGain: Single): Single;
 procedure CeltLpc(Lpc: PSingle; Ac: PSingle; P: Integer);
 procedure CeltAutocorr(X: PSingle; Ac: PSingle; Lag, N: Integer);
+procedure CeltPitchXcorr(X, Y: PSingle; Xcorr: PSingle; Len, MaxPitch: Integer);
 
 // celt.c comb filter (float semantics)
 procedure CombFilterF(Y, X: PSingle; T0, T1, N: Integer; G0, G1: Single;

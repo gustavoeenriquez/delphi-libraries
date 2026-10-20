@@ -1,0 +1,4 @@
+# ITU-T G.729 test vectors (not redistributed, see README)
+samples/itu-g729/
+samples/itu-g729a/
+samples/itu-g729b/

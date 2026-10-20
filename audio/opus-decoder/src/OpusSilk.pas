@@ -13,8 +13,8 @@ unit OpusSilk;
 
   Output: interleaved int16 at 48 kHz (API sample rate fixed to 48000).
 
-  License of this unit: CC0 1.0 Universal (Public Domain)
-  https://creativecommons.org/publicdomain/zero/1.0/
+  Derived from libopus; distributed under the libopus BSD 3-clause license
+  (full text in README.md).
 }
 
 {$POINTERMATH ON}

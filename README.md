@@ -7,6 +7,8 @@ No DLLs. No C bindings. No external dependencies.
 Everything compiles with stock Delphi on Windows, Linux, and any RTL-supported platform.
 
 **License: [CC0 1.0 Universal (Public Domain)](./LICENSE.md)** — use however you like.
+Exception: `audio/opus-decoder` and `audio/opus-encoder` are faithful ports of libopus and keep its
+permissive **BSD 3-clause** license (see [Upstream attributions](#upstream-attributions)).
 
 ---
 
@@ -44,6 +46,7 @@ Everything compiles with stock Delphi on Windows, Linux, and any RTL-supported p
 | `audio/ogg-container` | ✅ | ✅ | Ogg page reader/writer, packet segmentation, CRC-32 |
 | `audio/vorbis-decoder` | ✅ | — | Ogg Vorbis I — Floor 0/1, all residue types, full VQ |
 | `audio/opus-decoder` | ✅ | — | SILK + CELT + Hybrid, 48 kHz, mono/stereo (RFC 6716) |
+| `audio/opus-encoder` | — | ✅ | libopus 1.5.2 port (stage E1: CELT, bit-exact), Ogg Opus writer |
 | `audio/mp3-decoder` | ✅ | — | MPEG 1/2/2.5, Layer III, 8–320 kbps, all sample rates |
 | `audio/g722-codec` | ✅ | ✅ | ITU-T G.722 SB-ADPCM, 16 kHz, 64/56/48 kbit/s, bit-exact vs ITU test vectors |
 | `audio/g729-codec` | ✅ | ✅ | ITU-T G.729 Annex A + Annex B decoder (SID/comfort noise), 8 kbit/s, written from the Recommendation text (floating point, interoperable, not bit-exact) |
@@ -323,7 +326,9 @@ See [docs/BUILD.md](./docs/BUILD.md) for the full guide.
 
 ## License
 
-All code is **CC0 1.0 Universal (Public Domain)**.
+All code is **CC0 1.0 Universal (Public Domain)**, except the Opus codec ports
+(`audio/opus-decoder`, `audio/opus-encoder`), which are derivative works of libopus
+and are distributed under the libopus **BSD 3-clause** license.
 https://creativecommons.org/publicdomain/zero/1.0/
 
 ### Upstream attributions
@@ -331,6 +336,8 @@ https://creativecommons.org/publicdomain/zero/1.0/
 | Library | Origin | License |
 |---|---|---|
 | `audio/mp3-decoder` | Translated from [minimp3](https://github.com/lieff/minimp3) | CC0 1.0 |
+| `audio/opus-decoder`, `audio/opus-encoder` | Faithful ports of [libopus 1.5.2](https://opus-codec.org/) (Xiph.Org, Skype et al.) | **BSD 3-clause** (full text in [opus-decoder/README.md](./audio/opus-decoder/README.md) and [opus-encoder/README.md](./audio/opus-encoder/README.md)); tests CC0 |
+| `audio/ogg-container`, `audio/vorbis-decoder` | Written from RFC 3533 and the Vorbis I specification (stb_vorbis, public domain, as reference) | CC0 1.0 |
 | `barcode/qr-generator` (encoder) | Algorithm translated from [QR Code generator library](https://github.com/nayuki/QR-Code-generator) (Project Nayuki) | CC0 1.0 (see MIT notice in [barcode/qr-generator/README.md](./barcode/qr-generator/README.md)) |
 | `barcode/qr-generator` (reader) | Algorithm translated from [ZXing](https://github.com/zxing/zxing) | CC0 1.0 (see Apache 2.0 notice in [barcode/qr-generator/README.md](./barcode/qr-generator/README.md)) |
 | All other libraries | Written from scratch against public standards | CC0 1.0 |

@@ -11,8 +11,9 @@ unit OpusDecoder;
   TOpusDecoder reads an Ogg Opus stream (RFC 7845): OpusHead/OpusTags,
   pre-skip, output gain and end trimming from the granule position.
 
-  License: CC0 1.0 Universal (Public Domain)
-  https://creativecommons.org/publicdomain/zero/1.0/
+  Copyright (c) 2010-2011 Xiph.Org Foundation, Skype Limited.
+  Derived from libopus; distributed under the libopus BSD 3-clause license
+  (full text in README.md).
 }
 
 {$POINTERMATH ON}

@@ -8,8 +8,8 @@ unit OpusEntDec;
   Foundation, BSD license). Bit-exact with the reference decoder, which
   matters because bit allocation decisions depend on ec_tell().
 
-  License of this unit: CC0 1.0 Universal (Public Domain)
-  https://creativecommons.org/publicdomain/zero/1.0/
+  Derived from libopus; distributed under the libopus BSD 3-clause license
+  (full text in README.md).
 }
 
 {$POINTERMATH ON}

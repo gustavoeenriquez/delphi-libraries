@@ -6,8 +6,9 @@ unit OpusTypes;
   TOC byte parsing and packet frame splitting, ported from libopus
   src/opus.c (opus_packet_parse_impl, opus_packet_get_samples_per_frame).
 
-  License: CC0 1.0 Universal (Public Domain)
-  https://creativecommons.org/publicdomain/zero/1.0/
+  Copyright (c) 2011 Xiph.Org Foundation.
+  Derived from libopus; distributed under the libopus BSD 3-clause license
+  (full text in README.md).
 }
 
 {$POINTERMATH ON}

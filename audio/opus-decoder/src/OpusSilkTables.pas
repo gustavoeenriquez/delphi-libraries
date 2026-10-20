@@ -7,8 +7,8 @@
   pitch_est_tables.c and resampler_rom.c/h. Table data Copyright (c)
   2006-2011 Skype Limited, Xiph.Org Foundation; BSD license.
 
-  License of this unit: CC0 1.0 Universal (Public Domain)
-  https://creativecommons.org/publicdomain/zero/1.0/
+  Derived from libopus; distributed under the libopus BSD 3-clause license
+  (full text in README.md).
 }
 
 interface

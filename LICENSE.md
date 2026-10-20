@@ -2,7 +2,10 @@
 
 ## Collection License: CC0 1.0 Universal (Public Domain)
 
-All libraries in this repository are dedicated to the public domain under the **CC0 1.0 Universal** license.
+All libraries in this repository are dedicated to the public domain under the **CC0 1.0 Universal** license,
+except `audio/opus-decoder` and `audio/opus-encoder`: they are derivative works of libopus
+(Copyright Xiph.Org, Skype Limited and others) and are distributed under the libopus BSD 3-clause
+license, whose full text is in their README files.
 
 https://creativecommons.org/publicdomain/zero/1.0/
 

@@ -14,6 +14,7 @@ program G722Tests;
     G09  Reset restores the initial state; array overloads
     G10  G.722 Appendix II digital test sequences, encoder (no QMF, with resets)
     G11  G.722 Appendix II digital test sequences, decoder in modes 1/2/3
+    G12  Packet loss concealment: API, level, fade-out, recovery
 
   The test sequences (../samples) come from the ITU-T Software Tool Library
   (G.191, openitu/STL, src/g722/test_data): 16-bit little-endian samples,
@@ -384,6 +385,96 @@ begin
   end;
 end;
 
+// Voiced test signal at 16 kHz: harmonics of a slowly gliding pitch
+function Voiced(N: Integer): TArray<SmallInt>;
+var
+  I, H: Integer;
+  Ph, F0, S: Double;
+begin
+  SetLength(Result, N);
+  Ph := 0;
+  for I := 0 to N - 1 do
+  begin
+    F0 := 140 + 20 * Sin(2 * Pi * I / 16000);
+    Ph := Ph + 2 * Pi * F0 / 16000;
+    S := 0;
+    for H := 1 to 12 do S := S + Sin(H * Ph) / H;
+    Result[I] := Round(6000 * S);
+  end;
+end;
+
+function RmsOf(const X: TArray<SmallInt>; From, Count: Integer): Double;
+var
+  I: Integer;
+begin
+  Result := 0;
+  for I := From to From + Count - 1 do Result := Result + Sqr(Double(X[I]));
+  Result := Sqrt(Result / Count);
+end;
+
+procedure TestG12_Concealment;
+const
+  PKT = 160;   // octets per 20 ms packet (320 samples)
+var
+  Enc: TG722Encoder;
+  Dec, Ref: TG722Decoder;
+  X, Y, Z, Cold: TArray<SmallInt>;
+  Bits: TBytes;
+  NP, K, I: Integer;
+  Lvl, LvlRef, E, S: Double;
+begin
+  WriteLn('G12: packet loss concealment');
+  Dec := TG722Decoder.Create;
+  try
+    SetLength(Cold, 320);
+    Check((Dec.Conceal(@Cold[0], 320) = 320) and (RmsOf(Cold, 0, 320) = 0), 'cold start: silence');
+    Check(Dec.Decode(nil, PKT, @Cold[0]) = 320, 'Decode(nil, 160) conceals 320 samples');
+  finally
+    Dec.Free;
+  end;
+
+  X := Voiced(16000 * 2);
+  NP := Length(X) div 320;
+  Enc := TG722Encoder.Create; Dec := TG722Decoder.Create; Ref := TG722Decoder.Create;
+  try
+    SetLength(Bits, NP * PKT);
+    Enc.Encode(@X[0], NP * 320, @Bits[0]);
+    SetLength(Y, NP * 320); SetLength(Z, NP * 320);
+    for K := 0 to NP - 1 do
+    begin
+      Ref.Decode(@Bits[K * PKT], PKT, @Z[K * 320]);
+      // packet 30 lost; packets 60..64 lost (100 ms burst)
+      if (K = 30) or ((K >= 60) and (K <= 64)) then Dec.Decode(nil, PKT, @Y[K * 320])
+      else Dec.Decode(@Bits[K * PKT], PKT, @Y[K * 320]);
+    end;
+    Lvl := RmsOf(Y, 30 * 320, 160);
+    LvlRef := RmsOf(Z, 30 * 320, 160);
+    Check(Abs(20 * Log10(Lvl / LvlRef)) < 3, Format('first 10 ms of a loss keep the level (%.1f dB)', [20 * Log10(Lvl / LvlRef)]));
+    E := 0; S := 0;
+    for I := 30 * 320 to 30 * 320 + 159 do
+    begin
+      E := E + Sqr(Double(Y[I]) - Z[I]);
+      S := S + Sqr(Double(Z[I]));
+    end;
+    Check(10 * Log10(S / E) > 3, Format('voiced signal continues (SNR %.1f dB over the first 10 ms)', [10 * Log10(S / E)]));
+    Lvl := RmsOf(Y, 63 * 320, 320);
+    Check(Lvl < 0.01 * RmsOf(Z, 63 * 320, 320), 'long loss fades to silence after 60 ms');
+    // recovery: ~120 ms after the burst the output is close to the loss-free
+    // decoder, and the ADPCM states end up identical (bit-exact again)
+    E := 0; S := 0;
+    for I := 71 * 320 to 74 * 320 - 1 do   // 120..180 ms after the burst (packets 60..64)
+    begin
+      E := E + Sqr(Double(Y[I]) - Z[I]);
+      S := S + Sqr(Double(Z[I]));
+    end;
+    Check(10 * Log10(S / E) > 20, Format('120 ms after the loss: %.1f dB from the loss-free decoder', [10 * Log10(S / E)]));
+    Check(CompareMem(@Y[85 * 320], @Z[85 * 320], (NP - 85) * 320 * 2),
+      'decoder is bit-exact again 400 ms after the loss');
+  finally
+    Enc.Free; Dec.Free; Ref.Free;
+  end;
+end;
+
 begin
   Passed := 0;
   Failed := 0;
@@ -403,6 +494,7 @@ begin
   TestG09_Reset;
   TestG10_AppIIEncoder;
   TestG11_AppIIDecoder;
+  TestG12_Concealment;
 
   WriteLn;
   WriteLn(Format('Results: %d passed, %d failed', [Passed, Failed]));

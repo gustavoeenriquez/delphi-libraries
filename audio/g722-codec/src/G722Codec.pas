@@ -16,6 +16,16 @@ unit G722Codec;
     1 or 2 LSBs of I_L (they carry auxiliary data); the encoder clears
     them in those modes.
   - Every instance keeps its own state; instances are independent.
+  - Packet loss concealment (TG722Decoder.Conceal, or Decode with Data = nil):
+    the G.722 PLC appendices are informative and their text is not used here.
+    Own design with well-known techniques: pitch-synchronous waveform
+    substitution on the 16 kHz output (one, then two, then three pitch
+    periods, with overlap-add when the period count changes; 20 % attenuation
+    per 10 ms after the first 10 ms, silence after 60 ms), re-encoding of the
+    first 10 ms of the concealed signal with an encoder that starts from the
+    decoder state (22 samples ahead of the output: the QMF delay) so that the
+    ADPCM predictors and scale factors follow it, and a cross-fade from the
+    concealment into the first good packet.
 
   License: CC0 1.0 Universal (Public Domain)
   https://creativecommons.org/publicdomain/zero/1.0/
@@ -69,11 +79,38 @@ type
     FMode: TG722Mode;
     FLow, FHigh: TG722Band;
     FX: array[0..23] of Integer;   // receive QMF delay line
+    // packet loss concealment
+    FHist: array[0..1023] of SmallInt;          // last output samples, oldest first
+    FLost: Integer;                             // samples concealed in this erasure
+    FPitch: Integer;
+    FPitchBuf: array[0..3 * 288 - 1] of Double; // last three periods before the loss
+    FPeriods: Integer;                          // periods being repeated (1..3)
+    FPos: Integer;                              // read position inside them
+    FFadePos, FFadeLen, FFadePeriods: Integer;  // overlap-add when FPeriods changes
+    FShadow: TG722Encoder;                      // re-encodes the concealed signal
+    // the ADPCM state runs 22 samples (QMF delay) ahead of the output: the
+    // concealment is generated 22 samples in advance and the shadow encoder
+    // consumes it at that point
+    FAhead: array[0..21] of SmallInt;
+    FAheadPos, FAheadLeft: Integer;
+    procedure DecodeCore(Data: PByte; Len: Integer; Output: PSmallInt);
+    procedure PushHistory(P: PSmallInt; N: Integer);
+    function EstimatePitch: Integer;
+    function PeriodicSample(APeriods, APos: Integer): Double;
+    function NextConcealSample: Double;
+    function GenerateSample: SmallInt;
+    function NextOutputSample: SmallInt;
+    procedure StartErasure;
+    procedure ResyncAdpcm(P: PSmallInt; N: Integer);
   public
     constructor Create(Mode: TG722Mode = g722m64);
+    destructor Destroy; override;
     procedure Reset;
     // Decodes Len octets into 2*Len samples (16 kHz). Returns the sample count.
+    // Data = nil: the packet of Len octets was lost; 2*Len samples are concealed.
     function Decode(Data: PByte; Len: Integer; Output: PSmallInt): Integer; overload;
+    // Conceals N lost samples (N even; 320 for a 20 ms packet). Returns N.
+    function Conceal(Output: PSmallInt; N: Integer): Integer;
     function Decode(const Data: array of Byte): TArray<SmallInt>; overload;
     // Sub-band decoder without the QMF (G.722 Appendix II test configuration):
     // returns the reconstructed lower and higher band signals RL and RH.
@@ -88,6 +125,9 @@ const
   G722_RTP_CLOCK_RATE = 8000;
 
 implementation
+
+uses
+  Math;
 
 const
   // QMF coefficients h(0)..h(23) (symmetric, Table 2/G.722)
@@ -351,13 +391,26 @@ constructor TG722Decoder.Create(Mode: TG722Mode);
 begin
   inherited Create;
   FMode := Mode;
+  FShadow := TG722Encoder.Create(Mode);
   Reset;
+end;
+
+destructor TG722Decoder.Destroy;
+begin
+  FShadow.Free;
+  inherited;
 end;
 
 procedure TG722Decoder.Reset;
 begin
   ResetSubbands;
   FillChar(FX, SizeOf(FX), 0);
+  FillChar(FHist, SizeOf(FHist), 0);
+  FLost := 0;
+  FPitch := 0;
+  FPeriods := 1;
+  FPos := 0;
+  FFadeLen := 0;
 end;
 
 procedure TG722Decoder.ResetSubbands;
@@ -394,7 +447,7 @@ begin
   AdaptPredictor(FHigh, DLT);
 end;
 
-function TG722Decoder.Decode(Data: PByte; Len: Integer; Output: PSmallInt): Integer;
+procedure TG722Decoder.DecodeCore(Data: PByte; Len: Integer; Output: PSmallInt);
 var
   K, I, RL, RH, Sum0, Sum1: Integer;
 begin
@@ -418,7 +471,233 @@ begin
     Output^ := Sat16(Sar(Sum1, 11));
     Inc(Output);
   end;
+end;
+
+function TG722Decoder.Decode(Data: PByte; Len: Integer; Output: PSmallInt): Integer;
+var
+  N, R, I: Integer;
+  W: Double;
+  P: PSmallInt;
+begin
   Result := 2 * Len;
+  if Len <= 0 then Exit(0);
+  if Data = nil then
+    Exit(Conceal(Output, 2 * Len));
+  DecodeCore(Data, Len, Output);
+  if FLost > 0 then
+  begin
+    // first packet after a loss: cross-fade from the continued concealment
+    // (4 ms, plus 2 ms per 10 ms lost, up to 10 ms)
+    R := Min(64 + 32 * (FLost div 160), 160);
+    R := Min(R, 2 * Len);
+    P := Output;
+    for I := 0 to R - 1 do
+    begin
+      W := (I + 1) / (R + 1);
+      N := Round(W * P^ + (1 - W) * NextOutputSample);
+      P^ := SmallInt(EnsureRange(N, -32768, 32767));
+      Inc(P);
+    end;
+    FLost := 0;
+  end;
+  PushHistory(Output, 2 * Len);
+end;
+
+{ --- packet loss concealment --- }
+
+procedure TG722Decoder.PushHistory(P: PSmallInt; N: Integer);
+var
+  K: Integer;
+begin
+  if N >= Length(FHist) then
+  begin
+    Inc(P, N - Length(FHist));
+    N := Length(FHist);
+  end;
+  Move(FHist[N], FHist[0], (Length(FHist) - N) * SizeOf(SmallInt));
+  for K := 0 to N - 1 do
+  begin
+    FHist[Length(FHist) - N + K] := P^;
+    Inc(P);
+  end;
+end;
+
+// Pitch period (samples at 16 kHz, 32..288) of the last 16 ms of output:
+// normalized correlation on a 2:1 decimated signal, refined at full rate.
+function TG722Decoder.EstimatePitch: Integer;
+const
+  L = 256;
+var
+  D: array[0..511] of Double;
+  NH, K, Lag, Best, BestLag: Integer;
+  C, E, V, BestV: Double;
+
+  function Score(ALag: Integer): Double;   // full rate
+  var
+    J: Integer;
+    CC, EE: Double;
+  begin
+    CC := 0; EE := 0;
+    for J := NH - L to NH - 1 do
+    begin
+      CC := CC + FHist[J] * FHist[J - ALag];
+      EE := EE + Sqr(Double(FHist[J - ALag]));
+    end;
+    if EE > 0 then Result := CC / Sqrt(EE) else Result := 0;
+  end;
+
+begin
+  NH := Length(FHist);
+  for K := 0 to 511 do
+    D[K] := 0.5 * (FHist[NH - 1024 + 2 * K] + FHist[NH - 1024 + 2 * K + 1]);
+  BestV := -MaxDouble; BestLag := 16;
+  for Lag := 16 to 144 do
+  begin
+    C := 0; E := 0;
+    for K := 512 - L div 2 to 511 do
+    begin
+      C := C + D[K] * D[K - Lag];
+      E := E + Sqr(D[K - Lag]);
+    end;
+    if E > 0 then V := C / Sqrt(E) else V := 0;
+    if V > BestV then begin BestV := V; BestLag := Lag; end;
+  end;
+  Result := 2 * BestLag;
+  BestV := -MaxDouble;
+  for Lag := Max(32, 2 * BestLag - 2) to Min(288, 2 * BestLag + 2) do
+  begin
+    V := Score(Lag);
+    if V > BestV then begin BestV := V; Best := Lag; Result := Best; end;
+  end;
+end;
+
+procedure TG722Decoder.StartErasure;
+var
+  K, NH: Integer;
+begin
+  FPitch := EstimatePitch;
+  NH := Length(FHist);
+  for K := 0 to 3 * FPitch - 1 do
+    FPitchBuf[K] := FHist[NH - 3 * FPitch + K];
+  FPeriods := 1;
+  FPos := 0;
+  FFadeLen := 0;
+  // the shadow encoder starts from the decoder state and the recent output
+  FShadow.FLow := FLow;
+  FShadow.FHigh := FHigh;
+  for K := 0 to 23 do FShadow.FX[K] := FHist[NH - 24 + K];
+  FShadow.FHasPending := False;
+  // first 22 samples: their input is already inside the decoder pipeline
+  for K := 0 to 21 do FAhead[K] := GenerateSample;
+  FAheadPos := 0;
+  FAheadLeft := 22;
+end;
+
+function TG722Decoder.GenerateSample: SmallInt;
+begin
+  Result := SmallInt(EnsureRange(Round(NextConcealSample), -32768, 32767));
+end;
+
+// Next concealed output sample (from the look-ahead queue, then the generator)
+function TG722Decoder.NextOutputSample: SmallInt;
+begin
+  if FAheadLeft > 0 then
+  begin
+    Result := FAhead[FAheadPos];
+    FAheadPos := (FAheadPos + 1) mod 22;
+    Dec(FAheadLeft);
+  end
+  else
+    Result := GenerateSample;
+end;
+
+// Sample APos (0 .. APeriods*P - 1) of the last APeriods periods
+function TG722Decoder.PeriodicSample(APeriods, APos: Integer): Double;
+begin
+  Result := FPitchBuf[3 * FPitch - APeriods * FPitch + APos mod (APeriods * FPitch)];
+end;
+
+function TG722Decoder.NextConcealSample: Double;
+var
+  G, W: Double;
+  Want: Integer;
+begin
+  // more periods after 10 and 20 ms (less buzz), switched with overlap-add
+  if FLost < 160 then Want := 1 else if FLost < 320 then Want := 2 else Want := 3;
+  if (Want <> FPeriods) and (FFadeLen = 0) then
+  begin
+    FFadePeriods := FPeriods;
+    FFadeLen := Max(FPitch div 4, 1);
+    FFadePos := 0;
+    FPeriods := Want;
+  end;
+  Result := PeriodicSample(FPeriods, FPos);
+  if FFadeLen > 0 then
+  begin
+    W := (FFadePos + 1) / (FFadeLen + 1);
+    Result := W * Result + (1 - W) * PeriodicSample(FFadePeriods, FPos);
+    Inc(FFadePos);
+    if FFadePos >= FFadeLen then FFadeLen := 0;
+  end;
+  FPos := (FPos + 1) mod (FPeriods * FPitch);
+  // 20 % attenuation per 10 ms after the first 10 ms; silence after 60 ms
+  if FLost < 160 then G := 1
+  else G := Max(0.0, 1 - 0.2 * (FLost - 160) / 160);
+  Result := Result * G;
+  Inc(FLost);
+end;
+
+// Run the concealed samples through an encoder that shares the decoder state
+// and decode its codes, so the ADPCM predictors and scale factors (and the
+// receive QMF memory) follow the concealed signal.
+procedure TG722Decoder.ResyncAdpcm(P: PSmallInt; N: Integer);
+var
+  K, RL, RH: Integer;
+  X0: SmallInt;
+  Code: Byte;
+begin
+  K := 0;
+  while K + 1 < N do
+  begin
+    X0 := P^; Inc(P);
+    Code := FShadow.EncodePair(X0, P^);
+    Inc(P);
+    DecodeSubbands(Code, RL, RH);
+    Move(FX[2], FX[0], 22 * SizeOf(Integer));
+    FX[22] := RL + RH;
+    FX[23] := RL - RH;
+    Inc(K, 2);
+  end;
+end;
+
+function TG722Decoder.Conceal(Output: PSmallInt; N: Integer): Integer;
+var
+  K: Integer;
+  P: PSmallInt;
+  Ahead: TArray<SmallInt>;
+begin
+  N := N and not 1;
+  Result := N;
+  if N <= 0 then Exit;
+  if FLost = 0 then StartErasure;
+  SetLength(Ahead, N);
+  P := Output;
+  for K := 0 to N - 1 do
+  begin
+    // output the sample generated 22 samples ago, queue a new one
+    P^ := FAhead[FAheadPos];
+    Inc(P);
+    Ahead[K] := GenerateSample;
+    FAhead[FAheadPos] := Ahead[K];
+    FAheadPos := (FAheadPos + 1) mod 22;
+  end;
+  FAheadLeft := 22;
+  // re-encode only the first 10 ms (unattenuated) of the erasure: following
+  // the fade-out would leave the ADPCM scale factors too small when the
+  // packets come back (measured: worse PESQ on burst losses)
+  K := 160 + 22 - (FLost - N);
+  if K > 0 then ResyncAdpcm(@Ahead[0], Min(N, K and not 1));
+  PushHistory(Output, N);
 end;
 
 function TG722Decoder.Decode(const Data: array of Byte): TArray<SmallInt>;

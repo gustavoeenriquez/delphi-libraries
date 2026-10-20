@@ -8,10 +8,12 @@
                  spectrum fits the bit budget (minus the scalefactor bits)
     outer loop : measure the quantization noise per scalefactor band against
                  the allowed noise from the psychoacoustic model (Xmin); the
-                 bands that exceed it get their scalefactor incremented
+                 band that exceeds it most gets its scalefactor incremented
                  (finer quantization there, 3 dB per step, or 6 dB once
-                 scalefac_scale is set) and the inner loop runs again.
-                 The best result seen (fewest / smallest violations) is kept.
+                 scalefac_scale is set) and the inner loop runs again,
+                 starting from the previous global_gain.  The best result
+                 seen (smallest squared violations) is kept; the loop stops
+                 after LOOP_STALL iterations without a better one.
 
   Finally scalefac_compress (slen1/slen2) and preflag are chosen to code the
   scalefactors with as few bits as possible.
@@ -44,7 +46,9 @@ uses
   MP3EncQuantize, MP3EncHuffman, MP3EncFrame, MP3EncRateCtrl, MP3EncPsy;
 
 const
-  LOOP_MAX_ITER  = 30;
+  LOOP_MAX_ITER  = 30;     { short blocks }
+  LOOP_MAX_ITER_LONG = 60; { long blocks: one band amplified per iteration }
+  LOOP_STALL     = 10;     { iterations without improvement before stopping }
   LOOP_MAX_SAVE_STEPS = 60;  { max global_gain increments in the saving phase }
   LOOP_TAB_OFS   = 300;    { table index offset for exponents -300..300 }
 
@@ -214,6 +218,8 @@ var
   overCount   : Integer;
   overDb, totDb, totNoiseE, bestNoiseE, overSsd, bestOverSsd: Double;
   anyAmp, allAmp, better, vbrOk: Boolean;
+  exMax, ex: Double;
+  prevGg: Integer;
 
   procedure ComputeAdj;
   var bb: Integer;
@@ -250,20 +256,35 @@ var
   { Binary search of the smallest global_gain whose Huffman bits fit ABudget.
     Leaves ix / params for that gain; returns the gain and its bit count.
     The search counts with the fixed region split; the best split never
-    costs more, so the gain is then lowered while it still fits. }
-  function InnerLoop(ABudget: Integer; out ABits: Integer): Integer;
+    costs more, so the gain is then lowered while it still fits.  With
+    AHint (the gain of the previous outer iteration, which changed one
+    scalefactor) the search steps from there instead, and the best split
+    is only used for the final count. }
+  function InnerLoop(ABudget: Integer; out ABits: Integer; AHint: Integer = -1): Integer;
   var lo, hi, mid, bb: Integer;
   begin
-    lo := 0; hi := 255; Result := 255; ABits := 0;
-    while lo <= hi do begin
-      mid := (lo + hi) shr 1;
-      bb := QuantizeAndCount(mid, False);
+    ABits := 0;
+    if AHint >= 0 then begin
+      Result := AHint;
+      bb := QuantizeAndCount(Result, False);
       if bb <= ABudget then begin
-        Result := mid; ABits := bb; hi := mid - 1;
+        while (Result > 0) and (QuantizeAndCount(Result - 1, False) <= ABudget) do Dec(Result);
       end else
-        lo := mid + 1;
+        while (Result < 255) and (bb > ABudget) do begin
+          Inc(Result); bb := QuantizeAndCount(Result, False);
+        end;
+    end else begin
+      lo := 0; hi := 255; Result := 255;
+      while lo <= hi do begin
+        mid := (lo + hi) shr 1;
+        bb := QuantizeAndCount(mid, False);
+        if bb <= ABudget then begin
+          Result := mid; hi := mid - 1;
+        end else
+          lo := mid + 1;
+      end;
     end;
-    if RateCtrlBestRegions and (ABlockType = 0) then
+    if RateCtrlBestRegions and (ABlockType = 0) and (AHint < 0) then
       while (Result > 0) and (QuantizeAndCount(Result - 1) <= ABudget) do
         Dec(Result);
     { restore ix / params of the chosen gain (the last probe may differ) }
@@ -432,6 +453,7 @@ begin
     FillChar(sf, SizeOf(sf), 0);
     sfScale := 0;
   end;
+  prevGg := -1;
   if not vbrOk then
   repeat
     ComputeAdj;
@@ -441,7 +463,8 @@ begin
     budget := AMaxBits - part2;
     if budget < 0 then Break;
 
-    gg := InnerLoop(budget, bits);
+    gg := InnerLoop(budget, bits, prevGg);
+    prevGg := gg;
     { nothing codable within the budget, even at the coarsest gain: keep best }
     if (bits = MaxInt) or (bits > budget) then Break;
 
@@ -479,13 +502,25 @@ begin
     end;
     Inc(iter);
     if overCount = 0 then Break;
-    if iter >= LOOP_MAX_ITER then Break;
+    if iter >= LOOP_MAX_ITER_LONG then Break;
+    if iter - bestIter > LOOP_STALL then Break;
     if gg = 255 then Break;                    { nothing coded at all }
 
-    { amplify the bands above threshold (sfb 21 has no scalefactor) }
+    { amplify the band furthest above its threshold (sfb 21 has no
+      scalefactor).  Amplifying every band above threshold (dist10) stops
+      after one round when the budget is short (dense music at 128 kbps:
+      all bands over): the noise then stays flat, the loud low bands end
+      10-13 dB under their thresholds and the high ones over (PEAQ 128 kbps
+      -0.86 -> -0.77, 96 kbps -1.62 -> -1.43 over eight pieces). }
     anyAmp := False;
+    exMax := -1e30;
+    for b := 0 to 20 do
+      if over[b] then begin
+        ex := noise[b] / AXmin[b];
+        if ex > exMax then exMax := ex;
+      end;
     for b := 0 to 20 do begin
-      if not over[b] then Continue;
+      if not over[b] or (noise[b] / AXmin[b] < exMax * 0.9977) then Continue;  { within 0.01 dB }
       if b < 11 then k := SF_CAP_LOW else k := SF_CAP_HIGH;
       if sf[b] < k then begin
         Inc(sf[b]); amplified[b] := True; anyAmp := True;

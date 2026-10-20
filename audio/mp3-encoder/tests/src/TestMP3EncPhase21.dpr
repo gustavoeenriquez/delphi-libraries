@@ -190,13 +190,13 @@ begin
   WriteLn(Format('       stereo V2 round trip SNR: L %.1f dB, R %.1f dB', [snrL, snrR]));
   Check('VB07 stereo V2 round trip SNR > 20 dB', (snrL > 20) and (snrR > 20));
 
-  { mono: allowed noise 1.5 dB under the stereo scale (M/S thresholds are
+  { mono: allowed noise 1 dB under the stereo scale (M/S thresholds are
     the minimum of three analyses, stricter than a single channel's) }
   Cfg.SrIdx := 0; Cfg.BrIdx := 9; Cfg.Padding := 0;
   EncInit(EncM, Cfg); EncEnableVBR(EncM, 2);
   EncInitStereo(EncS, Cfg); EncEnableVBR(EncS, 2);
-  Check('VB08 mono quality scale 1.5 dB stricter than stereo',
-    Abs(10 * Log10(EncS.VbrNoiseScale / EncM.VbrNoiseScale) - 1.5) < 1e-9);
+  Check('VB08 mono quality scale 1 dB stricter than stereo',
+    Abs(10 * Log10(EncS.VbrNoiseScale / EncM.VbrNoiseScale) - 1.0) < 1e-9);
   { pre-echo control keeps the thresholds of the last granules in VBR only }
   EncInit(EncC, Cfg);
   for f := 0 to 7 do begin

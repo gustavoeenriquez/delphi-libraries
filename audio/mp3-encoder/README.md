@@ -10,11 +10,17 @@ ODG de PEAQ básico (GstPEAQ; 0 = transparente, −4 = muy molesto) sobre cinco 
 de 4–30 s a 44,1 kHz (dos músicas estéreo, voz, batería estéreo, castañuelas),
 decodificando con ffmpeg y remuestreando a 48 kHz. Media de las cinco:
 
-| CBR | antes de las correcciones | correcciones | + regiones Huffman | + reparto de bits | + M/S | + modelo revisado (defecto) | LAME 3.100 |
-|---|---:|---:|---:|---:|---:|---:|---:|
-| 96 kbps | — | −1.62 | −1.59 | −1.49 | −1.30 | **−1.34** | −1.32 |
-| 128 kbps | −1.35 | −1.03 | −1.00 | −0.90 | −0.76 | **−0.73** | −0.76 |
-| 192 kbps | — | −0.40 | −0.38 | −0.28 | −0.18 | **−0.08** | −0.13 |
+| CBR | antes de las correcciones | correcciones | + regiones Huffman | + reparto de bits | + M/S | + modelo revisado | + bucle de conformado (defecto) | LAME 3.100 |
+|---|---:|---:|---:|---:|---:|---:|---:|---:|
+| 96 kbps | — | −1.62 | −1.59 | −1.49 | −1.30 | −1.34 | **−1.16** | −1.32 |
+| 128 kbps | −1.35 | −1.03 | −1.00 | −0.90 | −0.76 | −0.73 | **−0.68** | −0.76 |
+| 192 kbps | — | −0.40 | −0.38 | −0.28 | −0.18 | −0.08 | **−0.04** | −0.13 |
+
+Validación con música densa que no se usó para ajustar (dos fragmentos de 20 s de
+música estéreo local, fuera del repositorio) y música 1 en mono: media de las ocho
+piezas antes / ahora / LAME: 96 kbps −1.62 / **−1.43** / −1.46, 128 kbps −0.86 /
+**−0.77** / −0.73, 192 kbps −0.11 / **−0.08** / −0.10. Los dos fragmentos densos
+siguen por detrás de LAME a 128 kbps (−1.40 frente a −0.97 y −1.09).
 
 (El modelo FFT opcional da −1.59 / −1.02 / −0.38 sin las dos últimas mejoras.)
 
@@ -24,7 +30,8 @@ tabla en cada región) en vez de 10/3 fijos: −1.9 % de bits Huffman, que el bu
 convierte en menos ruido (la música gana 0.03–0.1; VBR, la misma calidad con
 1.5–2 % menos de bits). La búsqueda binaria de global_gain cuenta con la división
 fija y solo los últimos pasos con la óptima: codificar es unas 2 veces más lento
-(30 s de estéreo a 128 kbps en ~3 s).
+(30 s de estéreo a 128 kbps en ~2.3 s; con el bucle de conformado posterior,
+~4 s).
 
 Reparto de bits entre gránulos: la demanda que estima el modelo psicoacústico
 (0.5 log2(E/xmin) por línea) no cuenta el coste del Huffman ni de los
@@ -67,8 +74,22 @@ El modelo psicoacústico con FFT (`EncDefaultPsyModel := 1`, modelo 2 de la ISO
 para los bloques largos) queda a la par en CBR, pero en VBR da umbrales más laxos
 y bastante peor calidad a igual tasa (voz −1.6 frente a −0.3); no es el modelo
 por defecto. Redondear al nivel de reconstrucción más cercano en vez del sesgo
-0.4054 se probó y empeora (0.03). Lo que queda frente a LAME en CBR es la música
-densa a 96–128 kbps (música 1: −1.53 frente a −1.32 a 128 kbps).
+0.4054 se probó y empeora (0.03).
+
+Bucle de conformado (CBR): cuando el presupuesto no alcanza para el umbral de
+ninguna banda (música densa a 96–128 kbps) el bucle externo amplificaba todas las
+bandas por encima del umbral a la vez y paraba en cuanto todas habían sido
+amplificadas una vez (regla de dist10): una sola ronda, ruido plano, y las bandas
+graves (fuertes) terminaban 10–13 dB por debajo de su umbral mientras las agudas
+lo pasaban 3–4 dB. Ahora se amplifica solo la banda más por encima de su umbral,
+hasta 60 iteraciones y con corte tras 10 sin mejora; la búsqueda del global_gain
+parte del valor de la iteración anterior. Codificar es 1.7 veces más lento
+(30 s de estéreo a 128 kbps en ~4 s). Además, en M/S el umbral propio de S se toma
+6 dB más alto: con el propio completo, el S de la música estéreo correlada se
+llevaba tantos bits como M. Probados sin ventaja: cuantización directa con un
+factor común a todos los umbrales para llenar el presupuesto (iguala el exceso en
+todas las bandas: −0.87 frente a −0.77), minval más bajo o más plano, L/R más
+frecuente.
 
 ## Conmutación de ventana y pre-eco (2026-10-20)
 
@@ -127,33 +148,34 @@ Tres cambios, solo en VBR:
 
 Probados sin ventaja: un ATH adaptativo que sigue la sonoridad con decaimiento lento
 (PEAQ sí quiere el siseo de fondo de las castañuelas codificado: −0.39 → −0.96),
-un tope del ruido VBR por la energía propia y un paso bajo en V0. Media de seis
-piezas (las cinco de arriba y música 1 en mono):
+un tope del ruido VBR por la energía propia y un paso bajo en V0.
 
-| | antes (6ec9769) | cuantización directa | + reparto | LAME |
-|---|---:|---:|---:|---:|
-| V0 | −0.18 | −0.07 | **−0.02** | −0.01 |
-| V2 | −0.63 | −0.41 | **−0.26** | −0.29 |
-| V4 | — | — | **−0.67** | −0.76 |
-| V5 | −2.01 | −1.48 | **−1.13** | −1.25 |
-| V6 | — | — | **−1.49** | −1.66 |
-| V7 | — | — | **−1.83** | −2.06 |
-| V9 | — | — | **−2.52** | −2.62 |
+Con el umbral propio de S 6 dB más alto (ver CBR) la escala se recalibró de nuevo
+(mono 1 dB más estricto). Media de ocho piezas (las cinco de arriba, música 1 en
+mono y los dos fragmentos densos de validación):
+
+| | ahora | LAME |
+|---|---:|---:|
+| V0 | −0.06 | 0.00 |
+| V2 | −0.26 | −0.24 |
+| V4 | **−0.66** | −0.69 |
+| V5 | −1.20 | −1.18 |
+| V6 | **−1.63** | −1.64 |
+| V7 | **−1.97** | −2.10 |
+| V9 | **−2.56** | −2.60 |
 
 Por pieza (kbps / ODG de PEAQ):
 
-| Calidad | música 1 | LAME | música 2 | LAME | voz | LAME | batería | LAME | castañuelas | LAME | música 1 mono | LAME |
-|---|---|---|---|---|---|---|---|---|---|---|---|---|
-| V0 | 241 / 0.07 | 232 / 0.06 | 235 / 0.03 | 244 / −0.07 | 101 / −0.04 | 114 / −0.03 | 96 / −0.26 | 143 / 0.01 | 137 / 0.03 | 140 / −0.08 | 130 / 0.08 | 118 / 0.04 |
-| V2 | 192 / −0.07 | 180 / −0.26 | 178 / −0.65 | 191 / −0.27 | 80 / −0.36 | 87 / −0.25 | 83 / 0.00 | 84 / −0.22 | 94 / −0.36 | 104 / −0.43 | 102 / −0.13 | 94 / −0.32 |
-| V4 | 163 / −0.45 | 150 / −0.94 | 142 / −1.45 | 155 / −1.06 | 67 / −0.78 | 70 / −0.73 | 70 / −0.19 | 67 / −0.43 | 72 / −0.58 | 77 / −0.43 | 87 / −0.59 | 81 / −0.95 |
-| V6 | 126 / −1.53 | 121 / −1.79 | 98 / −2.49 | 103 / −2.34 | 52 / −1.72 | 51 / −1.80 | 53 / −0.65 | 52 / −1.37 | 43 / −0.83 | 44 / −0.89 | 67 / −1.73 | 67 / −1.80 |
-| V9 | 85 / −3.13 | 80 / −3.09 | 71 / −2.95 | 75 / −2.65 | 40 / −2.41 | 37 / −2.55 | 41 / −1.89 | 41 / −2.58 | 33 / −1.46 | 36 / −1.80 | 48 / −3.26 | 44 / −3.05 |
+| Calidad | música 1 | LAME | música 2 | LAME | voz | LAME | batería | LAME | castañuelas | LAME | música 1 mono | LAME | densa 1 | LAME | densa 2 | LAME |
+|---|---|---|---|---|---|---|---|---|---|---|---|---|---|---|---|---|
+| V0 | 235 / 0.09 | 232 / 0.06 | 241 / 0.05 | 244 / −0.07 | 101 / −0.04 | 114 / −0.03 | 95 / −0.05 | 143 / 0.01 | 137 / 0.03 | 140 / −0.08 | 130 / 0.08 | 118 / 0.04 | 253 / −0.41 | 268 / 0.06 | 272 / −0.26 | 260 / 0.05 |
+| V2 | 187 / −0.08 | 180 / −0.26 | 183 / −0.54 | 191 / −0.27 | 80 / −0.36 | 87 / −0.25 | 77 / −0.03 | 84 / −0.22 | 94 / −0.37 | 104 / −0.43 | 102 / −0.13 | 94 / −0.32 | 206 / −0.32 | 203 / −0.06 | 213 / −0.27 | 203 / −0.08 |
+| V4 | 158 / −0.51 | 150 / −0.94 | 146 / −1.32 | 155 / −1.06 | 67 / −0.78 | 70 / −0.73 | 64 / −0.18 | 67 / −0.43 | 72 / −0.59 | 77 / −0.43 | 87 / −0.59 | 81 / −0.95 | 163 / −0.60 | 162 / −0.43 | 167 / −0.72 | 165 / −0.52 |
+| V6 | 122 / −1.58 | 121 / −1.79 | 101 / −2.41 | 103 / −2.34 | 52 / −1.72 | 51 / −1.80 | 48 / −0.64 | 52 / −1.37 | 43 / −0.83 | 44 / −0.89 | 67 / −1.73 | 67 / −1.80 | 111 / −1.90 | 115 / −1.49 | 115 / −2.20 | 117 / −1.67 |
+| V9 | 82 / −3.13 | 80 / −3.09 | 74 / −2.90 | 75 / −2.65 | 40 / −2.43 | 37 / −2.55 | 37 / −1.90 | 41 / −2.58 | 33 / −1.51 | 36 / −1.80 | 47 / −3.28 | 44 / −3.05 | 79 / −2.64 | 76 / −2.54 | 83 / −2.70 | 81 / −2.56 |
 
-Lo que queda: el reparto dentro de la música estéreo (música 1 recibe más bits que
-en LAME y música 2 menos; música 2 en V2 −0.65 frente a −0.27) y la batería en V0
-(−0.26 frente a 0.01; sin paso bajo en V0, LAME corta a ~19.5 kHz, pero cortar
-empeora las castañuelas).
+Lo que queda: la música densa en VBR (los dos fragmentos de validación, −0.3 en V2
+frente a −0.07; música 2 −0.54 frente a −0.27), con la misma tasa que LAME.
 
 El umbral absoluto es adaptativo en VBR: en los gránulos silenciosos (pausas de la
 voz, finales) baja hasta 20 dB, porque el oyente sube el volumen y ese detalle se
@@ -240,7 +262,7 @@ así que los decodificadores gapless (ffmpeg, LAME) recuperan la duración exact
 
 ## Tests
 
-`tests/src/TestMP3EncPhase1..21.dpr` (un programa por fase, 863 checks; la 19
+`tests/src/TestMP3EncPhase1..21.dpr` (un programa por fase, 864 checks; la 19
 cubre los modelos psicoacústicos (MDCT y FFT), el bucle (también en modo calidad), el reservorio, MS automático y round trips
 decodificados con `mp3-decoder`; la 20, bloques cortos (round trips solo cortos y
 automáticos, secuencia legal de ventanas, pre-eco frente a solo bloques largos,

@@ -84,6 +84,14 @@ delay 528 + padding y la duración queda exacta).
   largos; escala recalibrada. ODG medio (6 piezas) V0/V2/V5/V7 −0.02 / −0.26 /
   −1.13 / −1.83, a la par o por delante de LAME (−0.01 / −0.29 / −1.25 / −2.06).
   Fase 21: VB08–VB09.
+- Bucle de conformado (CBR): se amplifica solo la banda más por encima de su
+  umbral (antes todas, y la regla de dist10 cortaba tras una ronda: ruido plano
+  con presupuesto corto), hasta 60 iteraciones con corte tras 10 sin mejora y
+  búsqueda del global_gain desde la iteración anterior (1.7× más lento). Umbral
+  propio de S en M/S 6 dB más alto. Validación con dos fragmentos de música densa
+  local. Media de 8 piezas CBR 96/128/192: −1.62 / −0.86 / −0.11 → −1.43 / −0.77 /
+  −0.08 (LAME −1.46 / −0.73 / −0.10); VBR recalibrado (mono −1 dB), a la par de
+  LAME de V0 a V9. Fase 19: LP24.
 
 ## Pendiente / ideas
 
@@ -95,9 +103,9 @@ delay 528 + padding y la duración queda exacta).
   a 96–128 kbps (música 1 a 128 kbps −1.53 frente a −1.32). Ideas: scfsi,
   estrategias de amplificación del bucle externo. Probado sin ventaja: redondeo
   al nivel más cercano (adj43).
-- VBR: queda el reparto dentro de la música estéreo (música 2 en V2 −0.65 frente
-  a −0.27; recibe menos bits que en LAME y música 1 más) y la batería en V0 (−0.26;
-  LAME corta a ~19.5 kHz). Probado sin ventaja: umbral absoluto más bajo en
-  silencios, ATH que sigue la sonoridad con decaimiento, tope del ruido VBR por la
-  energía propia, minval con más pendiente, umbral de ataque más sensible, modelo
-  FFT en VBR, paso bajo en V0.
+- Música densa: a 128 kbps CBR los fragmentos de validación quedan −1.40 frente a
+  −0.97 (LAME), y en VBR V2 −0.3 frente a −0.07, con la misma tasa. Probado sin
+  ventaja: cuantización con factor común para llenar el presupuesto, minval más
+  bajo o plano, L/R más frecuente, umbral absoluto más bajo en silencios, ATH que
+  sigue la sonoridad con decaimiento, tope del ruido VBR por la energía propia,
+  umbral de ataque más sensible, modelo FFT en VBR, paso bajo en V0.

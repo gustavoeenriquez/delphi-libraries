@@ -325,6 +325,21 @@ begin
   for b := 0 to 20 do
     if N1[b] > 0.25 * Xmin[b] * (QuantSfbBand(1, b + 1) - QuantSfbBand(1, b)) then Inc(n);
   Check('LP23 quality mode: most bands within 6 dB of their threshold', n >= 16);
+
+  { short budget, every band above its threshold: the loop keeps shaping
+    (one band amplified per iteration) instead of stopping after one round
+    of amplifying them all }
+  RandSeed := 5;
+  for i := 0 to 575 do Xr[i] := (Random - 0.5) * 0.4 / (1 + i / 20);
+  for b := 0 to PSY_BANDS - 1 do begin   { 20 dB under each band's energy }
+    Xmin[b] := 0;
+    for i := QuantSfbBand(1, b) to QuantSfbBand(1, b + 1) - 1 do Xmin[b] := Xmin[b] + Sqr(Xr[i]);
+    Xmin[b] := 0.01 * Xmin[b] / (QuantSfbBand(1, b + 1) - QuantSfbBand(1, b));
+  end;
+  bits := LoopEncodeGranule(L, Q, Xr, Xmin, 700, 0, 1, Gr, St);
+  WriteLn(Format('       short budget: %d iterations, %d bits', [St.Iterations, bits]));
+  Check('LP24 short budget: the outer loop keeps shaping (> 5 iterations, budget kept)',
+    (St.Iterations > 5) and (bits <= 700));
 end;
 
 // ---------------------------------------------------------------------------

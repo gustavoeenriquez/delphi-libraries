@@ -259,12 +259,12 @@ const
       attacks too coarse; 8 dB stricter (drums over a chord, V2: -0.41 ->
       0.00 for 1 % more bits);
     - mono: in joint stereo the M/S thresholds are the minimum of the L, R
-      and own analyses, about 1.5 dB stricter than the single analysis of a
-      mono channel; the scale, calibrated on stereo music, is 1.5 dB
-      stricter for mono so that mono lands on the LAME bitrates too (speech
-      V2: 69 -> 80 kbps, ODG -0.64 -> -0.36) }
+      and own analyses, about 1 dB stricter than the single analysis of a
+      mono channel; the scale, calibrated on stereo music, is 1 dB stricter
+      for mono so that mono lands on the LAME bitrates too (speech V2:
+      69 -> 80 kbps, ODG -0.64 -> -0.36) }
   VBR_SHORT_SCALE  = 0.158;  { 10^(-8/10) }
-  VBR_MONO_DB      = -1.5;
+  VBR_MONO_DB      = -1.0;
 
 type
   TFrameXr = array[0..ENC_GRANULES - 1, 0..1] of T576;
@@ -393,7 +393,7 @@ const
   EQ_KBPS: array[0..9] of Integer = (256, 224, 192, 176, 160, 128, 112, 96, 80, 64);
   { allowed noise relative to the masking threshold (dB); calibrated so that
     stereo music lands near the bitrates of LAME -V0 .. -V9 }
-  NOISE_DB: array[0..9] of Double = (-1.7, 0.5, 2.9, 4.0, 5.8, 8.1, 9.6, 10.3, 10.6, 12.6);
+  NOISE_DB: array[0..9] of Double = (-2.2, 0.0, 2.4, 3.5, 5.3, 7.6, 9.1, 9.8, 10.0, 12.2);
 var
   kb: Integer;
 begin
@@ -670,6 +670,8 @@ type
   converted to mid/side and the thresholds are combined as explained below. }
 procedure FramePsy(var AEnc: TMP3Encoder; var AXr: TFrameXr; AMS: Boolean;
   out AP: TFramePsy);
+const
+  MS_OWN: array[0..1] of Double = (1.0, 3.98);   { M, S: own threshold x 1, x +6 dB }
 var
   n, k, g, c, j, w, ss: Integer;
   psyR  : array[0..3] of TPsyResult;
@@ -736,7 +738,10 @@ begin
       Each of M and S must also stay under the threshold of its own
       spectrum: a weak S below the L/R threshold would otherwise be dropped,
       and noise in S (opposite phase in L and R) is easier to hear than the
-      L/R model predicts (binaural unmasking). }
+      L/R model predicts (binaural unmasking).  The own threshold of S is
+      taken 6 dB higher: at the full own threshold the S of correlated
+      stereo music took as many bits as M (PEAQ, dense music 128 kbps:
+      -1.72 -> -1.60; VBR V2 -0.28 -> -0.25 over eight pieces). }
     XrToMS(AXr);
     for g := 0 to ENC_GRANULES - 1 do
       if AEnc.BlockType[g] = 2 then begin
@@ -752,7 +757,7 @@ begin
           PsyAnalyseShort(AEnc.Psy, spec, psyS[g * 2 + c], athSc[g]);
           for j := 0 to QUANT_SFB_SMAX - 1 do
             for w := 0 to 2 do
-              psyS[g * 2 + c].Xmin[j][w] := Min(psyS[g * 2 + c].Xmin[j][w], tmpS[j][w]);
+              psyS[g * 2 + c].Xmin[j][w] := Min(psyS[g * 2 + c].Xmin[j][w] * MS_OWN[c], tmpS[j][w]);
           psyS[g * 2 + c].EstBits := PsyEstimateBitsShort(AEnc.Psy, psyS[g * 2 + c].Energy, psyS[g * 2 + c].Xmin);
         end;
       end else begin
@@ -766,7 +771,7 @@ begin
           PsyAnalyse(AEnc.Psy, AXr[g][c], psyR[g * 2 + c], athSc[g]);
           if AEnc.PsyFFT then PsyApplyRatio(AEnc.Psy, AEnc.PsyRatio[g][2 + c], psyR[g * 2 + c], athSc[g]);
           for j := 0 to PSY_BANDS - 1 do
-            psyR[g * 2 + c].Xmin[j] := Min(psyR[g * 2 + c].Xmin[j], tmpL[j]);
+            psyR[g * 2 + c].Xmin[j] := Min(psyR[g * 2 + c].Xmin[j] * MS_OWN[c], tmpL[j]);
           psyR[g * 2 + c].EstBits := PsyEstimateBits(AEnc.Psy, psyR[g * 2 + c].Energy, psyR[g * 2 + c].Xmin);
         end;
       end;

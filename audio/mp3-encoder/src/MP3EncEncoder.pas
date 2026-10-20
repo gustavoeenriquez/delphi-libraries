@@ -252,6 +252,7 @@ const
   ATH_ADAPT_REF_DB = -15.0;
   ATH_ADAPT_SLOPE  = 2.0;
   ATH_ADAPT_MAX_DB = 20.0;
+  ENC_VBR_MINVAL   = 32.0;   { minval at 0 Bark in quality mode (dB) }
 
 type
   TFrameXr = array[0..ENC_GRANULES - 1, 0..1] of T576;
@@ -265,6 +266,32 @@ begin
 end;
 
 // ---------------------------------------------------------------------------
+
+{ Lowpass and absolute threshold for a (stereo equivalent) bitrate.  The
+  rise of the threshold above 10 kHz decides whether weak high bands are
+  coded or dropped: at low rates dropping them leaves the bits to the
+  bands that matter more, at high rates keeping them sounds (and measures,
+  PEAQ) better.  The Terhardt curve (f^4 coefficient 1e-3) is used up to
+  96 kbps, 3e-4 at 128 and 1e-4 from 192 kbps, interpolated in between.
+  In quality mode (AVbr) the noise sits right at the threshold of every
+  band, and a higher minimum SNR (minval 32 dB at 0 Bark instead of 24.5)
+  measured better: it protects the stationary low and mid bands of
+  noise-like music and speech, whose noise otherwise shows up in the
+  envelope modulation (PEAQ, ODG -0.41 -> -0.33 at equal bitrates). }
+procedure SetRateDefaults(var AEnc: TMP3Encoder; AKbps: Integer; AVbr: Boolean = False);
+var
+  hf: Double;
+begin
+  EncSetLowpass(AEnc, EncDefaultLowpassHz(AKbps));
+  if AKbps <= 96 then hf := 1e-3
+  else if AKbps <= 128 then hf := 1e-3 * Power(0.3, (AKbps - 96) / 32.0)
+  else if AKbps <= 192 then hf := 3e-4 * Power(1.0 / 3.0, (AKbps - 128) / 64.0)
+  else hf := 1e-4;
+  if AVbr then
+    PsyInit(AEnc.Psy, AEnc.Cfg.SrIdx, 0.0, hf, ENC_VBR_MINVAL)
+  else
+    PsyInit(AEnc.Psy, AEnc.Cfg.SrIdx, 0.0, hf);
+end;
 
 procedure InitCommon(out AEnc: TMP3Encoder; const ACfg: TEncConfig; AChannels: Integer);
 var
@@ -286,7 +313,6 @@ begin
   MDCTInit(AEnc.MDCTSt);
   PolyphaseInit(AEnc.PolySt[0]);
   if AChannels > 1 then PolyphaseInit(AEnc.PolySt[1]);
-  PsyInit(AEnc.Psy, ACfg.SrIdx);
   AEnc.PsyFFT := EncDefaultPsyModel = 1;
   for k := 0 to 3 do PsyFFTReset(AEnc.PsySt[k]);
   LoopInit(AEnc.Loop);
@@ -294,9 +320,9 @@ begin
     total bitrate of a (joint) stereo stream; mono gets 1.5x its rate
     (measured: LAME mono 32 kbps keeps ~8 kHz, stereo 64 kbps ~11 kHz) }
   if AChannels = 1 then
-    EncSetLowpass(AEnc, EncDefaultLowpassHz(C_BITRATE_BPS[ACfg.BrIdx] * 3 div 2000))
+    SetRateDefaults(AEnc, C_BITRATE_BPS[ACfg.BrIdx] * 3 div 2000)
   else
-    EncSetLowpass(AEnc, EncDefaultLowpassHz(C_BITRATE_BPS[ACfg.BrIdx] div 1000));
+    SetRateDefaults(AEnc, C_BITRATE_BPS[ACfg.BrIdx] div 1000);
 end;
 
 function EncDefaultLowpassHz(AKbpsPerChannel: Integer): Integer;
@@ -351,7 +377,7 @@ const
   EQ_KBPS: array[0..9] of Integer = (256, 224, 192, 176, 160, 128, 112, 96, 80, 64);
   { allowed noise relative to the masking threshold (dB); calibrated so that
     stereo music lands near the bitrates of LAME -V0 .. -V9 }
-  NOISE_DB: array[0..9] of Double = (0.8, 2.9, 5.2, 6.4, 8.3, 10.7, 12.2, 13.1, 13.1, 14.1);
+  NOISE_DB: array[0..9] of Double = (-2.2, 0.0, 2.3, 3.4, 5.2, 7.5, 9.0, 9.7, 9.9, 12.0);
 var
   kb: Integer;
 begin
@@ -364,9 +390,9 @@ begin
   kb := EQ_KBPS[AQuality];
   if AEnc.Channels = 1 then kb := kb * 3 div 4;
   if AEnc.Channels = 1 then
-    EncSetLowpass(AEnc, EncDefaultLowpassHz(kb * 3 div 2))
+    SetRateDefaults(AEnc, kb * 3 div 2, True)
   else
-    EncSetLowpass(AEnc, EncDefaultLowpassHz(kb));
+    SetRateDefaults(AEnc, kb, True);
 end;
 
 procedure EncEnableReservoir(var AEnc: TMP3Encoder; AEnable: Boolean);
@@ -682,7 +708,6 @@ begin
       PsyAnalyse(AEnc.Psy, AXr[g][c], psyR[k], athSc[g]);
       if AEnc.PsyFFT then PsyApplyRatio(AEnc.Psy, AEnc.PsyRatio[g][c], psyR[k], athSc[g]);
     end;
-    if (AEnc.BlockType[g] <> 2) and (GetEnvironmentVariable('TONDBG') = '1') then Writeln('TON ', psyR[k].Tonality:0:3, ' ', psyR[k].EstBits:0:0); {DBG}
   end;
   if AMS and (AEnc.Channels = 2) then begin
     { L = (M + S)/sqrt2 and R = (M - S)/sqrt2: the noise energies of M and S
@@ -797,10 +822,10 @@ begin
       g := k div AEnc.Channels; c := k mod AEnc.Channels;
       if AEnc.BlockType[g] = 2 then
         used := LoopEncodeGranuleShort(AEnc.Loop, AEnc.QState, AXr[g][c], xminS[k],
-          ENC_MAX_PART23, 0, AEnc.Cfg.SrIdx, SI.Gr[g][c], AEnc.LastStats[g][c])
+          ENC_MAX_PART23, 0, AEnc.Cfg.SrIdx, SI.Gr[g][c], AEnc.LastStats[g][c], True)
       else
         used := LoopEncodeGranule(AEnc.Loop, AEnc.QState, AXr[g][c], xmin[k],
-          ENC_MAX_PART23, 0, AEnc.Cfg.SrIdx, SI.Gr[g][c], AEnc.LastStats[g][c], AEnc.BlockType[g]);
+          ENC_MAX_PART23, 0, AEnc.Cfg.SrIdx, SI.Gr[g][c], AEnc.LastStats[g][c], AEnc.BlockType[g], True);
       Inc(usedTotal, used);
     end;
     { lowest bitrate whose frame (plus the reservoir) holds them }

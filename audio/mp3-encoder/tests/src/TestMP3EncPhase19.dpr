@@ -102,7 +102,7 @@ end;
 
 procedure TestPsy;
 var
-  M: TPsyModel;
+  M, M2: TPsyModel;
   R: TPsyResult;
   Xr: T576;
   b, i, w: Integer;
@@ -116,6 +116,10 @@ begin
   Check('PS05 Bark(1 kHz) ~ 8.5', Abs(PsyBarkOf(1000) - 8.5) < 1.0);
 
   PsyInit(M, 1);
+  PsyInit(M2, 1, 0.0, PSY_ATH_HF, PSY_MINVAL + 7.5);
+  Check('PS24 minval parameter: 7.5 dB more in band 3', Abs(M2.MinValDb[3] - M.MinValDb[3] - 7.5) < 1e-9);
+  Check('PS25 ATH high-frequency coefficient: 1e-4 is > 20 dB lower at 14 kHz',
+    PsyAthDb(14000, 1e-4) < PsyAthDb(14000) - 20);
   w := 0;
   for b := 0 to PSY_BANDS - 1 do Inc(w, M.Width[b]);
   Check('PS06 widths sum to 576', w = 576);
@@ -136,7 +140,14 @@ begin
   Check('PS12 tone: energy in band 6', Abs(R.Energy[6] - 0.25) < 1e-12);
   Check('PS13 tone: masking well above ATH', R.Xmin[6] > M.AthLin[6] * 1e3);
   Check('PS14 tone: threshold below the signal', R.Xmin[6] * M.Width[6] < 0.25);
-  Check('PS15 tone: upward spreading stronger', R.Xmin[8] > R.Xmin[4]);
+  Check('PS15 upward spreading stronger than downward', M.Spread[8][6] > M.Spread[4][6]);
+  Check('PS22 empty band next to a tone: not masked (xmin = ATH)', Abs(R.Xmin[8] - M.AthLin[8]) < M.AthLin[8] * 1e-9);
+  Xr[31] := 0.005;  { weak line in band 7, right above the tone }
+  PsyAnalyse(M, Xr, R);
+  Check('PS23 weak band next to a tone: threshold <= its energy - 12 dB',
+    (R.Xmin[7] * M.Width[7] <= R.Energy[7] * PSY_SELF_MASK * 1.000001) and (R.Xmin[7] > M.AthLin[7]));
+  Xr[31] := 0.0;
+  PsyAnalyse(M, Xr, R);
   Check('PS16 tone: far band at ATH', Abs(R.Xmin[21] - M.AthLin[21]) < M.AthLin[21] * 1e-6);
   Check('PS17 tone: tonal', R.Tonality > 0.5);
   Check('PS18 tone: bit demand > 0', R.EstBits > 10);
@@ -234,8 +245,9 @@ var
   Xmin, N1, N2: TPsyBandArr;
   Gr, Gr2: TGrInfo;
   St: TLoopStats;
-  i, bits, bits2, b: Integer;
+  i, bits, bits2, b, n: Integer;
   scfsi: array[0..3] of Byte;
+  ok: Boolean;
 begin
   WriteLn('LP: MP3EncLoop');
   LoopInit(L);
@@ -294,6 +306,25 @@ begin
   Check('LP17 shaping: band 5 cleaner when demanded', N2[5] < N1[5]);
   Check('LP18 shaping uses scalefactors', (Gr.ScalefacL[10] > 0) or (Gr2.ScalefacL[5] > 0));
   Check('LP19 scalefac_compress representable', (Gr.ScalefacCompress >= 0) and (Gr.ScalefacCompress <= 15));
+
+  { quality mode: every band at most at its threshold, fewer bits than the
+    noise-shaping loop (which coarsens all bands together) }
+  for b := 0 to PSY_BANDS - 1 do Xmin[b] := 1e-5 * (1 + (b mod 4) * 30);
+  bits  := LoopEncodeGranule(L, Q, Xr, Xmin, 4095, 0, 1, Gr, St, 0, True);
+  BandNoise(Q, Xr, Gr, 1, N1);
+  ok := St.OverBands = 0;
+  for b := 0 to PSY_BANDS - 1 do
+    if N1[b] > Xmin[b] * (QuantSfbBand(1, b + 1) - QuantSfbBand(1, b)) * 1.000001 then ok := False;
+  Check('LP20 quality mode: no band above its threshold', ok);
+  Check('LP21 quality mode: part2_3 consistent with frame writer',
+    Gr.Part2_3_Length = FrameScalefacBits(Gr, 0, scfsi) + FrameHuffmanBits(Gr));
+  bits2 := LoopEncodeGranule(L, Q, Xr, Xmin, 4095, 0, 1, Gr2, St, 0, False);
+  Check('LP22 quality mode: fewer bits than the noise-shaping loop', (bits > 0) and (bits < bits2));
+  WriteLn(Format('       quality mode %d bits, noise-shaping loop %d bits', [bits, bits2]));
+  n := 0;
+  for b := 0 to 20 do
+    if N1[b] > 0.25 * Xmin[b] * (QuantSfbBand(1, b + 1) - QuantSfbBand(1, b)) then Inc(n);
+  Check('LP23 quality mode: most bands within 6 dB of their threshold', n >= 16);
 end;
 
 // ---------------------------------------------------------------------------

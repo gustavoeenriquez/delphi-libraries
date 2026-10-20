@@ -175,7 +175,7 @@ var
   snr, preLong, preAuto: Double;
   Xr: T576;
   Xmin: TPsyShortArr;
-  Gr: TGrInfo;
+  Gr, Gr2: TGrInfo;
   St: TLoopStats;
   LS: TLoopState;
   QS: TQuantState;
@@ -248,6 +248,21 @@ begin
   sbgMax := 0;
   for w := 0 to 2 do sbgMax := Max(sbgMax, Gr.SubblockGain[w]);
   Check('WS10 subblock_gain within 0..7', sbgMax <= 7);
+
+  { quality mode: no band above its threshold, fewer bits than the loop
+    when the thresholds differ between bands (the loop coarsens them all
+    together until the strictest one is reached).  Not with sfb 12 the
+    strictest: it has no scalefactor, only subblock_gain refines it, and
+    that refines the whole window. }
+  for i := 0 to 12 do
+    for w := 0 to 2 do Xmin[i][w] := 1e-6 * (1 + ((i + 1) mod 3) * 30);
+  bits := LoopEncodeGranuleShort(LS, QS, Xr, Xmin, 4095, 0, 1, Gr, St, True);
+  Check('WS11 short quality mode: no band above its threshold', (bits > 0) and (St.OverBands = 0));
+  Check('WS12 short quality mode: subblock_gain within 0..7',
+    (Gr.SubblockGain[0] <= 7) and (Gr.SubblockGain[1] <= 7) and (Gr.SubblockGain[2] <= 7));
+  i := LoopEncodeGranuleShort(LS, QS, Xr, Xmin, 4095, 0, 1, Gr2, St, False);
+  WriteLn(Format('       quality mode %d bits, noise-shaping loop %d bits', [bits, i]));
+  Check('WS13 short quality mode: fewer bits than the loop', bits < i);
 end;
 
 // ---------------------------------------------------------------------------

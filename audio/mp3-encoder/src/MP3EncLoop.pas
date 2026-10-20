@@ -20,6 +20,14 @@
   windows of the spectrum in bit-stream order; a window whose scalefactors
   saturate gets a subblock_gain step (12 dB finer quantization).
 
+  Quality mode (AVbr, used by VBR): no bit budget, every band is quantized
+  as coarsely as its allowed noise permits.  A binary search per band
+  finds the coarsest step whose noise stays under Xmin; global_gain takes
+  the coarsest of them and the scalefactors (and subblock_gain) bring the
+  other bands down to their own step, lowering global_gain when a cap is
+  in the way; scalefac_scale 0 and 1 are both tried (LAME vbr_mtrh).  The
+  noise-shaping loop is the fallback when the result does not fit.
+
   Quantization uses the ISO formula on precomputed |xr|^(3/4):
       ix = trunc( |xr|^(3/4) * 2^(-3*(global_gain - 210 + adj)/16) + 0.4054 )
       adj = -2*(1 + scalefac_scale)*(scalefac + preflag*pretab)
@@ -69,14 +77,15 @@ procedure LoopInit(out AState: TLoopState);
   Returns Part2_3_Length. }
 function LoopEncodeGranule(const AState: TLoopState; const AQ: TQuantState;
   const AXr: T576; const AXmin: TPsyBandArr; AMaxBits, AMinBits, ASrIdx: Integer;
-  out AGr: TGrInfo; out AStats: TLoopStats; ABlockType: Integer = 0): Integer;
+  out AGr: TGrInfo; out AStats: TLoopStats; ABlockType: Integer = 0;
+  AVbr: Boolean = False): Integer;
 
 { Same for a short-block granule (block_type 2).  AXr is in bit-stream order
   (scalefactor band, then window); AXmin is the allowed noise per line of
   each [sfb][window]. }
 function LoopEncodeGranuleShort(const AState: TLoopState; const AQ: TQuantState;
   const AXr: T576; const AXmin: TPsyShortArr; AMaxBits, AMinBits, ASrIdx: Integer;
-  out AGr: TGrInfo; out AStats: TLoopStats): Integer;
+  out AGr: TGrInfo; out AStats: TLoopStats; AVbr: Boolean = False): Integer;
 
 { Smallest scalefac_compress index whose slen1/slen2 can hold the
   scalefactors (sfb 0..10 with slen1, 11..20 with slen2).  -1 if none. }
@@ -97,6 +106,7 @@ const
   QUANT_BIAS = 0.4054;
   SF_CAP_LOW  = 15;   { max scalefactor sfb 0..10 (slen1 <= 4 bits) }
   SF_CAP_HIGH = 7;    { max scalefactor sfb 11..20 (slen2 <= 3 bits) }
+  VBR_E_MAX   = 45;   { coarsest effective exponent: global_gain 255, adj 0 }
 
 procedure LoopInit(out AState: TLoopState);
 var
@@ -129,9 +139,58 @@ begin
     end;
 end;
 
+{ Coarsest effective exponent (global_gain - 210 + adj, 1.5 dB steps) at
+  which the noise per line of the lines ALo..AHi-1 stays under AXmin;
+  VBR_E_MAX when any step will do.  The noise is taken as growing with the
+  step, which holds up to the rounding of single lines. }
+function VbrBandExp(const AState: TLoopState; const AQ: TQuantState;
+  const AXrAbs, AXr34: T576; ALo, AHi: Integer; AXmin: Double; AHasEnergy: Boolean): Integer;
+var
+  lo, hi, mid, i, q: Integer;
+  m, f, st, v, n: Double;
+
+  function NoiseAt(AE: Integer): Double;
+  var ii: Integer;
+  begin
+    f := AState.Pow2Q34[AE + LOOP_TAB_OFS];
+    st := AState.Pow2Q[AE + LOOP_TAB_OFS];
+    Result := 0.0;
+    for ii := ALo to AHi - 1 do begin
+      if AXr34[ii] = 0.0 then Continue;
+      q := Trunc(AXr34[ii] * f + QUANT_BIAS);
+      if q = 0 then v := 0.0
+      else if q < QUANT_POW43_MAX then v := AQ.Pow43[q] * st
+      else v := Power(q, 4.0 / 3.0) * st;
+      Result := Result + Sqr(AXrAbs[ii] - v);
+    end;
+    Result := Result / (AHi - ALo);
+  end;
+
+begin
+  if (AXmin <= 0.0) or not AHasEnergy or (AHi <= ALo) then Exit(VBR_E_MAX);
+  { the finest step without overflow (ix <= 8206) }
+  m := 0.0;
+  for i := ALo to AHi - 1 do if AXr34[i] > m then m := AXr34[i];
+  lo := -LOOP_TAB_OFS; hi := VBR_E_MAX;
+  while lo < hi do begin
+    mid := lo + (hi - lo) div 2;
+    if m * AState.Pow2Q34[mid + LOOP_TAB_OFS] + QUANT_BIAS < 8207.0 then hi := mid
+    else lo := mid + 1;
+  end;
+  { largest step in lo..VBR_E_MAX whose noise is under the threshold }
+  n := NoiseAt(lo);
+  if n > AXmin then Exit(lo);
+  hi := VBR_E_MAX;
+  while lo < hi do begin
+    mid := lo + (hi - lo + 1) div 2;
+    if NoiseAt(mid) <= AXmin then lo := mid else hi := mid - 1;
+  end;
+  Result := lo;
+end;
+
 function LoopEncodeGranule(const AState: TLoopState; const AQ: TQuantState;
   const AXr: T576; const AXmin: TPsyBandArr; AMaxBits, AMinBits, ASrIdx: Integer;
-  out AGr: TGrInfo; out AStats: TLoopStats; ABlockType: Integer): Integer;
+  out AGr: TGrInfo; out AStats: TLoopStats; ABlockType: Integer; AVbr: Boolean): Integer;
 var
   xrAbs, xr34 : T576;
   bandLo      : array[0..QUANT_SFB_LMAX] of Integer;
@@ -154,7 +213,7 @@ var
   iter, b, i, k, sfc, part2, budget, gg, bits: Integer;
   overCount   : Integer;
   overDb, totDb, totNoiseE, bestNoiseE, overSsd, bestOverSsd: Double;
-  anyAmp, allAmp, better: Boolean;
+  anyAmp, allAmp, better, vbrOk: Boolean;
 
   procedure ComputeAdj;
   var bb: Integer;
@@ -285,6 +344,67 @@ var
     bestGr.Part2_3_Length   := APart2 + AHuffBits;
   end;
 
+  { Quality mode: every band quantized as coarsely as its allowed noise
+    permits.  global_gain follows the band that tolerates the coarsest
+    step, the scalefactors bring the others down to theirs (LAME
+    vbr_mtrh).  The noise-shaping loop instead raises the global gain
+    until the first band reaches its threshold, which leaves every other
+    band finer than needed.  Bands that any step satisfies (empty, below
+    the threshold) would push global_gain to 255 and every other band
+    onto its scalefactor cap: both starts, with and without them, and
+    both scalefac_scale are tried and the cheapest kept.  False when the
+    result does not fit AMaxBits. }
+  function VbrQuantize: Boolean;
+  var qe: array[0..QUANT_SFB_LMAX - 1] of Integer;
+      bb, s, g, gTop, gTopC, cand, a, cap, st: Integer;
+      bestBits: Integer;
+  begin
+    Result := False;
+    gTop := 0; gTopC := 0;
+    for bb := 0 to QUANT_SFB_LMAX - 1 do begin
+      qe[bb] := VbrBandExp(AState, AQ, xrAbs, xr34, bandLo[bb], bandLo[bb + 1],
+        AXmin[bb], hasEnergy[bb]);
+      if qe[bb] + 210 > gTop then gTop := qe[bb] + 210;
+      if (qe[bb] < VBR_E_MAX) and (qe[bb] + 210 > gTopC) then gTopC := qe[bb] + 210;
+    end;
+    if gTop > 255 then gTop := 255;
+    if gTop = gTopC then gTopC := -1;
+    bestBits := MaxInt;
+    for cand := 0 to 3 do begin
+      s := cand and 1;
+      st := 2 * (1 + s);
+      { coarsest global gain whose amplifications fit the scalefactor caps;
+        sfb 21 has no scalefactor }
+      if cand < 2 then g := gTop
+      else if gTopC >= 0 then g := gTopC
+      else Break;
+      if g > qe[21] + 210 then g := qe[21] + 210;
+      for bb := 0 to 20 do begin
+        if bb < 11 then cap := SF_CAP_LOW else cap := SF_CAP_HIGH;
+        if g > qe[bb] + 210 + cap * st then g := qe[bb] + 210 + cap * st;
+      end;
+      if g < 0 then g := 0;
+      FillChar(sf, SizeOf(sf), 0);
+      for bb := 0 to 20 do begin
+        a := g - 210 - qe[bb];
+        if a > 0 then sf[bb] := (a + st - 1) div st;
+      end;
+      sfScale := s;
+      ComputeAdj;
+      sfc := LoopChooseScalefacCompress(sf);
+      if sfc < 0 then Continue;
+      part2 := LoopScalefacBits(sfc);
+      bits := QuantizeAndCount(g);
+      if (bits = MaxInt) or (part2 + bits > AMaxBits) or (part2 + bits >= bestBits) then Continue;
+      bestBits := part2 + bits;
+      MeasureNoise(g);
+      SaveBest(g, bits, sfc, part2);
+      bestNoiseE := totNoiseE;
+      bestValid := True; bestOver := overCount; bestOverDb := overDb;
+      Result := True;
+    end;
+  end;
+
 begin
   AStats := Default(TLoopStats);
   for i := 0 to QUANT_GRANULE - 1 do begin
@@ -307,6 +427,12 @@ begin
   if AMaxBits < 0 then AMaxBits := 0;
 
   iter := 0;
+  vbrOk := AVbr and VbrQuantize;
+  if not vbrOk then begin
+    FillChar(sf, SizeOf(sf), 0);
+    sfScale := 0;
+  end;
+  if not vbrOk then
   repeat
     ComputeAdj;
     sfc := LoopChooseScalefacCompress(sf);
@@ -418,7 +544,7 @@ const
 
 function LoopEncodeGranuleShort(const AState: TLoopState; const AQ: TQuantState;
   const AXr: T576; const AXmin: TPsyShortArr; AMaxBits, AMinBits, ASrIdx: Integer;
-  out AGr: TGrInfo; out AStats: TLoopStats): Integer;
+  out AGr: TGrInfo; out AStats: TLoopStats; AVbr: Boolean): Integer;
 type
   TSfS = array[0..QUANT_SFB_SMAX - 1, 0..2] of Integer;
 var
@@ -437,7 +563,7 @@ var
   bestValid   : Boolean;
   bestOverSsd, bestTotDb, bestNoiseE, overDb, totDb, totNoiseE, overSsd: Double;
   overCount, bestOver, iter, j, b, w, i, k, sfc, part2, budget, gg, bits, lo: Integer;
-  anyAmp, allAmp, better: Boolean;
+  anyAmp, allAmp, better, vbrOk: Boolean;
 
   function ChooseSfc(out ABits: Integer): Integer;
   var m1, m2, bb, ww, ii: Integer;
@@ -545,6 +671,72 @@ var
     bestGr.Part2_3_Length := APart2 + AHuffBits;
   end;
 
+  { Quality mode, as in LoopEncodeGranule: global_gain from the coarsest
+    band, subblock_gain and scalefactors bring every band of each window
+    down to its own step (sfb 12 has no scalefactor). }
+  function VbrQuantize: Boolean;
+  var qe: array[0..NB_SHORT - 1] of Integer;
+      jj, bb, ww, s, g, gTop, gTopC, cand, a, cap, st, need, bestBits: Integer;
+      ok: Boolean;
+  begin
+    Result := False;
+    gTop := 0; gTopC := 0;
+    for jj := 0 to NB_SHORT - 1 do begin
+      qe[jj] := VbrBandExp(AState, AQ, xrAbs, xr34, bandLo[jj], bandLo[jj + 1],
+        xminB[jj], hasEnergy[jj]);
+      if qe[jj] + 210 > gTop then gTop := qe[jj] + 210;
+      if (qe[jj] < VBR_E_MAX) and (qe[jj] + 210 > gTopC) then gTopC := qe[jj] + 210;
+    end;
+    if gTop > 255 then gTop := 255;
+    if gTop = gTopC then gTopC := -1;
+    bestBits := MaxInt;
+    for cand := 0 to 3 do begin
+      s := cand and 1;
+      st := 2 * (1 + s);
+      { coarsest global gain for which every window finds a subblock_gain
+        (0..7, 8 steps each) that leaves its scalefactors within the caps;
+        started from the coarsest band with and without the free ones }
+      if cand < 2 then g := gTop + 1
+      else if gTopC >= 0 then g := gTopC + 1
+      else Break;
+      repeat
+        Dec(g);
+        ok := True;
+        for ww := 0 to 2 do begin
+          need := 0;
+          for bb := 0 to QUANT_SFB_SMAX - 1 do begin
+            a := g - 210 - qe[bb * 3 + ww];
+            if bb = 12 then cap := 0
+            else if bb < 6 then cap := SF_CAP_S_LOW * st
+            else cap := SF_CAP_S_HIGH * st;
+            if a - cap > need then need := a - cap;
+          end;
+          sbg[ww] := (need + 7) div 8;
+          if sbg[ww] > 7 then ok := False;
+        end;
+      until ok or (g = 0);
+      if not ok then Continue;
+      FillChar(sf, SizeOf(sf), 0);
+      for bb := 0 to 11 do
+        for ww := 0 to 2 do begin
+          a := g - 210 - qe[bb * 3 + ww] - 8 * sbg[ww];
+          if a > 0 then sf[bb][ww] := (a + st - 1) div st;
+        end;
+      sfScale := s;
+      ComputeAdj;
+      sfc := ChooseSfc(part2);
+      if sfc < 0 then Continue;
+      bits := QuantizeAndCount(g);
+      if (bits = MaxInt) or (part2 + bits > AMaxBits) or (part2 + bits >= bestBits) then Continue;
+      bestBits := part2 + bits;
+      MeasureNoise(g);
+      SaveBest(g, bits, sfc, part2);
+      bestValid := True; bestOver := overCount; bestOverSsd := overSsd;
+      bestTotDb := totDb; bestNoiseE := totNoiseE;
+      Result := True;
+    end;
+  end;
+
 begin
   AStats := Default(TLoopStats);
   for i := 0 to QUANT_GRANULE - 1 do begin
@@ -577,6 +769,13 @@ begin
   if AMaxBits < 0 then AMaxBits := 0;
 
   iter := 0;
+  vbrOk := AVbr and VbrQuantize;
+  if not vbrOk then begin
+    FillChar(sf, SizeOf(sf), 0);
+    FillChar(sbg, SizeOf(sbg), 0);
+    sfScale := 0;
+  end;
+  if not vbrOk then
   repeat
     ComputeAdj;
     sfc := ChooseSfc(part2);

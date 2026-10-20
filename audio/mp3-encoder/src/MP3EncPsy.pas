@@ -8,7 +8,10 @@
 
     1. Energy per scalefactor band            E[b] = sum xr^2
     2. Spreading of the energies across bands with the Schroeder spreading
-       function in the Bark domain (weights normalised per band)
+       function in the Bark domain (weights normalised per band); the
+       upward side falls 1.5x faster (about -15 dB/Bark, the slope of the
+       BS.1387 ear model at moderate levels): with -10 dB/Bark the gaps
+       above low tones were taken as masked and left unprotected
     3. Tonality from the spectral flatness measure of the granule
          O[b] = a*(14.5 + bark[b]) + (1-a)*5.5 dB   (a = 1 tonal, 0 noise)
        with a minimum offset (minval) that decreases with frequency
@@ -16,6 +19,9 @@
     5. Absolute threshold of hearing (Terhardt); a full-scale sine (MDCT line
        amplitude 1.0) is taken as 96 dB SPL
     6. Allowed noise energy per line        xmin[b] = max(T[b]/width[b], ATH[b])
+       with T[b] at most E[b] - 12 dB: a band is never taken as masked by
+       its neighbours alone (its own excitation masks the noise only some
+       dB below it), so a weak band next to a strong one is not dropped
 
   It also returns a rough estimate of the bits needed to code the granule at
   that threshold (sum width * 0.5*log2(energy/threshold)), used by the bit
@@ -55,6 +61,10 @@ uses
 
 const
   PSY_BANDS        = QUANT_SFB_LMAX;  { 22 scalefactor bands (long blocks) }
+  PSY_ATH_HF       = 1e-3;   { f^4 coefficient of the Terhardt threshold }
+  PSY_SPREAD_UP    = 1.5;    { Bark distance scale of the upward spreading }
+  PSY_SELF_MASK    = 0.0631; { threshold at most band energy - 12 dB }
+  PSY_MINVAL       = 24.5;   { minval at 0 Bark (dB), ISO model 2 shape }
   PSY_SBANDS       = QUANT_SFB_SMAX;  { 13 scalefactor bands per short window }
   PSY_FULLSCALE_DB = 96.0;            { SPL assumed for a full-scale sine }
   PSY_FFT_LONG     = 1024;            { FFT size of the long-block model }
@@ -113,16 +123,20 @@ type
     EstBits  : Double;       { rough bit demand to reach Xmin }
   end;
 
-{ Absolute threshold of hearing in dB SPL (Terhardt approximation). }
-function PsyAthDb(AFreqHz: Double): Double;
+{ Absolute threshold of hearing in dB SPL (Terhardt approximation).
+  AHfCoef weighs the f^4 term that raises it above ~10 kHz (Terhardt 1e-3). }
+function PsyAthDb(AFreqHz: Double; AHfCoef: Double = PSY_ATH_HF): Double;
 
 { Frequency (Hz) to Bark (Zwicker). }
 function PsyBarkOf(AFreqHz: Double): Double;
 
 { Initialise the model for a sample rate index (0=44100, 1=48000, 2=32000).
-  AAthAdjustDb shifts the absolute threshold (negative = more demanding). }
+  AAthAdjustDb shifts the absolute threshold (negative = more demanding);
+  AAthHfCoef sets its rise at high frequencies (see PsyAthDb); AMinValDb
+  is the minimum SNR demanded at 0 Bark (minval, falling 1 dB per Bark). }
 procedure PsyInit(out AModel: TPsyModel; ASrIdx: Integer;
-  AAthAdjustDb: Double = 0.0);
+  AAthAdjustDb: Double = 0.0; AAthHfCoef: Double = PSY_ATH_HF;
+  AMinValDb: Double = PSY_MINVAL);
 
 { Analyse one granule (576 MDCT lines) and compute the allowed noise.
   AAthScale multiplies the absolute threshold (adaptive ATH). }
@@ -168,7 +182,7 @@ const
   PSY_CW_LINES = 206;    { unpredictability measured below this FFT line
                            (~8.9 kHz at 44.1 kHz); the lines above count 0.4 }
 
-function PsyAthDb(AFreqHz: Double): Double;
+function PsyAthDb(AFreqHz: Double; AHfCoef: Double): Double;
 var
   f: Double;
 begin
@@ -176,7 +190,7 @@ begin
   if f < 0.02 then f := 0.02;   { the formula diverges below ~20 Hz }
   Result := 3.64 * Power(f, -0.8)
           - 6.5 * Exp(-0.6 * Sqr(f - 3.3))
-          + 1e-3 * Power(f, 4.0);
+          + AHfCoef * Power(f, 4.0);
 end;
 
 function PsyBarkOf(AFreqHz: Double): Double;
@@ -188,10 +202,12 @@ end;
 { Schroeder spreading function (dB) for a Bark distance ADz = z(masked) - z(masker) }
 function SpreadDb(ADz: Double): Double;
 begin
+  if ADz > 0.0 then ADz := ADz * PSY_SPREAD_UP;
   Result := 15.81 + 7.5 * (ADz + 0.474) - 17.5 * Sqrt(1.0 + Sqr(ADz + 0.474));
 end;
 
-procedure PsyInit(out AModel: TPsyModel; ASrIdx: Integer; AAthAdjustDb: Double);
+procedure PsyInit(out AModel: TPsyModel; ASrIdx: Integer; AAthAdjustDb: Double;
+  AAthHfCoef: Double; AMinValDb: Double);
 var
   b, k, lo, hi: Integer;
   fs, fLo, fHi, fC, ath, w, norm: Double;
@@ -212,11 +228,12 @@ begin
     fC  := 0.5 * (fLo + fHi);
     AModel.Bark[b] := PsyBarkOf(fC);
     { most sensitive point of the band }
-    ath := Min(PsyAthDb(fLo), Min(PsyAthDb(fC), PsyAthDb(fHi)));
+    ath := Min(PsyAthDb(fLo, AAthHfCoef), Min(PsyAthDb(fC, AAthHfCoef), PsyAthDb(fHi, AAthHfCoef)));
     AModel.AthLin[b]   := Power(10.0, (ath - PSY_FULLSCALE_DB + AAthAdjustDb) / 10.0);
-    { minimum SNR demanded from the masker: ~24 dB at low frequencies,
-      ~3.5 dB at the top (shape of the ISO model 2 minval table) }
-    AModel.MinValDb[b] := EnsureRange(24.5 - AModel.Bark[b], 3.5, 24.5);
+    { minimum SNR demanded from the masker: AMinValDb at 0 Bark falling
+      1 dB per Bark, at least 3.5 dB (shape of the ISO model 2 minval
+      table, 24.5 dB at 0 Bark) }
+    AModel.MinValDb[b] := EnsureRange(AMinValDb - AModel.Bark[b], 3.5, AMinValDb);
   end;
 
   for b := 0 to PSY_BANDS - 1 do begin
@@ -239,9 +256,9 @@ begin
     fHi := (hi - 0.5) * fs / 384.0;
     fC  := 0.5 * (fLo + fHi);
     AModel.BarkS[b] := PsyBarkOf(fC);
-    ath := Min(PsyAthDb(fLo), Min(PsyAthDb(fC), PsyAthDb(fHi)));
+    ath := Min(PsyAthDb(fLo, AAthHfCoef), Min(PsyAthDb(fC, AAthHfCoef), PsyAthDb(fHi, AAthHfCoef)));
     AModel.AthLinS[b] := 3.0 * Power(10.0, (ath - PSY_FULLSCALE_DB + AAthAdjustDb) / 10.0);
-    AModel.MinValDbS[b] := EnsureRange(24.5 - AModel.BarkS[b], 3.5, 24.5);
+    AModel.MinValDbS[b] := EnsureRange(AMinValDb - AModel.BarkS[b], 3.5, AMinValDb);
   end;
   for b := 0 to PSY_SBANDS - 1 do begin
     norm := 0.0;
@@ -482,6 +499,7 @@ begin
       o := 5.5;                                 { noise-like masker }
       if o < AModel.MinValDbS[b] then o := AModel.MinValDbS[b];
       t := c * Power(10.0, -o / 10.0);
+      if t > AResult.Energy[b][w] * PSY_SELF_MASK then t := AResult.Energy[b][w] * PSY_SELF_MASK;
       if AModel.WidthS[b] > 0 then t := t / AModel.WidthS[b] else t := 0.0;
       if t < AModel.AthLinS[b] * AAthScale then t := AModel.AthLinS[b] * AAthScale;
       AResult.Xmin[b][w] := t;
@@ -552,6 +570,7 @@ begin
     o := a * (14.5 + AModel.Bark[b]) + (1.0 - a) * 5.5;
     if o < AModel.MinValDb[b] then o := AModel.MinValDb[b];
     t := c * Power(10.0, -o / 10.0);
+    if t > AResult.Energy[b] * PSY_SELF_MASK then t := AResult.Energy[b] * PSY_SELF_MASK;
     if AModel.Width[b] > 0 then t := t / AModel.Width[b] else t := 0.0;
     if t < AModel.AthLin[b] * AAthScale then t := AModel.AthLin[b] * AAthScale;
     AResult.Xmin[b] := t;

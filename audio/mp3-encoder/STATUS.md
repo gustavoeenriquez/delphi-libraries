@@ -71,6 +71,14 @@ delay 528 + padding y la duración queda exacta).
 - M/S salvo que estime más del doble de bits que L/R (antes: solo si E(S) ≤
   0.3 E(M) y menos bits): ODG medio 96/128/192 −1.30 / −0.76 / −0.18, a la par de
   LAME (−1.32 / −0.76 / −0.13). Fase 19: RV25 (canal mudo → L/R) y RV31.
+- VBR con cuantización directa en modo calidad (paso por banda, global_gain y
+  scalefactors como `vbr_mtrh`; antes el bucle de CBR engrosaba todas las bandas a
+  la vez). Modelo revisado a partir del NMR por banda de PEAQ: ATH en agudos según
+  la tasa, umbral ≤ energía propia − 12 dB, dispersión hacia arriba 1.5× más
+  empinada; minval 32 dB en VBR. Escala recalibrada. ODG medio (6 piezas) V0/V2/V5
+  −0.18 / −0.63 / −2.01 → −0.07 / −0.41 / −1.48 (LAME −0.01 / −0.29 / −1.25); CBR
+  96/128/192 (5 piezas) −1.34 / −0.73 / −0.08 (LAME −1.32 / −0.76 / −0.13). Fase 19:
+  PS15 y PS22–PS25, LP20–LP23; fase 20: WS11–WS13.
 
 ## Pendiente / ideas
 
@@ -78,12 +86,14 @@ delay 528 + padding y la duración queda exacta).
 - La decisión automática M/S por bits estimados no siempre elige el modo de
   mejor SNR (en ruido sintético ancho elige L/R aunque M/S conserva mejor S).
 - Intensity stereo; MPEG-2/2.5 (tasas bajas de muestreo).
-- CBR ya a la par de LAME en la media; queda música densa (música 1 a 128 kbps
-  −1.45 frente a −1.32) y 192 kbps (−0.18 frente a −0.13). Ideas: scfsi,
+- CBR a la par de LAME en la media (por delante a 192 kbps); queda música densa
+  a 96–128 kbps (música 1 a 128 kbps −1.53 frente a −1.32). Ideas: scfsi,
   estrategias de amplificación del bucle externo. Probado sin ventaja: redondeo
   al nivel más cercano (adj43).
-- VBR: recalibrado tras M/S y con umbral absoluto adaptativo (gránulos
-  silenciosos, solo VBR): bitrates como LAME en las cinco piezas; V2 medio
-  −0.91 → −0.62 (LAME −0.29). Por detrás en música 2 y batería (umbral de los
-  transitorios en modo calidad).
-- VBR con voz: usa menos bits que LAME y la calidad cae en proporción.
+- VBR: a igual bitrate por delante de LAME en música 1, voz y castañuelas; por
+  detrás en música 2 (−0.42 frente a −0.27 en V2) y batería (−0.41 frente a
+  −0.22). Queda el reparto entre materiales: con la misma calidad la voz y las
+  castañuelas reciben 15–25 % menos bits que en LAME, visible en V6–V9. Probado
+  sin ventaja: umbral absoluto más bajo en silencios (gasta bits en casi silencio),
+  tope del ruido VBR por la energía propia, minval con más pendiente, umbral de
+  ataque más sensible, modelo FFT en VBR.

@@ -14,7 +14,8 @@
       duración correcta.
   CB  CBR: todos los paquetes del tamaño exacto.
   VB  VBR/CVBR: bitrate medio dentro de +-5 % del objetivo.
-  IN  tres instancias intercaladas producen los mismos bytes que por separado.
+  IN  tres instancias intercaladas (CELT, SILK, híbrido) producen los mismos bytes
+      que por separado.
   OG  Ogg Opus: pre-skip, y el decodificado tiene exactamente las muestras de
       entrada (recorte del final).
   CO  capa de compatibilidad TOpusCeltEncoder (TOC y duración).
@@ -94,6 +95,8 @@ type
     Bitrate  : Integer;
     Vbr, Cvbr: Boolean;
     Cx       : Integer;
+    Mode     : Integer;   // MODE_* or OPUS_AUTO
+    Fec, Loss: Integer;
     // reference (libopus 1.5.2)
     NPk      : Integer;
     Bytes    : Integer;
@@ -104,28 +107,48 @@ type
   TPackets = TArray<TBytes>;
 
 const
-  CASES: array[0..6] of TCase = (
+  CASES: array[0..11] of TCase = (
     (Name: 'A chirp 48k mono lowdelay 20ms CBR 64k cx0'; Kind: tsChirp; Fs: 48000; Ch: 1; Samples: 48000;
-     App: oaRestrictedLowDelay; Ms10: 200; Bitrate: 64000; Vbr: False; Cvbr: True; Cx: 0;
+     App: oaRestrictedLowDelay; Ms10: 200; Bitrate: 64000; Vbr: False; Cvbr: True; Cx: 0; Mode: MODE_CELT_ONLY; Fec: 0; Loss: 0;
      NPk: 50; Bytes: 8000; Crc: $430BA29F; RngXor: $6AFD7B7A),
     (Name: 'B music 48k stereo audio 20ms CVBR 96k cx10'; Kind: tsMusicLike; Fs: 48000; Ch: 2; Samples: 48000;
-     App: oaAudio; Ms10: 200; Bitrate: 96000; Vbr: True; Cvbr: True; Cx: 10;
+     App: oaAudio; Ms10: 200; Bitrate: 96000; Vbr: True; Cvbr: True; Cx: 10; Mode: MODE_CELT_ONLY; Fec: 0; Loss: 0;
      NPk: 50; Bytes: 12050; Crc: $E52DE5D7; RngXor: $4A8D9FAD),
     (Name: 'C speech 16k mono voip 20ms CVBR 24k cx5'; Kind: tsSpeechLike; Fs: 16000; Ch: 1; Samples: 16000;
-     App: oaVoip; Ms10: 200; Bitrate: 24000; Vbr: True; Cvbr: True; Cx: 5;
+     App: oaVoip; Ms10: 200; Bitrate: 24000; Vbr: True; Cvbr: True; Cx: 5; Mode: MODE_CELT_ONLY; Fec: 0; Loss: 0;
      NPk: 50; Bytes: 3050; Crc: $EEDBF762; RngXor: $7F85C420),
     (Name: 'D music 48k stereo lowdelay 2.5ms CBR 128k cx10'; Kind: tsMusicLike; Fs: 48000; Ch: 2; Samples: 24000;
-     App: oaRestrictedLowDelay; Ms10: 25; Bitrate: 128000; Vbr: False; Cvbr: True; Cx: 10;
+     App: oaRestrictedLowDelay; Ms10: 25; Bitrate: 128000; Vbr: False; Cvbr: True; Cx: 10; Mode: MODE_CELT_ONLY; Fec: 0; Loss: 0;
      NPk: 200; Bytes: 8000; Crc: $988E9B00; RngXor: $13D6BD63),
     (Name: 'E speech 48k mono audio 60ms VBR 32k cx9'; Kind: tsSpeechLike; Fs: 48000; Ch: 1; Samples: 57600;
-     App: oaAudio; Ms10: 600; Bitrate: 32000; Vbr: True; Cvbr: False; Cx: 9;
+     App: oaAudio; Ms10: 600; Bitrate: 32000; Vbr: True; Cvbr: False; Cx: 9; Mode: MODE_CELT_ONLY; Fec: 0; Loss: 0;
      NPk: 20; Bytes: 4780; Crc: $87AC7650; RngXor: $5A130F00),
     (Name: 'F speech 8k mono voip 10ms CBR 16k cx10'; Kind: tsSpeechLike; Fs: 8000; Ch: 1; Samples: 8000;
-     App: oaVoip; Ms10: 100; Bitrate: 16000; Vbr: False; Cvbr: True; Cx: 10;
+     App: oaVoip; Ms10: 100; Bitrate: 16000; Vbr: False; Cvbr: True; Cx: 10; Mode: MODE_CELT_ONLY; Fec: 0; Loss: 0;
      NPk: 100; Bytes: 2000; Crc: $B12B557B; RngXor: $0647D209),
     (Name: 'G music 24k stereo audio 10ms CVBR 48k cx8'; Kind: tsMusicLike; Fs: 24000; Ch: 2; Samples: 24000;
-     App: oaAudio; Ms10: 100; Bitrate: 48000; Vbr: True; Cvbr: True; Cx: 8;
-     NPk: 100; Bytes: 6100; Crc: $0CA3D93A; RngXor: $16C70163));
+     App: oaAudio; Ms10: 100; Bitrate: 48000; Vbr: True; Cvbr: True; Cx: 8; Mode: MODE_CELT_ONLY; Fec: 0; Loss: 0;
+     NPk: 100; Bytes: 6100; Crc: $0CA3D93A; RngXor: $16C70163),
+    (Name: 'H speech 16k mono voip 20ms VBR 16k cx10 auto (SILK WB)'; Kind: tsSpeechLike; Fs: 16000; Ch: 1;
+     Samples: 16000; App: oaVoip; Ms10: 200; Bitrate: 16000; Vbr: True; Cvbr: True; Cx: 10;
+     Mode: OPUS_AUTO; Fec: 0; Loss: 0;
+     NPk: 50; Bytes: 1539; Crc: $9DBB0E33; RngXor: $74951E42),
+    (Name: 'I speech 8k mono voip 20ms 24k cx9 FEC 10% (SILK NB + LBRR)'; Kind: tsSpeechLike; Fs: 8000; Ch: 1;
+     Samples: 16000; App: oaVoip; Ms10: 200; Bitrate: 24000; Vbr: True; Cvbr: True; Cx: 9;
+     Mode: OPUS_AUTO; Fec: 1; Loss: 10;
+     NPk: 100; Bytes: 5272; Crc: $058C9093; RngXor: $5DF9017B),
+    (Name: 'J speech 48k mono voip 20ms 24k cx6 auto (hybrid FB)'; Kind: tsSpeechLike; Fs: 48000; Ch: 1;
+     Samples: 48000; App: oaVoip; Ms10: 200; Bitrate: 24000; Vbr: True; Cvbr: True; Cx: 6;
+     Mode: OPUS_AUTO; Fec: 0; Loss: 0;
+     NPk: 50; Bytes: 3115; Crc: $780592B2; RngXor: $258D7629),
+    (Name: 'K speech 48k stereo voip 40ms 32k cx8 auto (hybrid stereo)'; Kind: tsSpeechLike; Fs: 48000; Ch: 2;
+     Samples: 96000; App: oaVoip; Ms10: 400; Bitrate: 32000; Vbr: True; Cvbr: True; Cx: 8;
+     Mode: OPUS_AUTO; Fec: 0; Loss: 0;
+     NPk: 50; Bytes: 6775; Crc: $48269885; RngXor: $54C12BD9),
+    (Name: 'L speech 16k mono voip 10ms CBR 20k cx2 SILK'; Kind: tsSpeechLike; Fs: 16000; Ch: 1;
+     Samples: 16000; App: oaVoip; Ms10: 100; Bitrate: 20000; Vbr: False; Cvbr: True; Cx: 2;
+     Mode: MODE_SILK_ONLY; Fec: 0; Loss: 0;
+     NPk: 100; Bytes: 2500; Crc: $D343547D; RngXor: $1F4184C2));
 
 function NewEncoder(const C: TCase): TOpusEncoder;
 begin
@@ -134,7 +157,9 @@ begin
   Result.Vbr := C.Vbr;
   Result.VbrConstraint := C.Cvbr;
   Result.Complexity := C.Cx;
-  Result.ForceMode := MODE_CELT_ONLY;
+  Result.ForceMode := C.Mode;
+  Result.InbandFec := C.Fec;
+  Result.PacketLossPerc := C.Loss;
 end;
 
 // Encodes frame number Index of the case signal; returns the packet
@@ -418,7 +443,7 @@ begin
   end;
 end;
 
-procedure TestInterleaved;
+procedure TestInterleavedSet(const Tag: string; I0, I1, I2: Integer);
 var
   K, I, MaxN: Integer;
   Sep, Int_: array[0..2] of TPackets;
@@ -430,8 +455,7 @@ var
   Idx: array[0..2] of Integer;
   N: array[0..2] of Integer;
 begin
-  WriteLn('--- IN: instancias intercaladas ---');
-  Idx[0] := 1; Idx[1] := 2; Idx[2] := 5;   // casos B, C, F
+  Idx[0] := I0; Idx[1] := I1; Idx[2] := I2;
   for K := 0 to 2 do
     Sep[K] := EncodeCase(CASES[Idx[K]], R);
   for K := 0 to 2 do
@@ -456,7 +480,15 @@ begin
       if (Length(Sep[K][I]) <> Length(Int_[K][I])) or
          ((Length(Sep[K][I]) > 0) and not CompareMem(@Sep[K][I][0], @Int_[K][I][0], Length(Sep[K][I]))) then
         Same := False;
-  Check(Same, 'IN01 3 encoders intercalados = codificados por separado (byte a byte)');
+  Check(Same, Tag + ' 3 encoders intercalados = codificados por separado (byte a byte)');
+end;
+
+procedure TestInterleaved;
+begin
+  WriteLn('--- IN: instancias intercaladas ---');
+  TestInterleavedSet('IN01 CELT (B, C, F):', 1, 2, 5);
+  TestInterleavedSet('IN02 SILK/hibrido (H, I, J):', 7, 8, 9);
+  TestInterleavedSet('IN03 mixto (K, L, B):', 10, 11, 1);
 end;
 
 procedure TestOgg;

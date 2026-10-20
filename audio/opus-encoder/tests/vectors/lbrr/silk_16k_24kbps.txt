@@ -1,0 +1,10 @@
+caso: silk_16k_24kbps
+señal: OpusEncTool gensig kind=speech, 6 s, mono, 16000 Hz
+encoder: TOpusEncoder (idéntico byte a byte a libopus 1.5.2 sin análisis tonal)
+parámetros: ch=1 app=voip ms=20 cx=10 vbr=1 fec=1 loss=10 fs=16000 br=24000 mode=auto dtx=0
+modos en el flujo: SILK
+paquetes: 300 (20 ms); perdidos: 32 (k % 10 == 9 y ráfaga k = 154,155)
+paquetes con bandera LBRR: 245
+pérdidas con LBRR disponible en el siguiente paquete: 22
+paquetes DTX (<= 2 bytes): 0
+referencia .pcm (libopus fecdec): 300 tramas, 30 recuperadas con FEC, 2 con PLC

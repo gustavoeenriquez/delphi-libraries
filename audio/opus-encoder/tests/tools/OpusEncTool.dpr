@@ -96,6 +96,8 @@ var
   MaxBytes: Integer;
   Rng: Cardinal;
   FS_: TFormatSettings;
+  BrCyc: TArray<string>;
+  BrPeriod: Integer;
 begin
   FS_ := TFormatSettings.Invariant;
   Fs := StrToInt(GetArg('fs', '48000'));
@@ -112,6 +114,11 @@ begin
   else Br := StrToInt(S);
   UseFloat := GetArg('float', '0') = '1';
   MaxBytes := StrToInt(GetArg('maxbytes', '1276'));
+  // brcyc=b1,b2,...,N: cycle the bitrate through b1..bk every N frames
+  BrCyc := GetArg('brcyc', '').Split([',']);
+  BrPeriod := 0;
+  if Length(BrCyc) >= 2 then
+    BrPeriod := StrToInt(BrCyc[High(BrCyc)]);
 
   Enc := TOpusEncoder.Create(Fs, Ch, App);
   try
@@ -153,6 +160,8 @@ begin
         if Got = 0 then Break;
         if Got < Frame then
           FillChar(Pcm[Got * Ch], (Frame - Got) * Ch * 2, 0);
+        if (BrPeriod > 0) and (N mod BrPeriod = 0) then
+          Enc.Bitrate := StrToInt(BrCyc[(N div BrPeriod) mod (Length(BrCyc) - 1)]);
         if UseFloat then
         begin
           for I := 0 to Frame * Ch - 1 do

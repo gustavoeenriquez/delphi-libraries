@@ -86,11 +86,13 @@ Origen y licencia de los vectores:
 
 ```
 cd tests\src
-dcc64 -B -NSSystem -U..\..\src -NUWin64\Release -EWin64\Release G722Tests.dpr
-dcclinux64 -B -NSSystem -U..\..\src -NULinux64\Release -ELinux64\Release --syslibroot:<sysroot> --libpath:<...> G722Tests.dpr
+msbuild G722Tests.dproj /p:Config=Release /p:Platform=Win64
+msbuild G722Tests.dproj /p:Config=Release /p:Platform=Linux64
 ```
 
-También se puede compilar con `G722Tests.dproj` en MSBuild. La unidad solo depende de `SysUtils`.
+Linux64 se compila con el SDK de Linux registrado en RAD Studio 13 (Studio 37:
+`ubuntu24.04.sdk`, plataforma Linux64 por defecto); el binario corre en WSL o en Linux.
+La unidad solo depende de `SysUtils`.
 
 ## Notas de implementación
 

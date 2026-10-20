@@ -162,7 +162,9 @@ Esas carpetas están en `.gitignore`. Si faltan, T08–T10 y T12 se saltan y el 
 
 ```
 cd tests\src
-dcc64 -B -NSSystem -U..\..\src -NUWin64\Release -EWin64\Release G729Tests.dpr
+msbuild G729Tests.dproj /p:Config=Release /p:Platform=Win64
+msbuild G729Tests.dproj /p:Config=Release /p:Platform=Linux64
 ```
 
-O con `G729Tests.dproj` en MSBuild. Para Linux64, igual que en `g722-codec` (hace falta un sysroot de Linux).
+Linux64 se compila con el SDK de Linux registrado en RAD Studio 13 (Studio 37:
+`ubuntu24.04.sdk`, plataforma Linux64 por defecto); el binario corre en WSL o en Linux.

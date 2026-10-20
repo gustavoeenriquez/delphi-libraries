@@ -680,7 +680,8 @@ PDFViewerControl1.ZoomFit;
 | TestCCITT (hand-coded streams, 52 libtiff/MuPDF vectors, CCITT filter; `TPDFImage` `/Decode`, image masks, Indexed; nested form resources; Win64 + Linux64) | 89 ✅ |
 | TestJBIG2 (MMR and structure, 9 jbig2enc/MuPDF vectors as PDF stream and as file, filter and `TPDFImage`; + 5 ITU conformance streams when given; Win64 + Linux64) | 27 (+5) ✅ |
 | TestFonts (standard 14 metrics and aliases, Annex D encodings, glyph names, simple fonts without `/Widths`, Differences, text advance; TrueType/CFF/Type 1 outlines against FreeType; code → glyph for symbolic/nonsymbolic TrueType, built-in encodings, `CIDToGIDMap`; Win64 + Linux64) | 124 ✅ |
-| **Total** | **638+ ✅** |
+| TestGraphics (current point of `v` curves, inherited initial state of form XObjects, soft masks of another size, JPEG soft masks, undecodable JPEG 2000; Win64 + Linux64) | 16 ✅ |
+| **Total** | **654+ ✅** |
 
 Run the tests:
 
@@ -699,6 +700,8 @@ msbuild pdf\Tests\TestJBIG2.dproj              /p:Config=Release /p:Platform=Win
 msbuild pdf\Tests\TestJBIG2.dproj              /p:Config=Release /p:Platform=Linux64
 msbuild pdf\Tests\TestFonts.dproj              /p:Config=Release /p:Platform=Win64
 msbuild pdf\Tests\TestFonts.dproj              /p:Config=Release /p:Platform=Linux64
+msbuild pdf\Tests\TestGraphics.dproj           /p:Config=Release /p:Platform=Win64
+msbuild pdf\Tests\TestGraphics.dproj           /p:Config=Release /p:Platform=Linux64
 ```
 
 The CCITT vectors in `Tests/data/ccitt` are regenerated with
@@ -735,6 +738,14 @@ programs, and looking glyphs up by Unicode fails on subset fonts with symbolic c
 from local PDFs (TrueType and CFF against fontTools, Type 1 against FreeType); the test fonts
 in `Tests/data/fonts` are drawn by `Tests/tools/gen_font_vectors.py` (CC0) with FreeType's
 points as the expected values.
+
+Images are sampled with mipmaps when drawn smaller than their resolution (scanned pages)
+and bilinearly when magnified. Against MuPDF, 71 scanned PDFs went from a mean pixel
+correlation of 0.78 to 0.90 with that change and three fixes found on the way: form
+XObjects now start from the graphics state at their `Do` (their placement matrix was
+dropped), the `v` curve operator uses the current point (it read an uninitialized control
+point), and soft masks are resampled to the image size and decoded when they are JPEG.
+Images that cannot be decoded (JPEG 2000) are skipped instead of painted black.
 
 ---
 

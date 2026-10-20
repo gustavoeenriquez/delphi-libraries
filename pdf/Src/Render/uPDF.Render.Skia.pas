@@ -109,6 +109,7 @@ type
 
     // Draw a decoded TPDFImage (or inline image) at the current CTM position;
     // image masks paint with the fill colour of AState
+    function  ImageSampling(AImage: TPDFImage; const ACanvasMatrix: TMatrix): TSkSamplingOptions;
     procedure DrawPDFImage(AImage: TPDFImage; const ACanvasMatrix: TMatrix;
       const AState: TPDFGraphicsState);
 
@@ -128,7 +129,7 @@ type
 
     // Process a form XObject (recursive)
     procedure RenderFormXObject(AStream: TPDFStream;
-                                const APlacementCTM: TPDFMatrix);
+                                const APlacementCTM: TPDFMatrix; const AState: TPDFGraphicsState);
 
   public
     constructor Create(const AOptions: TPDFRenderOptions);
@@ -806,7 +807,7 @@ begin
   end
   else if SubType = 'Form' then
   begin
-    RenderFormXObject(XStream, AMatrix);
+    RenderFormXObject(XStream, AMatrix, AState);
   end;
 end;
 
@@ -833,6 +834,24 @@ end;
 // Image rendering
 // =========================================================================
 
+// Sampling for an image drawn into the unit square by ACanvasMatrix. A scan
+// shown smaller than its resolution is averaged through mipmaps (nearest
+// neighbour drops whole rows of a 300 dpi fax page); a magnified image is
+// interpolated bilinearly, as MuPDF does.
+function TPDFSkiaRenderer.ImageSampling(AImage: TPDFImage;
+  const ACanvasMatrix: TMatrix): TSkSamplingOptions;
+begin
+  if not FOptions.Antialias then
+    Exit(TSkSamplingOptions.Create(TSkFilterMode.Nearest, TSkMipmapMode.None));
+  // device pixels per image pixel along each image axis
+  var SX := Sqrt(Sqr(ACanvasMatrix.m11) + Sqr(ACanvasMatrix.m12)) / AImage.Width;
+  var SY := Sqrt(Sqr(ACanvasMatrix.m21) + Sqr(ACanvasMatrix.m22)) / AImage.Height;
+  if Min(SX, SY) < 1 then
+    Result := TSkSamplingOptions.Create(TSkFilterMode.Linear, TSkMipmapMode.Linear)
+  else
+    Result := TSkSamplingOptions.Create(TSkFilterMode.Linear, TSkMipmapMode.None);
+end;
+
 procedure TPDFSkiaRenderer.DrawPDFImage(AImage: TPDFImage;
   const ACanvasMatrix: TMatrix; const AState: TPDFGraphicsState);
 var
@@ -844,6 +863,29 @@ begin
   if (AImage.Width <= 0) or (AImage.Height <= 0) then Exit;
 
   SkImg := nil;
+
+  // A JPEG soft mask is decoded here (the core has no JPEG decoder)
+  if (AImage.SMask <> nil) and AImage.SMask.IsJPEG then
+  begin
+    var MaskImg := TSkImage.MakeFromEncoded(AImage.SMask.Samples);
+    if (MaskImg <> nil) and (MaskImg.Width = AImage.SMask.Width) and
+       (MaskImg.Height = AImage.SMask.Height) then
+    begin
+      var MW := MaskImg.Width;
+      var MH := MaskImg.Height;
+      var Px: TBytes;
+      SetLength(Px, MW * MH * 4);
+      if MaskImg.ReadPixels(TSkImageInfo.Create(MW, MH, TSkColorType.RGBA8888,
+           TSkAlphaType.Unpremul), @Px[0], NativeUInt(MW) * 4) then
+      begin
+        var Gray: TBytes;
+        SetLength(Gray, MW * MH);
+        for var I := 0 to MW * MH - 1 do
+          Gray[I] := Px[I * 4];
+        AImage.SMask.SetDecodedGray(Gray);
+      end;
+    end;
+  end;
 
   if AImage.IsJPEG then
   begin
@@ -858,15 +900,12 @@ begin
         var H := AImage.Height;
         var ReadInfo := TSkImageInfo.Create(W, H, TSkColorType.RGBA8888, TSkAlphaType.Unpremul);
         SetLength(RGBA, W * H * 4);
-        if JpegImg.ReadPixels(ReadInfo, @RGBA[0], NativeUInt(W) * 4) then
+        var Alpha: TBytes;
+        if JpegImg.ReadPixels(ReadInfo, @RGBA[0], NativeUInt(W) * 4) and
+           AImage.MaskAlpha(W, H, Alpha) then
         begin
-          var MaskSamples := AImage.SMask.Samples;
           for var I := 0 to W * H - 1 do
-          begin
-            var A: Byte;
-            if I < Length(MaskSamples) then A := MaskSamples[I] else A := 255;
-            RGBA[I*4+3] := A;
-          end;
+            RGBA[I*4+3] := Alpha[I];
           ImgInfo := TSkImageInfo.Create(W, H, TSkColorType.RGBA8888, TSkAlphaType.Unpremul);
           SkImg := TSkImage.MakeFromRaster(ImgInfo, @RGBA[0], NativeUInt(W) * 4);
         end
@@ -904,8 +943,8 @@ begin
 
   FCanvas.SetMatrix(ACanvasMatrix);
   // Draw into the unit square [0,0]-[1,1]; ImageMatrix already corrects Y-flip
-  FCanvas.DrawImageRect(SkImg, TRectF.Create(0, 0, 1, 1), Paint,
-    TSkSrcRectConstraint.Fast);
+  FCanvas.DrawImageRect(SkImg, TRectF.Create(0, 0, 1, 1),
+    ImageSampling(AImage, ACanvasMatrix), Paint, TSkSrcRectConstraint.Fast);
 end;
 
 // =========================================================================
@@ -1237,7 +1276,7 @@ end;
 // =========================================================================
 
 procedure TPDFSkiaRenderer.RenderFormXObject(AStream: TPDFStream;
-  const APlacementCTM: TPDFMatrix);
+  const APlacementCTM: TPDFMatrix; const AState: TPDFGraphicsState);
 var
   FormBytes:  TBytes;
   FormResDict:TPDFDictionary;
@@ -1245,6 +1284,7 @@ var
   FormRes:    IPDFResources;
   Processor:  TPDFContentStreamProcessor;
   SavedPage:  TPDFPage;
+  FormState:  TPDFGraphicsState;
 begin
   // cyclic or absurdly deep form nesting would overflow the stack
   if FFormDepth >= MAX_FORM_DEPTH then Exit;
@@ -1272,8 +1312,9 @@ begin
 
   FCanvas.Save;
   try
-    // Apply the combined CTM to the canvas for this form
-    FCanvas.Concat(PDFMatrixToSkia(CombinedCTM) * FPageFlip);
+    // The /BBox clip is in form space; the painting callbacks set their own
+    // matrix from the CTM the form content starts with (CombinedCTM)
+    FCanvas.SetMatrix(PDFMatrixToSkia(CombinedCTM) * FPageFlip);
 
     // Optional /BBox clip
     var BBoxArr := AStream.Dict.GetAsArray('BBox');
@@ -1302,6 +1343,10 @@ begin
       Processor.OnSaveRestore      := OnSaveRestore;
       Processor.OnTextBlock        := OnTextBlock;
       Processor.OnPaintShading     := OnPaintShading;
+      // the form inherits the graphics state at its Do, in the form's space
+      FormState := AState;
+      FormState.CTM := CombinedCTM;
+      Processor.SetInitialState(FormState);
       Processor.Process(FormBytes, FormRes, FPage.Document.Resolver);
     finally
       Dec(FFormDepth);

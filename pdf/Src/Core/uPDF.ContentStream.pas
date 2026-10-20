@@ -19,11 +19,14 @@ type
   TPDFPathSegment = record
     Kind: TPDFPathSegKind;
     P1, P2, P3: TPointF;  // P1=endpoint for MoveTo/LineTo; P1..P3 for curves
-  end;
+  end;                    // ('v': P1 is the current point; 'y': P2 is unused)
 
   TPDFPath = class
   private
     FSegments: TList<TPDFPathSegment>;
+    FCurrent:  TPointF;   // current point
+    FStart:    TPointF;   // start of the current subpath (closepath goes back to it)
+    procedure Add(AKind: TPDFPathSegKind; const AP1, AP2, AP3: TPointF);
   public
     constructor Create;
     destructor  Destroy; override;
@@ -150,6 +153,8 @@ type
     FPath:        TPDFPath;
     FResources:   IPDFResources;
     FResolver:    IObjectResolver;
+    FInitialState:    TPDFGraphicsState;
+    FHasInitialState: Boolean;
 
     // Operator callbacks
     FOnPaintPath:       TPDFOnPaintPath;
@@ -285,6 +290,10 @@ type
     procedure ProcessStream(AStream: TStream; AResources: IPDFResources;
       AResolver: IObjectResolver = nil);
 
+    // Graphics state the stream starts from instead of the default one: a
+    // form XObject inherits the state (CTM included) at its Do operator
+    procedure SetInitialState(const AState: TPDFGraphicsState);
+
     // Event callbacks
     property OnPaintPath:        TPDFOnPaintPath        read FOnPaintPath        write FOnPaintPath;
     property OnPaintGlyph:       TPDFOnPaintGlyph       read FOnPaintGlyph       write FOnPaintGlyph;
@@ -323,57 +332,57 @@ function TPDFPath.Segments: TList<TPDFPathSegment>; begin Result := FSegments; e
 procedure TPDFPath.Clear;
 begin
   FSegments.Clear;
+  FCurrent := TPointF.Zero;
+  FStart   := TPointF.Zero;
+end;
+
+procedure TPDFPath.Add(AKind: TPDFPathSegKind; const AP1, AP2, AP3: TPointF);
+var S: TPDFPathSegment;
+begin
+  S.Kind := AKind;
+  S.P1   := AP1;
+  S.P2   := AP2;
+  S.P3   := AP3;
+  FSegments.Add(S);
 end;
 
 procedure TPDFPath.MoveTo(X, Y: Single);
-var S: TPDFPathSegment;
 begin
-  S.Kind := TPDFPathSegKind.MoveTo;
-  S.P1   := TPointF.Create(X, Y);
-  FSegments.Add(S);
+  FCurrent := TPointF.Create(X, Y);
+  FStart   := FCurrent;
+  Add(TPDFPathSegKind.MoveTo, FCurrent, TPointF.Zero, TPointF.Zero);
 end;
 
 procedure TPDFPath.LineTo(X, Y: Single);
-var S: TPDFPathSegment;
 begin
-  S.Kind := TPDFPathSegKind.LineTo;
-  S.P1   := TPointF.Create(X, Y);
-  FSegments.Add(S);
+  FCurrent := TPointF.Create(X, Y);
+  Add(TPDFPathSegKind.LineTo, FCurrent, TPointF.Zero, TPointF.Zero);
 end;
 
 procedure TPDFPath.CurveTo(X1, Y1, X2, Y2, X3, Y3: Single);
-var S: TPDFPathSegment;
 begin
-  S.Kind := TPDFPathSegKind.CurveTo;
-  S.P1   := TPointF.Create(X1, Y1);
-  S.P2   := TPointF.Create(X2, Y2);
-  S.P3   := TPointF.Create(X3, Y3);
-  FSegments.Add(S);
+  FCurrent := TPointF.Create(X3, Y3);
+  Add(TPDFPathSegKind.CurveTo, TPointF.Create(X1, Y1), TPointF.Create(X2, Y2), FCurrent);
 end;
 
 procedure TPDFPath.CurveToV(X2, Y2, X3, Y3: Single);
-var S: TPDFPathSegment;
 begin
-  S.Kind := TPDFPathSegKind.CurveToV;
-  S.P2   := TPointF.Create(X2, Y2);
-  S.P3   := TPointF.Create(X3, Y3);
-  FSegments.Add(S);
+  // the first control point is the current point before the segment
+  var P1 := FCurrent;
+  FCurrent := TPointF.Create(X3, Y3);
+  Add(TPDFPathSegKind.CurveToV, P1, TPointF.Create(X2, Y2), FCurrent);
 end;
 
 procedure TPDFPath.CurveToY(X1, Y1, X3, Y3: Single);
-var S: TPDFPathSegment;
 begin
-  S.Kind := TPDFPathSegKind.CurveToY;
-  S.P1   := TPointF.Create(X1, Y1);
-  S.P3   := TPointF.Create(X3, Y3);
-  FSegments.Add(S);
+  FCurrent := TPointF.Create(X3, Y3);
+  Add(TPDFPathSegKind.CurveToY, TPointF.Create(X1, Y1), TPointF.Zero, FCurrent);
 end;
 
 procedure TPDFPath.ClosePath;
-var S: TPDFPathSegment;
 begin
-  S.Kind := TPDFPathSegKind.Close;
-  FSegments.Add(S);
+  FCurrent := FStart;
+  Add(TPDFPathSegKind.Close, TPointF.Zero, TPointF.Zero, TPointF.Zero);
 end;
 
 procedure TPDFPath.AddRect(X, Y, W, H: Single);
@@ -523,6 +532,12 @@ begin
   end;
 end;
 
+procedure TPDFContentStreamProcessor.SetInitialState(const AState: TPDFGraphicsState);
+begin
+  FInitialState    := AState;
+  FHasInitialState := True;
+end;
+
 procedure TPDFContentStreamProcessor.ProcessStream(AStream: TStream;
   AResources: IPDFResources; AResolver: IObjectResolver);
 var
@@ -533,6 +548,8 @@ begin
   FResources := AResources;
   FResolver  := AResolver;
   FGS.Reset;
+  if FHasInitialState then
+    FGS.SetCurrent(FInitialState);
 
   Lexer := TPDFLexer.Create(AStream, False);
   Args  := TList<TPDFObject>.Create;

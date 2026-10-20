@@ -77,11 +77,21 @@ type
     class function FromInline(ADict: TPDFDictionary;
       const AData: TBytes): TPDFImage; static;
 
-    // Decode filters and store samples
+    // Decode filters and store samples (the soft mask too)
     procedure Decode;
 
+    // Samples decoded by the caller (a JPEG soft mask decoded with the
+    // platform codec): 8-bit gray, Width x Height
+    procedure SetDecodedGray(const AGray: TBytes);
+
+    // The soft mask as one alpha byte per pixel of an AWidth x AHeight image
+    // (nearest sample when the sizes differ); False when there is no mask or
+    // it is not decoded (JPEG, JPEG 2000)
+    function MaskAlpha(AWidth, AHeight: Integer; out AAlpha: TBytes): Boolean;
+
     // Convert raw samples to RGBA8888 (4 bytes per pixel, top-left origin)
-    // Caller owns the returned TBytes.
+    // Caller owns the returned TBytes. Empty when the samples are not decoded
+    // (JPEG, JPEG 2000, undecodable CCITT/JBIG2).
     function ToRGBA: TBytes;
 
     // Image masks: RGBA with the colour (R, G, B, A) where the mask paints and
@@ -654,8 +664,46 @@ begin
     FInfo.ColorSpaceName := 'DeviceGray';
 end;
 
+procedure TPDFImage.SetDecodedGray(const AGray: TBytes);
+begin
+  FSamples := AGray;
+  FInfo.Encoding         := TPDFImageEncoding.Raw;
+  FInfo.BitsPerComponent := 8;
+  FInfo.ComponentCount   := 1;
+  FInfo.ColorSpaceName   := 'DeviceGray';
+end;
+
+function TPDFImage.MaskAlpha(AWidth, AHeight: Integer; out AAlpha: TBytes): Boolean;
+var
+  MW, MH: Integer;
+begin
+  AAlpha := nil;
+  Result := (FSMask <> nil) and (FSMask.FInfo.Encoding = TPDFImageEncoding.Raw) and
+            (FSMask.FInfo.Width > 0) and (FSMask.FInfo.Height > 0) and
+            (AWidth > 0) and (AHeight > 0);
+  if not Result then Exit;
+  MW := FSMask.FInfo.Width;
+  MH := FSMask.FInfo.Height;
+  var M := FSMask.FSamples;
+  SetLength(AAlpha, AWidth * AHeight);
+  for var Y := 0 to AHeight - 1 do
+  begin
+    var SY := Int64(Y) * MH div AHeight;
+    for var X := 0 to AWidth - 1 do
+    begin
+      var I := SY * MW + Int64(X) * MW div AWidth;
+      if I < Length(M) then
+        AAlpha[Y * AWidth + X] := M[I]
+      else
+        AAlpha[Y * AWidth + X] := 255;
+    end;
+  end;
+end;
+
 procedure TPDFImage.Decode;
 begin
+  if FSMask <> nil then
+    FSMask.Decode;
   // CCITT data the filter chain could not decode: retry with the image
   // size (files that omit /Columns), then via WIC (Windows only)
   if FInfo.Encoding = TPDFImageEncoding.CCITT then
@@ -776,10 +824,10 @@ var
 begin
   W := FInfo.Width;
   H := FInfo.Height;
+  // JPEG is decoded by the platform codec; JPEG 2000 is not supported
+  if FInfo.Encoding <> TPDFImageEncoding.Raw then
+    Exit(nil);
   SetLength(Result, W * H * 4);
-
-  if FInfo.Encoding = TPDFImageEncoding.JPEG then
-    Exit; // JPEG decoded by OS/Skia; return empty here
 
   var Src := FSamples;
   var Dst := 0;
@@ -879,17 +927,10 @@ begin
   end;
 
   // Apply soft-mask alpha channel
-  if (FSMask <> nil) then
-  begin
-    var MaskSamples := FSMask.FSamples;
+  var Alpha: TBytes;
+  if MaskAlpha(W, H, Alpha) then
     for I := 0 to W * H - 1 do
-    begin
-      if I < Length(MaskSamples) then
-        Result[I * 4 + 3] := MaskSamples[I]
-      else
-        Result[I * 4 + 3] := 255;
-    end;
-  end;
+      Result[I * 4 + 3] := Alpha[I];
 end;
 
 // -------------------------------------------------------------------------

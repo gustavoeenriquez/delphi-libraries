@@ -10,11 +10,13 @@ ODG de PEAQ básico (GstPEAQ; 0 = transparente, −4 = muy molesto) sobre cinco 
 de 4–30 s a 44,1 kHz (dos músicas estéreo, voz, batería estéreo, castañuelas),
 decodificando con ffmpeg y remuestreando a 48 kHz. Media de las cinco:
 
-| CBR | antes de las correcciones | modelo MDCT | + regiones Huffman (defecto) | modelo FFT | LAME 3.100 |
+| CBR | antes de las correcciones | modelo MDCT | + regiones Huffman | + reparto de bits (defecto) | LAME 3.100 |
 |---|---:|---:|---:|---:|---:|
-| 96 kbps | — | −1.62 | −1.59 | −1.59 | −1.32 |
-| 128 kbps | −1.35 | −1.03 | −1.00 | −1.02 | −0.76 |
-| 192 kbps | — | −0.40 | −0.38 | −0.38 | −0.13 |
+| 96 kbps | — | −1.62 | −1.59 | −1.49 | −1.32 |
+| 128 kbps | −1.35 | −1.03 | −1.00 | −0.90 | −0.76 |
+| 192 kbps | — | −0.40 | −0.38 | −0.28 | −0.13 |
+
+(El modelo FFT opcional da −1.59 / −1.02 / −0.38 sin las dos últimas mejoras.)
 
 Regiones Huffman: en bloques largos `region0_count`/`region1_count` se eligen por
 gránulo (la división más barata de las 125 que admite la side info, con la mejor
@@ -23,6 +25,14 @@ convierte en menos ruido (la música gana 0.03–0.1; VBR, la misma calidad con
 1.5–2 % menos de bits). La búsqueda binaria de global_gain cuenta con la división
 fija y solo los últimos pasos con la óptima: codificar es unas 2 veces más lento
 (30 s de estéreo a 128 kbps en ~3 s).
+
+Reparto de bits entre gránulos: la demanda que estima el modelo psicoacústico
+(0.5 log2(E/xmin) por línea) no cuenta el coste del Huffman ni de los
+scalefactors; medido en modo calidad, los bits codificados son ~2.5 veces la
+estimación en bloques largos y 3–8 veces en cortos. Escalada así (×2.5 y ×4), los
+gránulos con transitorios piden al reservorio lo que de verdad necesitan: la
+batería pasa de −0.82 a −0.33 a 128 kbps (LAME −0.14) y la media mejora 0.1 en los
+tres bitrates. VBR no cambia (cuantiza al umbral sin reparto).
 
 Las dos correcciones de esta fecha (ver la historia al final) son la mejora: los
 cuartetos count1 iban con el índice de la tabla invertido y ffmpeg descartaba
@@ -33,8 +43,8 @@ media en CBR, pero peor en la batería, y en VBR reparte peor los bits (da a la
 música densa demasiados pocos). Por eso no es el modelo por defecto. La distancia
 que queda con LAME no es del modelo psicoacústico: a igual tasa media, ni el
 modelo ni sus parámetros (TMN/NMT, minval, ATH, control de pre-eco) la cambian;
-está en la eficiencia de codificación (sin scfsi, redondeo del cuantizador,
-reparto de bits entre gránulos).
+está sobre todo en la música densa (música 1 a 128 kbps: −1.81 frente a −1.32)
+y en la eficiencia de codificación que queda (scfsi, redondeo del cuantizador).
 
 ## Conmutación de ventana y pre-eco (2026-10-20)
 

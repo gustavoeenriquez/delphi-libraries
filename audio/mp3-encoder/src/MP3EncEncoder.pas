@@ -237,6 +237,8 @@ const
   C_SAMPLERATE_HZ: array[0..2] of Integer = (44100, 48000, 32000);
 
   ISQRT2 = 0.70710678118654752;
+  EST_SCALE_LONG  = 2.5;   { bit demand estimate -> coded bits, long blocks }
+  EST_SCALE_SHORT = 4.0;   { idem, short blocks }
 
 type
   TFrameXr = array[0..ENC_GRANULES - 1, 0..1] of T576;
@@ -737,7 +739,13 @@ begin
 
   FramePsy(AEnc, AXr, (AChannelMode = FRAME_CH_JOINT) and (AModeExt and 2 <> 0) and (AEnc.Channels = 2), FP);
   for k := 0 to n - 1 do begin
-    est[k] := FP.Est[k];
+    { the psychoacoustic estimate (0.5 log2(E/xmin) per line) leaves out
+      the Huffman and scalefactor overhead: bits coded / estimate measured
+      in quality mode ~ 2.5 for long blocks and 3-8 for short ones }
+    if AEnc.BlockType[k div AEnc.Channels] = 2 then
+      est[k] := FP.Est[k] * EST_SCALE_SHORT
+    else
+      est[k] := FP.Est[k] * EST_SCALE_LONG;
     xmin[k] := FP.Xmin[k];
     xminS[k] := FP.XminS[k];
     if AEnc.Vbr then begin

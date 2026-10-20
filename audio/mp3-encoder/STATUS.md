@@ -65,6 +65,9 @@ delay 528 + padding y la duración queda exacta).
   reparto en VBR. Fase 19 ampliada (PF01–PF10, RV28–RV30).
 - Regiones Huffman óptimas por gránulo (bloques largos): −1.9 % de bits Huffman,
   ODG medio 128 kbps −1.03 → −1.00. Fase 19: RC04–RC08.
+- Reparto de bits: demanda estimada ×2.5 (largos) / ×4 (cortos), medido contra los
+  bits reales en modo calidad. ODG medio 96/128/192: −1.49 / −0.90 / −0.28
+  (batería a 128: −0.82 → −0.33).
 
 ## Pendiente / ideas
 
@@ -72,8 +75,7 @@ delay 528 + padding y la duración queda exacta).
 - La decisión automática M/S por bits estimados no siempre elige el modo de
   mejor SNR (en ruido sintético ancho elige L/R aunque M/S conserva mejor S).
 - Intensity stereo; MPEG-2/2.5 (tasas bajas de muestreo).
-- Distancia con LAME (PEAQ, 128 kbps: −1.00 frente a −0.76): está en la
-  eficiencia de codificación, no en el modelo psicoacústico. Candidatos:
-  reparto de bits entre gránulos según la entropía perceptual, scfsi y redondeo
-  del cuantizador.
+- Distancia con LAME (PEAQ, 128 kbps: −0.90 frente a −0.76): sobre todo música
+  densa (música 1: −1.81 frente a −1.32). Candidatos: scfsi, redondeo del
+  cuantizador (LAME usa adj43), estrategias de amplificación del bucle externo.
 - VBR con voz: usa menos bits que LAME y la calidad cae en proporción.

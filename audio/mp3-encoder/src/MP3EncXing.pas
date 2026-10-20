@@ -198,7 +198,7 @@ begin
   FCfg.Original        := 1;
   FCfg.Granules        := ENC_GRANULES;
   if AChannels > 1 then begin
-    FCfg.ChannelMode := FRAME_CH_STEREO;
+    FCfg.ChannelMode := FRAME_CH_JOINT;   { as the audio frames of the writers }
     FCfg.Channels    := 2;
   end else begin
     FCfg.ChannelMode := FRAME_CH_MONO;

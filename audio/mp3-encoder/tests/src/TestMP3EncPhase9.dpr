@@ -260,7 +260,7 @@ begin
     MP3Out.ReadBuffer(b[0], 4);
     Check('EW03 sync [0] = 0xFF',    b[0] = $FF);
     Check('EW04 sync [1] = 0xFB',    b[1] = $FB);
-    Check('EW05 stereo [3] = 0x04 (L/R) or 0x64 (MS)',  (b[3] = $04) or (b[3] = $64));
+    Check('EW05 stereo [3] = 0x44 (joint, L/R) or 0x64 (joint, MS)',  (b[3] = $44) or (b[3] = $64));
   finally
     WavIn.Free;
     MP3Out.Free;

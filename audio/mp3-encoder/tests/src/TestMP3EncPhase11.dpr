@@ -250,10 +250,10 @@ begin
     Check('XI10 stereo total = 1251',           MP3Out.Size = 1251);
     Check('XI11 stereo XingReadFrame -> True',  XingReadFrame(MP3Out, Cfg, 2, Tag));
     Check('XI12 stereo FrameCount = 2',         Tag.FrameCount = 2);
-    { Info frame byte[3] = 0x04 (stereo channel mode) }
+    { Info frame byte[3] = 0x44 (joint stereo, like the audio frames) }
     MP3Out.Position := 3;
     MP3Out.ReadBuffer(b, 1);
-    Check('XI13 stereo Info byte[3] = 0x04',    b = $04);
+    Check('XI13 stereo Info byte[3] = 0x44',    b = $44);
   finally
     WavIn.Free;
     MP3Out.Free;

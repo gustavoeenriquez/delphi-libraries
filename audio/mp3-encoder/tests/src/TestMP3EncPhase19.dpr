@@ -401,14 +401,14 @@ begin
   for i := 0 to 1151 do begin PCM[i] := Input[i] * 32768; PCM_R[i] := PCM[i]; end;
   EncodeFrameAuto(Enc, PCM, PCM_R);
   EncodeFrameAuto(Enc, PCM, PCM_R);
-  Check('RV20 identical channels -> joint stereo (MS)', Enc.LastChannelMode = FRAME_CH_JOINT);
+  Check('RV20 identical channels -> joint stereo (MS)', Enc.LastMS);
 
   { uncorrelated channels -> L/R }
   EncInitStereo(Enc, Cfg);
   for i := 0 to 1151 do begin PCM[i] := Sine(1000, 0.3, i) * 32768; PCM_R[i] := Sine(1500, 0.3, i) * 32768; end;
   EncodeFrameAuto(Enc, PCM, PCM_R);
   EncodeFrameAuto(Enc, PCM, PCM_R);
-  Check('RV25 uncorrelated channels -> L/R stereo', Enc.LastChannelMode = FRAME_CH_STEREO);
+  Check('RV25 uncorrelated channels -> L/R stereo', not Enc.LastMS);
 
   { low bitrate robustness: 32 kbps mono }
   Cfg.BrIdx := 1; EncInit(Enc, Cfg);

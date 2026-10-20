@@ -280,7 +280,7 @@ begin
       2: AppendBytes(Data, EncodeFrameMS(Enc, PCM_L, PCM_R));
     else AppendBytes(Data, EncodeFrameAuto(Enc, PCM_L, PCM_R));
     end;
-    if Enc.LastChannelMode = FRAME_CH_JOINT then Inc(AFramesMS);
+    if Enc.LastMS then Inc(AFramesMS);
   end;
   AppendBytes(Data, EncFlush(Enc));
   DecodeMP3(Data, Dec);

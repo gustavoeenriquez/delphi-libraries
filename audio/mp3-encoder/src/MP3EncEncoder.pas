@@ -26,7 +26,11 @@
     EncodeFrameStereo : independent L/R (FRAME_CH_STEREO)
     EncodeFrameMS     : mid/side on the MDCT lines (FRAME_CH_JOINT, ms_stereo)
     EncodeFrameAuto   : MS when the side energy is small compared to mid,
-                        L/R otherwise; decided per frame
+                        L/R otherwise; decided per frame.  Every frame
+                        says joint stereo in its header and only the
+                        ms_stereo bit of mode_extension changes, as LAME
+                        does: some decoders (ffmpeg) take a channel mode
+                        change between the first frames for lost sync
 
   Window switching
     The subband samples of each new granule are scanned for attacks (energy
@@ -133,6 +137,7 @@ type
     FramesIn  : Integer;   { frames encoded }
     FramesOut : Integer;   { frames emitted }
     LastChannelMode : Byte;{ FRAME_CH_* used by the last encoded frame }
+    LastMS    : Boolean;   { the last encoded frame used mid/side }
     LastStats : array[0..ENC_GRANULES - 1, 0..1] of TLoopStats;
   end;
 
@@ -648,8 +653,9 @@ begin
 end;
 
 
-{ AXr holds L/R (or mono) spectra; with FRAME_CH_JOINT the core converts
-  them to mid/side after the psychoacoustic analysis. }
+{ AXr holds L/R (or mono) spectra; with FRAME_CH_JOINT and ms_stereo in
+  AModeExt the core converts them to mid/side after the psychoacoustic
+  analysis. }
 function EncodeFrameCore(var AEnc: TMP3Encoder; var AXr: TFrameXr;
   AChannelMode, AModeExt: Byte): TBytes;
 var
@@ -675,7 +681,7 @@ begin
   brIdx   := AEnc.Cfg.BrIdx;
   padding := AEnc.Cfg.Padding;
 
-  FramePsy(AEnc, AXr, (AChannelMode = FRAME_CH_JOINT) and (AEnc.Channels = 2), FP);
+  FramePsy(AEnc, AXr, (AChannelMode = FRAME_CH_JOINT) and (AModeExt and 2 <> 0) and (AEnc.Channels = 2), FP);
   for k := 0 to n - 1 do begin
     est[k] := FP.Est[k];
     xmin[k] := FP.Xmin[k];
@@ -791,6 +797,7 @@ begin
   FCfg.Channels        := AEnc.Channels;
   FCfg.Granules        := ENC_GRANULES;
   AEnc.LastChannelMode := AChannelMode;
+  AEnc.LastMS := (AChannelMode = FRAME_CH_JOINT) and (AModeExt and 2 <> 0);
 
   BW := TMP3BitWriter.Create;
   try
@@ -927,7 +934,7 @@ begin
   if useMS then begin
     Result := EncodeFrameCore(AEnc, Xr, FRAME_CH_JOINT, 2);
   end else
-    Result := EncodeFrameCore(AEnc, Xr, FRAME_CH_STEREO, 0);
+    Result := EncodeFrameCore(AEnc, Xr, FRAME_CH_JOINT, 0);
 end;
 
 // ---------------------------------------------------------------------------

@@ -6,10 +6,10 @@ unit OpusEncoder;
 
   Port of libopus 1.5.2 src/opus_encoder.c (float build).
 
-  SILK, hybrid and CELT modes, mode/bandwidth/channel decisions, in-band
-  FEC (LBRR), DTX and the redundant CELT frames of mode transitions follow
-  libopus. The tonality analysis (analysis.c) is not run yet (stage E3), so
-  the encoder behaves like libopus whose analysis_info is never valid.
+  SILK, hybrid and CELT modes, mode/bandwidth/channel decisions driven by the
+  tonality analysis (analysis.c: speech/music probability, detected
+  bandwidth, activity for DTX), in-band FEC (LBRR), DTX and the redundant
+  CELT frames of mode transitions follow libopus.
 
   Copyright (c) 2010-2011 Xiph.Org Foundation, Skype Limited.
   Written by Jean-Marc Valin and Koen Vos.
@@ -31,7 +31,8 @@ uses
   OpusCeltEnc,
   OpusRepacketizer,
   OpusEncTypes,
-  OpusSilkEncDefs;
+  OpusSilkEncDefs,
+  OpusAnalysis;
 
 const
   OPUS_MAX_PACKET_BYTES = 1276;
@@ -41,6 +42,7 @@ type
   private
     FCelt               : TCeltEncoder;
     FSilk               : PSilkEncoder;
+    FAnalysis           : TTonalityAnalysisState;
     FSilkMode           : TSilkEncControl;
     FApplication        : Integer;
     FChannels           : Integer;
@@ -89,7 +91,8 @@ type
     function  UserBitrateToBitrate(FrameSize, MaxDataBytes: Integer): Integer;
     function  ComputeStereoWidth(Pcm: PSingle; FrameSize: Integer): Single;
     function  EncodeNative(Pcm: PSingle; FrameSize: Integer; Data: PByte;
-      OutDataBytes, LsbDepth: Integer; FloatApi: Boolean): Integer;
+      OutDataBytes, LsbDepth: Integer; FloatApi: Boolean; AnalysisPcm: PSingle;
+      AnalysisSize: Integer): Integer;
     function  EncodeFrameNative(Pcm: PSingle; FrameSize: Integer; Data: PByte;
       MaxDataBytes: Integer; FloatApi, FirstFrame: Boolean; const AnalysisInfo: TAnalysisInfo;
       IsSilence: Boolean; Redundancy, CeltToSilk: Boolean; Prefill: Integer; EquivRate: Integer;
@@ -174,6 +177,8 @@ const
   NB_SPEECH_FRAMES_BEFORE_DTX = 10;
   MAX_CONSECUTIVE_DTX = 20;
   VAD_NO_DECISION = -1;
+  DTX_ACTIVITY_THRESHOLD: Single = 0.1;
+  PSEUDO_SNR_THRESHOLD: Single = 316.23;
   VERY_SMALL: Single = 1e-30;
   INV32768: Single = 1.0 / 32768;
   INV16384: Single = 1.0 / 16384;
@@ -434,6 +439,14 @@ begin
   Result := False;
 end;
 
+function ComputeFrameEnergy(Pcm: PSingle; FrameSize, Channels: Integer): Single;
+var
+  Len: Integer;
+begin
+  Len := FrameSize * Channels;
+  Result := CeltInnerProd(Pcm, Pcm, Len) / Len;
+end;
+
 function DecideFec(UseInBandFEC, PacketLossPerc, LastFec, Mode: Integer; var Bandwidth: Integer;
   Rate: Integer): Integer;
 var
@@ -609,6 +622,8 @@ begin
   FLsbDepth := 24;
   FVariableDuration := OPUS_FRAMESIZE_ARG;
   FDelayCompensation := FFs div 250;
+  TonalityAnalysisInit(FAnalysis, FFs);
+  FAnalysis.Application := FApplication;
   ResetState;
 end;
 
@@ -643,6 +658,7 @@ begin
   FPeakSignalEnergy := 0;
   FNonfinalFrame := False;
   FRangeFinal := 0;
+  TonalityAnalysisReset(FAnalysis);
 end;
 
 procedure TOpusEncoder.Reset;
@@ -723,27 +739,36 @@ end;
 function TOpusEncoder.Encode(Pcm: System.PSmallInt; FrameSize: Integer; Data: PByte; MaxDataBytes: Integer): Integer;
 var
   InBuf: array of Single;
-  I: Integer;
+  I, AnalysisFrameSize: Integer;
 begin
+  AnalysisFrameSize := FrameSize;
   FrameSize := OpusFrameSizeSelect(FrameSize, FVariableDuration, FFs);
   if FrameSize <= 0 then Exit(OPUS_BAD_ARG);
   if (Pcm = nil) or (Data = nil) then Exit(OPUS_BAD_ARG);
-  SetLength(InBuf, FrameSize * FChannels);
-  for I := 0 to FrameSize * FChannels - 1 do
+  // the analysis reads the whole analysis_frame_size (downmix_int); x/32768
+  // is exact, so the same buffer serves both paths
+  SetLength(InBuf, AnalysisFrameSize * FChannels);
+  for I := 0 to AnalysisFrameSize * FChannels - 1 do
     InBuf[I] := INV32768 * Pcm[I];
-  Result := EncodeNative(@InBuf[0], FrameSize, Data, MaxDataBytes, 16, False);
+  Result := EncodeNative(@InBuf[0], FrameSize, Data, MaxDataBytes, 16, False, @InBuf[0], AnalysisFrameSize);
 end;
 
 function TOpusEncoder.EncodeFloat(Pcm: PSingle; FrameSize: Integer; Data: PByte; MaxDataBytes: Integer): Integer;
+var
+  AnalysisFrameSize: Integer;
 begin
+  AnalysisFrameSize := FrameSize;
   FrameSize := OpusFrameSizeSelect(FrameSize, FVariableDuration, FFs);
   if FrameSize <= 0 then Exit(OPUS_BAD_ARG);
   if (Pcm = nil) or (Data = nil) then Exit(OPUS_BAD_ARG);
-  Result := EncodeNative(Pcm, FrameSize, Data, MaxDataBytes, 24, True);
+  Result := EncodeNative(Pcm, FrameSize, Data, MaxDataBytes, 24, True, Pcm, AnalysisFrameSize);
 end;
 
 function TOpusEncoder.EncodeNative(Pcm: PSingle; FrameSize: Integer; Data: PByte;
-  OutDataBytes, LsbDepth: Integer; FloatApi: Boolean): Integer;
+  OutDataBytes, LsbDepth: Integer; FloatApi: Boolean; AnalysisPcm: PSingle;
+  AnalysisSize: Integer): Integer;
+const
+  K0999: Single = 0.999;
 var
   I, Ret, VoiceEst, EquivRate, FrameRate, MaxRate, CurrBandwidth, MaxDataBytes, CbrBytes: Integer;
   FrameRate12, TocMode, Bw, PacketCode, NumMultiframes, StereoThreshold: Integer;
@@ -762,7 +787,11 @@ var
   BakToMono: Integer;
   FirstFrame, FrameToCelt, FrameRedundancy: Boolean;
   DummySilk: TSilkEncControl;
+  AnalysisReadPosBak, AnalysisReadSubframeBak, AnalysisBandwidth, MinDetectedBandwidth: Integer;
+  Prob, E: Single;
 begin
+  AnalysisReadPosBak := -1;
+  AnalysisReadSubframeBak := -1;
   MaxDataBytes := Min(OPUS_MAX_PACKET_BYTES, OutDataBytes);
   FRangeFinal := 0;
   CbrBytes := -1;
@@ -783,12 +812,46 @@ begin
   if (FSilkMode.Complexity >= 7) and (FFs >= 16000) then
   begin
     IsSilence := IsDigitalSilence(Pcm, FrameSize, FChannels, LsbDepth);
-    // run_analysis() (analysis.c) is part of stage E3
-  end;
+    AnalysisReadPosBak := FAnalysis.ReadPos;
+    AnalysisReadSubframeBak := FAnalysis.ReadSubframe;
+    RunAnalysis(FAnalysis, AnalysisPcm, AnalysisSize, FrameSize, FChannels, FFs, LsbDepth, AnalysisInfo);
+    // track the peak signal energy
+    if (not IsSilence) and (AnalysisInfo.ActivityProbability > DTX_ACTIVITY_THRESHOLD) then
+    begin
+      E := ComputeFrameEnergy(Pcm, FrameSize, FChannels);
+      FPeakSignalEnergy := Max(K0999 * FPeakSignalEnergy, E);
+    end;
+  end
+  else if FAnalysis.Initialized then
+    TonalityAnalysisReset(FAnalysis);
 
   if not IsSilence then
     FVoiceRatio := -1;
   FDetectedBandwidth := 0;
+  if AnalysisInfo.Valid then
+  begin
+    if FSignalType = OPUS_AUTO then
+    begin
+      if FPrevMode = 0 then
+        Prob := AnalysisInfo.MusicProb
+      else if FPrevMode = MODE_CELT_ONLY then
+        Prob := AnalysisInfo.MusicProbMax
+      else
+        Prob := AnalysisInfo.MusicProbMin;
+      FVoiceRatio := Floor(0.5 + 100 * (1 - Prob));
+    end;
+    AnalysisBandwidth := AnalysisInfo.Bandwidth;
+    if AnalysisBandwidth <= 12 then
+      FDetectedBandwidth := OPUS_BANDWIDTH_NARROWBAND
+    else if AnalysisBandwidth <= 14 then
+      FDetectedBandwidth := OPUS_BANDWIDTH_MEDIUMBAND
+    else if AnalysisBandwidth <= 16 then
+      FDetectedBandwidth := OPUS_BANDWIDTH_WIDEBAND
+    else if AnalysisBandwidth <= 18 then
+      FDetectedBandwidth := OPUS_BANDWIDTH_SUPERWIDEBAND
+    else
+      FDetectedBandwidth := OPUS_BANDWIDTH_FULLBAND;
+  end;
 
   if (FChannels = 2) and (FForceChannels <> 1) then
     StereoWidth := ComputeStereoWidth(Pcm, FrameSize)
@@ -1022,7 +1085,22 @@ begin
     FBandwidth := OPUS_BANDWIDTH_MEDIUMBAND;
   if (FFs <= 8000) and (FBandwidth > OPUS_BANDWIDTH_NARROWBAND) then
     FBandwidth := OPUS_BANDWIDTH_NARROWBAND;
-  // (detected bandwidth from the analysis: stage E3)
+  // use detected bandwidth to reduce the encoded bandwidth
+  if (FDetectedBandwidth <> 0) and (FUserBandwidth = OPUS_AUTO) then
+  begin
+    if (EquivRate <= 18000 * FStreamChannels) and (FMode = MODE_CELT_ONLY) then
+      MinDetectedBandwidth := OPUS_BANDWIDTH_NARROWBAND
+    else if (EquivRate <= 24000 * FStreamChannels) and (FMode = MODE_CELT_ONLY) then
+      MinDetectedBandwidth := OPUS_BANDWIDTH_MEDIUMBAND
+    else if EquivRate <= 30000 * FStreamChannels then
+      MinDetectedBandwidth := OPUS_BANDWIDTH_WIDEBAND
+    else if EquivRate <= 44000 * FStreamChannels then
+      MinDetectedBandwidth := OPUS_BANDWIDTH_SUPERWIDEBAND
+    else
+      MinDetectedBandwidth := OPUS_BANDWIDTH_FULLBAND;
+    FDetectedBandwidth := Max(FDetectedBandwidth, MinDetectedBandwidth);
+    FBandwidth := Min(FBandwidth, FDetectedBandwidth);
+  end;
 
   FSilkMode.LBRRCoded := DecideFec(FSilkMode.UseInBandFEC, FSilkMode.PacketLossPercentage,
     FSilkMode.LBRRCoded, FMode, FBandwidth, EquivRate);
@@ -1052,6 +1130,12 @@ begin
     else
       EncFrameSize := FFs div 50;
     NbFrames := FrameSize div EncFrameSize;
+    if AnalysisReadPosBak <> -1 then
+    begin
+      // reset the analysis position to the beginning of the first frame
+      FAnalysis.ReadPos := AnalysisReadPosBak;
+      FAnalysis.ReadSubframe := AnalysisReadSubframeBak;
+    end;
     if NbFrames = 2 then MaxHeaderBytes := 3 else MaxHeaderBytes := 2 + (NbFrames - 1) * 2;
     if FUseVbr or (FUserBitrateBps = OPUS_BITRATE_MAX) then
       RepacketizeLen := OutDataBytes
@@ -1079,8 +1163,11 @@ begin
       FrameRedundancy := Redundancy and (FrameToCelt or ((not ToCelt) and (I = 0)));
       CurrMax := Min(3 * FBitrateBps div (3 * 8 * FFs div EncFrameSize), MaxLenSum div NbFrames);
       CurrMax := Min(MaxLenSum - TotSize, CurrMax);
-      if (FSilkMode.Complexity >= 7) and (FFs >= 16000) then
+      if AnalysisReadPosBak <> -1 then
+      begin
         IsSilence := IsDigitalSilence(Pcm, FrameSize, FChannels, LsbDepth);
+        TonalityGetInfo(FAnalysis, AnalysisInfo, EncFrameSize);
+      end;
       TmpLen := EncodeFrameNative(Pcm + I * (FChannels * EncFrameSize), EncFrameSize, CurrData,
         CurrMax, FloatApi, FirstFrame, AnalysisInfo, IsSilence, FrameRedundancy, CeltToSilk,
         Prefill, EquivRate, FrameToCelt);
@@ -1126,6 +1213,7 @@ var
   Dummy: array[0..1] of Byte;
   Info: TSilkInfo;
   DummyEnc: TEcEnc;
+  NoiseEnergy: Single;
 begin
   FRangeFinal := 0;
   Ret := 0;
@@ -1143,8 +1231,17 @@ begin
 
   Activity := VAD_NO_DECISION;
   if IsSilence then
-    Activity := 0;
-  // (activity from the tonality analysis: stage E3)
+    Activity := 0
+  else if AnalysisInfo.Valid then
+  begin
+    Activity := Ord(AnalysisInfo.ActivityProbability >= DTX_ACTIVITY_THRESHOLD);
+    if Activity = 0 then
+    begin
+      // mark as active if this noise frame is sufficiently loud
+      NoiseEnergy := ComputeFrameEnergy(Pcm, FrameSize, FChannels);
+      Activity := Ord(FPeakSignalEnergy < PSEUDO_SNR_THRESHOLD * NoiseEnergy);
+    end;
+  end;
 
   // For the first frame at a new SILK bandwidth
   if FSilkBwSwitch <> 0 then
@@ -1557,6 +1654,7 @@ begin
       (Value <> OPUS_APPLICATION_RESTRICTED_LOWDELAY)) or ((not FFirst) and (FApplication <> Value)) then
     raise EArgumentException.Create('TOpusEncoder: invalid application');
   FApplication := Value;
+  FAnalysis.Application := Value;
 end;
 
 procedure TOpusEncoder.SetBitrate(Value: Integer);

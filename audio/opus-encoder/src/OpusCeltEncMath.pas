@@ -78,6 +78,8 @@ function  RemoveDoubling(X: PSingle; MaxPeriod, MinPeriod, N: Integer;
 procedure CeltLpc(Lpc: PSingle; Ac: PSingle; P: Integer);
 procedure CeltAutocorr(X: PSingle; Ac: PSingle; Lag, N: Integer);
 procedure CeltPitchXcorr(X, Y: PSingle; Xcorr: PSingle; Len, MaxPitch: Integer);
+// opus_fft_c for the 480-point state (analysis.c)
+procedure OpusFft480(Fin, Fout: PKissCpx);
 
 // celt.c comb filter (float semantics)
 procedure CombFilterF(Y, X: PSingle; T0, T1, N: Integer; G0, G1: Single;
@@ -446,6 +448,22 @@ begin
   else
     Result := @FFT_BITREV60[0];
   end;
+end;
+
+procedure OpusFft480(Fin, Fout: PKissCpx);
+var
+  I: Integer;
+  Scale: Single;
+  Bitrev: PSmallInt;
+begin
+  Scale := FFT_SCALE[0];
+  Bitrev := FftBitrev(0);
+  for I := 0 to 479 do
+  begin
+    Fout[Bitrev[I]].R := Scale * Fin[I].R;
+    Fout[Bitrev[I]].I := Scale * Fin[I].I;
+  end;
+  OpusFftImpl(0, Fout);
 end;
 
 // ---------------------------------------------------------------------------

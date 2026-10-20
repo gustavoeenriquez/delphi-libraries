@@ -331,7 +331,7 @@ begin
   Check('RV06 no reservoir: main_data_begin always 0', mdbMax = 0);
   n := DecodeMP3(All, Dec);
   Check('RV07 decodes all samples', n = NFR * 1152);
-  snr := SnrDb(Input, 0, Dec[0], 1057, 8 * 1152);
+  snr := SnrDb(Input, 0, Dec[0], ENC_DELAY + 529, 8 * 1152);
   WriteLn(Format('       SNR without reservoir: %.1f dB', [snr]));
   Check('RV08 round trip SNR > 30 dB', snr > 30);
 
@@ -360,7 +360,7 @@ begin
   Check('RV13 reservoir: used by some frames', mdbNonZero > 0);
   n := DecodeMP3(All2, Dec);
   Check('RV14 reservoir: decodes all samples', n = NFR * 1152);
-  snr := SnrDb(Input, 0, Dec[0], 1057, 8 * 1152);
+  snr := SnrDb(Input, 0, Dec[0], ENC_DELAY + 529, 8 * 1152);
   WriteLn(Format('       SNR with reservoir: %.1f dB', [snr]));
   Check('RV15 reservoir: round trip SNR > 30 dB', snr > 30);
 
@@ -386,16 +386,22 @@ begin
     Frame := EncodeFrameAuto(Enc, PCM, PCM_R);
     AppendBytes(All, Frame);
   end;
-  Check('RV20 correlated channels -> joint stereo (MS)', Enc.LastChannelMode = FRAME_CH_JOINT);
   AppendBytes(All, EncFlush(Enc));
   Check('RV21 stereo bytes', Length(All) = NFR * 384);
   n := DecodeMP3(All, Dec);
   Check('RV22 stereo decodes', (n = NFR * 1152) and (Length(Dec[1]) = n));
-  snr  := SnrDb(Input, 0, Dec[0], 1057, 8 * 1152);
-  snrR := SnrDb(InputR, 0, Dec[1], 1057, 8 * 1152);
+  snr  := SnrDb(Input, 0, Dec[0], ENC_DELAY + 529, 8 * 1152);
+  snrR := SnrDb(InputR, 0, Dec[1], ENC_DELAY + 529, 8 * 1152);
   WriteLn(Format('       MS round trip SNR: L %.1f dB  R %.1f dB', [snr, snrR]));
   Check('RV23 MS round trip L > 25 dB', snr > 25);
   Check('RV24 MS round trip R > 25 dB', snrR > 25);
+
+  { identical channels -> MS (the side signal costs nothing) }
+  EncInitStereo(Enc, Cfg);
+  for i := 0 to 1151 do begin PCM[i] := Input[i] * 32768; PCM_R[i] := PCM[i]; end;
+  EncodeFrameAuto(Enc, PCM, PCM_R);
+  EncodeFrameAuto(Enc, PCM, PCM_R);
+  Check('RV20 identical channels -> joint stereo (MS)', Enc.LastChannelMode = FRAME_CH_JOINT);
 
   { uncorrelated channels -> L/R }
   EncInitStereo(Enc, Cfg);
@@ -415,7 +421,7 @@ begin
   AppendBytes(All, EncFlush(Enc));
   Check('RV26 32k bytes', Length(All) = NFR * Enc.FrameBytes);
   n := DecodeMP3(All, Dec);
-  snr := SnrDb(Input, 0, Dec[0], 1057, 8 * 1152);
+  snr := SnrDb(Input, 0, Dec[0], ENC_DELAY + 529, 8 * 1152);
   WriteLn(Format('       32 kbps round trip SNR: %.1f dB', [snr]));
   Check('RV27 32k round trip SNR > 15 dB', (n = NFR * 1152) and (snr > 15));
 end;

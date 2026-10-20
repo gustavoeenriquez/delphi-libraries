@@ -8,8 +8,10 @@
     2. Side information (136 bits mono / 256 bits stereo)
     3. Main data        (scale factors + Huffman-coded spectral data)
 
-  Only long-block (non-switching) granules are handled, matching
-  the scope of MP3EncQuantize and MP3EncHuffman.
+  Long blocks (block_type 0) and window switching (block_type 1 = start,
+  2 = short, 3 = stop; mixed blocks are not used).  For short blocks Ix
+  holds the spectrum in bit-stream order: scalefactor band by band, and
+  inside each band window 0, 1, 2 (ISO 11172-3 2.4.3.4.7, reordering).
 
   Reference: ISO 11172-3 §2.4.1–2.4.3 / toots/shine l3bitstream.c
   License: CC0 1.0 Universal (Public Domain)
@@ -63,6 +65,9 @@ type
     SrIdx             : Byte;  { sample rate index: 0=44100, 1=48000, 2=32000 }
     Ix                : T576Int;   { quantized spectral lines (signed) }
     ScalefacL         : TScalefacL;  { long-block scale factors sfb 0..21 }
+    BlockType         : Byte;      { 0 normal, 1 start, 2 short, 3 stop }
+    SubblockGain      : array[0..2] of Byte;            { short blocks, 3 bits each }
+    ScalefacS         : array[0..12, 0..2] of Integer;  { short blocks [sfb][window] }
   end;
 
   { Frame-level side information }
@@ -117,6 +122,10 @@ procedure FrameWriteScalefacs(ABW: TMP3BitWriter;
 { Return the number of bits needed for Huffman-coded spectral data
   of one granule/channel (big-values + count1, no padding). }
 function FrameHuffmanBits(const AGr: TGrInfo): Integer;
+
+{ First line of Huffman regions 1 and 2 (ISO 2.4.2.7: fixed boundaries when
+  window switching is used). }
+procedure FrameRegionStarts(const AGr: TGrInfo; out AR1Start, AR2Start: Integer);
 
 { Write Huffman-coded spectral data for one granule/channel. }
 procedure FrameWriteHuffman(ABW: TMP3BitWriter; const AGr: TGrInfo);
@@ -179,17 +188,29 @@ end;
 // ---------------------------------------------------------------------------
 
 procedure WriteGrSideInfo(ABW: TMP3BitWriter; const AGr: TGrInfo);
+var
+  w: Integer;
 begin
   ABW.WriteBits(AGr.Part2_3_Length,    12);
   ABW.WriteBits(AGr.BigValues,          9);
   ABW.WriteBits(AGr.GlobalGain,         8);
   ABW.WriteBits(AGr.ScalefacCompress,   4);
-  ABW.WriteBits(0,                      1);  { window_switching_flag = 0 }
-  ABW.WriteBits(AGr.TableSelect[0],     5);
-  ABW.WriteBits(AGr.TableSelect[1],     5);
-  ABW.WriteBits(AGr.TableSelect[2],     5);
-  ABW.WriteBits(AGr.Region0Count,       4);
-  ABW.WriteBits(AGr.Region1Count,       3);
+  if AGr.BlockType <> 0 then begin
+    ABW.WriteBits(1,                    1);  { window_switching_flag }
+    ABW.WriteBits(AGr.BlockType,        2);
+    ABW.WriteBits(0,                    1);  { mixed_block_flag }
+    ABW.WriteBits(AGr.TableSelect[0],   5);
+    ABW.WriteBits(AGr.TableSelect[1],   5);
+    for w := 0 to 2 do
+      ABW.WriteBits(AGr.SubblockGain[w], 3);
+  end else begin
+    ABW.WriteBits(0,                    1);  { window_switching_flag = 0 }
+    ABW.WriteBits(AGr.TableSelect[0],   5);
+    ABW.WriteBits(AGr.TableSelect[1],   5);
+    ABW.WriteBits(AGr.TableSelect[2],   5);
+    ABW.WriteBits(AGr.Region0Count,     4);
+    ABW.WriteBits(AGr.Region1Count,     3);
+  end;
   ABW.WriteBits(AGr.Preflag,            1);
   ABW.WriteBits(AGr.ScalefacScale,      1);
   ABW.WriteBits(AGr.Count1TableSelect,  1);
@@ -227,6 +248,8 @@ var
   slen1, slen2: Integer;
 begin
   FrameSlen(AGr.ScalefacCompress, slen1, slen2);
+  if AGr.BlockType = 2 then
+    Exit(18 * slen1 + 18 * slen2);      { sfb 0..5 and 6..11, 3 windows; no scfsi }
   Result := 0;
   if (AGrIdx = 0) or (AScfsi[0] = 0) then Inc(Result, 6 * slen1);   { sfb 0..5 }
   if (AGrIdx = 0) or (AScfsi[1] = 0) then Inc(Result, 5 * slen1);   { sfb 6..10 }
@@ -237,9 +260,17 @@ end;
 procedure FrameWriteScalefacs(ABW: TMP3BitWriter;
   const AGr: TGrInfo; AGrIdx: Integer; const AScfsi: array of Byte);
 var
-  slen1, slen2, sfb: Integer;
+  slen1, slen2, sfb, w: Integer;
 begin
   FrameSlen(AGr.ScalefacCompress, slen1, slen2);
+
+  if AGr.BlockType = 2 then begin
+    for sfb := 0 to 11 do
+      for w := 0 to 2 do
+        if sfb < 6 then ABW.WriteBits(AGr.ScalefacS[sfb][w], slen1)
+        else ABW.WriteBits(AGr.ScalefacS[sfb][w], slen2);
+    Exit;
+  end;
 
   if (AGrIdx = 0) or (AScfsi[0] = 0) then
     for sfb := 0 to 5 do
@@ -262,6 +293,17 @@ end;
 // Huffman
 // ---------------------------------------------------------------------------
 
+procedure FrameRegionStarts(const AGr: TGrInfo; out AR1Start, AR2Start: Integer);
+begin
+  case AGr.BlockType of
+    2:    begin AR1Start := 36; AR2Start := QUANT_GRANULE; end;
+    1, 3: begin AR1Start := QuantSfbBand(AGr.SrIdx, 8); AR2Start := QUANT_GRANULE; end;
+  else
+    AR1Start := QuantSfbBand(AGr.SrIdx, AGr.Region0Count + 1);
+    AR2Start := QuantSfbBand(AGr.SrIdx, AGr.Region0Count + AGr.Region1Count + 2);
+  end;
+end;
+
 function FrameHuffmanBits(const AGr: TGrInfo): Integer;
 var
   bigEnd, r1Start, r2Start: Integer;
@@ -270,9 +312,7 @@ begin
   Result := 0;
   bigEnd  := AGr.BigValues * 2;
 
-  { Region boundaries from scalefactor band table }
-  r1Start := QuantSfbBand(AGr.SrIdx, AGr.Region0Count + 1);
-  r2Start := QuantSfbBand(AGr.SrIdx, AGr.Region0Count + AGr.Region1Count + 2);
+  FrameRegionStarts(AGr, r1Start, r2Start);
   if r1Start > bigEnd then r1Start := bigEnd;
   if r2Start > bigEnd then r2Start := bigEnd;
 
@@ -322,8 +362,7 @@ var
 begin
   bigEnd  := AGr.BigValues * 2;
 
-  r1Start := QuantSfbBand(AGr.SrIdx, AGr.Region0Count + 1);
-  r2Start := QuantSfbBand(AGr.SrIdx, AGr.Region0Count + AGr.Region1Count + 2);
+  FrameRegionStarts(AGr, r1Start, r2Start);
   if r1Start > bigEnd then r1Start := bigEnd;
   if r2Start > bigEnd then r2Start := bigEnd;
 

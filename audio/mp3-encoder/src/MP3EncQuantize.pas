@@ -85,6 +85,13 @@ function QuantPretab(ASfb: Integer): Integer;
   ASfb = QUANT_SFB_LMAX returns 576. }
 function QuantSfbBand(ASrIdx, ASfb: Integer): Integer;
 
+const
+  QUANT_SFB_SMAX = 13;   { scalefactor bands for short blocks (per window) }
+
+{ First line (0..192) of short-block scalefactor band ASfb (0..13) inside one
+  window; ASfb = 13 returns 192 (ISO 11172-3 Table B.8). }
+function QuantSfbShort(ASrIdx, ASfb: Integer): Integer;
+
 implementation
 
 uses
@@ -227,6 +234,20 @@ begin
     Result := PRETAB[ASfb]
   else
     Result := 0;
+end;
+
+const
+  SFB_SHORT: array[0..QUANT_SR_COUNT - 1, 0..QUANT_SFB_SMAX] of Integer = (
+    (0, 4, 8, 12, 16, 22, 30, 40, 52, 66, 84, 106, 136, 192),   { 44100 }
+    (0, 4, 8, 12, 16, 22, 28, 38, 50, 64, 80, 100, 126, 192),   { 48000 }
+    (0, 4, 8, 12, 16, 22, 30, 42, 58, 78, 104, 138, 180, 192)); { 32000 }
+
+function QuantSfbShort(ASrIdx, ASfb: Integer): Integer;
+begin
+  if (ASrIdx < 0) or (ASrIdx >= QUANT_SR_COUNT) then ASrIdx := 0;
+  if ASfb < 0 then ASfb := 0
+  else if ASfb > QUANT_SFB_SMAX then ASfb := QUANT_SFB_SMAX;
+  Result := SFB_SHORT[ASrIdx][ASfb];
 end;
 
 function QuantSfbBand(ASrIdx, ASfb: Integer): Integer;

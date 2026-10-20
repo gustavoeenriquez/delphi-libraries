@@ -268,8 +268,8 @@ begin
     { Re-read for subsequent checks }
     LameReadFrame(MP3Out, Cfg, CH, XOut, LOut);
 
-    Check('TI04 EncoderDelay = 528',         LOut.EncoderDelay = 528);
-    Check('TI05 EncoderPadding = 2*1152-528-1000', LOut.EncoderPadding = (2 * 1152 - 528 - TOTAL_SAMPLES));
+    Check('TI04 EncoderDelay = ENC_DELAY',   LOut.EncoderDelay = ENC_DELAY);
+    Check('TI05 EncoderPadding = 2*1152-ENC_DELAY-1000', LOut.EncoderPadding = (2 * 1152 - ENC_DELAY - TOTAL_SAMPLES));
     Check('TI06 VBRMethod = LAME_VBR_CBR',  LOut.VBRMethod = LAME_VBR_CBR);
     Check('TI07 MusicLength = 2 * FRAME_BYTES', LOut.MusicLength = 2 * FRAME_BYTES);
     Check('TI08 XingTag.FrameCount = r',    XOut.FrameCount = Cardinal(r));

@@ -21,6 +21,12 @@
   that threshold (sum width * 0.5*log2(energy/threshold)), used by the bit
   reservoir to distribute bits between granules and channels.
 
+  Short blocks (PsyAnalyseShort) use the same steps on the 13 short
+  scalefactor bands of each of the three windows, treating the signal as
+  noise-like (a transient).  With the 1/(N/4) MDCT scaling a stationary
+  signal has 3x more energy per line in a 12-point MDCT than in a 36-point
+  one, so the absolute threshold per line is 3x higher there.
+
   Reference: ISO 11172-3 Annex D (model 2), LAME psymodel.c (structure only)
   License: CC0 1.0 Universal (Public Domain)
   https://creativecommons.org/publicdomain/zero/1.0/
@@ -33,6 +39,7 @@ uses
 
 const
   PSY_BANDS        = QUANT_SFB_LMAX;  { 22 scalefactor bands (long blocks) }
+  PSY_SBANDS       = QUANT_SFB_SMAX;  { 13 scalefactor bands per short window }
   PSY_FULLSCALE_DB = 96.0;            { SPL assumed for a full-scale sine }
 
 type
@@ -46,6 +53,19 @@ type
     AthLin     : TPsyBandArr;   { absolute threshold, energy per line }
     MinValDb   : TPsyBandArr;   { minimum masking offset per band (dB) }
     Spread     : array[0..PSY_BANDS - 1, 0..PSY_BANDS - 1] of Double; { [to][from] }
+    { short blocks }
+    WidthS     : array[0..PSY_SBANDS - 1] of Integer;
+    BarkS, AthLinS, MinValDbS : array[0..PSY_SBANDS - 1] of Double;
+    SpreadS    : array[0..PSY_SBANDS - 1, 0..PSY_SBANDS - 1] of Double;
+  end;
+
+  TPsyShortArr = array[0..PSY_SBANDS - 1, 0..2] of Double;   { [sfb][window] }
+  TPsyShortSpec = array[0..2, 0..191] of Double;              { [window][line] }
+
+  TPsyShortResult = record
+    Energy  : TPsyShortArr;   { band energies }
+    Xmin    : TPsyShortArr;   { allowed noise energy per line }
+    EstBits : Double;
   end;
 
   TPsyResult = record
@@ -69,6 +89,14 @@ procedure PsyInit(out AModel: TPsyModel; ASrIdx: Integer;
 { Analyse one granule (576 MDCT lines) and compute the allowed noise. }
 procedure PsyAnalyse(const AModel: TPsyModel; const AXr: T576;
   out AResult: TPsyResult);
+
+{ Analyse one short-block granule: three windows of 192 lines each. }
+procedure PsyAnalyseShort(const AModel: TPsyModel; const ASpec: TPsyShortSpec;
+  out AResult: TPsyShortResult);
+
+{ Bit demand estimate of a short-block granule. }
+function PsyEstimateBitsShort(const AModel: TPsyModel;
+  const AEnergy, AXmin: TPsyShortArr): Double;
 
 { Bit demand estimate for given band energies and allowed noise. }
 function PsyEstimateBits(const AModel: TPsyModel;
@@ -143,6 +171,79 @@ begin
     for k := 0 to PSY_BANDS - 1 do
       AModel.Spread[b][k] := AModel.Spread[b][k] / norm;
   end;
+
+  { short blocks: line i of a window is centred at (i + 0.5) * fs / 384 Hz }
+  for b := 0 to PSY_SBANDS - 1 do begin
+    lo := QuantSfbShort(ASrIdx, b);
+    hi := QuantSfbShort(ASrIdx, b + 1);
+    AModel.WidthS[b] := hi - lo;
+    fLo := (lo + 0.5) * fs / 384.0;
+    fHi := (hi - 0.5) * fs / 384.0;
+    fC  := 0.5 * (fLo + fHi);
+    AModel.BarkS[b] := PsyBarkOf(fC);
+    ath := Min(PsyAthDb(fLo), Min(PsyAthDb(fC), PsyAthDb(fHi)));
+    AModel.AthLinS[b] := 3.0 * Power(10.0, (ath - PSY_FULLSCALE_DB + AAthAdjustDb) / 10.0);
+    AModel.MinValDbS[b] := EnsureRange(24.5 - AModel.BarkS[b], 3.5, 24.5);
+  end;
+  for b := 0 to PSY_SBANDS - 1 do begin
+    norm := 0.0;
+    for k := 0 to PSY_SBANDS - 1 do begin
+      w := Power(10.0, SpreadDb(AModel.BarkS[b] - AModel.BarkS[k]) / 10.0);
+      AModel.SpreadS[b][k] := w;
+      norm := norm + w;
+    end;
+    for k := 0 to PSY_SBANDS - 1 do
+      AModel.SpreadS[b][k] := AModel.SpreadS[b][k] / norm;
+  end;
+end;
+
+function PsyEstimateBitsShort(const AModel: TPsyModel;
+  const AEnergy, AXmin: TPsyShortArr): Double;
+var
+  b, w: Integer;
+  avg, r: Double;
+begin
+  Result := 0.0;
+  for w := 0 to 2 do
+    for b := 0 to PSY_SBANDS - 1 do begin
+      if AModel.WidthS[b] <= 0 then Continue;
+      avg := AEnergy[b][w] / AModel.WidthS[b];
+      if (avg <= 0.0) or (AXmin[b][w] <= 0.0) then Continue;
+      r := avg / AXmin[b][w];
+      if r > 1.0 then
+        Result := Result + AModel.WidthS[b] * 0.5 * Log2(r);
+    end;
+end;
+
+procedure PsyAnalyseShort(const AModel: TPsyModel; const ASpec: TPsyShortSpec;
+  out AResult: TPsyShortResult);
+var
+  b, k, w, i, lo: Integer;
+  e, c, o, t: Double;
+begin
+  AResult := Default(TPsyShortResult);
+  for w := 0 to 2 do begin
+    lo := 0;
+    for b := 0 to PSY_SBANDS - 1 do begin
+      e := 0.0;
+      for i := lo to lo + AModel.WidthS[b] - 1 do e := e + Sqr(ASpec[w][i]);
+      AResult.Energy[b][w] := e;
+      Inc(lo, AModel.WidthS[b]);
+    end;
+  end;
+  for w := 0 to 2 do
+    for b := 0 to PSY_SBANDS - 1 do begin
+      c := 0.0;
+      for k := 0 to PSY_SBANDS - 1 do
+        c := c + AModel.SpreadS[b][k] * AResult.Energy[k][w];
+      o := 5.5;                                 { noise-like masker }
+      if o < AModel.MinValDbS[b] then o := AModel.MinValDbS[b];
+      t := c * Power(10.0, -o / 10.0);
+      if AModel.WidthS[b] > 0 then t := t / AModel.WidthS[b] else t := 0.0;
+      if t < AModel.AthLinS[b] then t := AModel.AthLinS[b];
+      AResult.Xmin[b][w] := t;
+    end;
+  AResult.EstBits := PsyEstimateBitsShort(AModel, AResult.Energy, AResult.Xmin);
 end;
 
 function PsyEstimateBits(const AModel: TPsyModel;

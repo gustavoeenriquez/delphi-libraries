@@ -28,8 +28,18 @@
     EncodeFrameAuto   : MS when the side energy is small compared to mid,
                         L/R otherwise; decided per frame
 
+  Window switching
+    The subband samples of each new granule are scanned for attacks (energy
+    jumps above 1.4 kHz in 2 ms segments).  The MDCT runs one granule behind
+    the analysis so that the block type of a granule can depend on the next
+    one: a granule with an early attack is coded with short blocks, the one
+    before it with a start window, the one after with a stop window; a late
+    attack (last third of the granule, where the start window is zero) only
+    makes the next granule short.  Both channels share the block type.
+
   PCM input: 1152 samples per channel per call, oldest first, +-32768 scale.
-  Encoder delay: ENC_DELAY (528) samples (polyphase + MDCT overlap).
+  Encoder delay: ENC_DELAY (1104) samples (polyphase + MDCT overlap + one
+  granule of look-ahead for the window switching).
 
   Reference: ISO 11172-3 dist10, toots/shine, LAME (structure only)
   License: CC0 1.0 Universal (Public Domain)
@@ -53,7 +63,7 @@ uses
 const
   ENC_PCM_PER_FRAME  = 1152;  { 2 granules * 576 }
   ENC_GRANULES       = 2;
-  ENC_DELAY          = 528;   { samples of delay introduced by the analysis }
+  ENC_DELAY          = 1104;  { analysis delay (528) + one granule of look-ahead }
   ENC_RESV_MAX_BITS  = 511 * 8;  { main_data_begin is a 9-bit byte offset }
   ENC_MAX_PART23     = 4095;     { part2_3_length is a 12-bit field }
 
@@ -72,13 +82,24 @@ type
     DataPos : Int64;    { logical main-data stream offset of that region }
   end;
 
+  TSubGranule = array[0..MDCT_SUBBANDS - 1, 0..MDCT_LONG_COEFS - 1] of Double;
+
   TMP3Encoder = record
     Cfg       : TEncConfig;
     Channels  : Byte;   { 1 = mono, 2 = stereo }
     QState    : TQuantState;
     MDCTSt    : TMDCTState;
     PolySt    : array[0..1] of TPolyphaseState;
-    PrevSub   : array[0..1, 0..MDCT_SUBBANDS - 1, 0..MDCT_LONG_COEFS - 1] of Double;
+    { window switching: subband samples of granules n-2 and n-1 per channel }
+    SubOld    : array[0..1] of TSubGranule;
+    SubPrev   : array[0..1] of TSubGranule;
+    SegPrev   : array[0..1, 0..5] of Double;  { attack-detector segment energies }
+    ShortPrev : Boolean;   { granule n-1 must use short blocks }
+    LatePrev  : Boolean;   { granule n-1 had a late attack: granule n must be short }
+    PrevType  : Integer;   { block type of the last coded granule }
+    BlockType : array[0..ENC_GRANULES - 1] of Integer;  { of the frame being coded }
+    SwitchMode: Integer;   { 0 = automatic, 1 = always long, 2 = always short }
+    ShortGranules: Integer;  { statistics: granules coded with short blocks }
     TargBits  : Integer;   { mean main-data bits per granule per channel }
     FrameBytes: Integer;   { frame size in bytes }
     Psy       : TPsyModel;
@@ -120,6 +141,14 @@ procedure EncEnableReservoir(var AEnc: TMP3Encoder; AEnable: Boolean);
   bitrate per channel, like LAME does. }
 procedure EncSetLowpass(var AEnc: TMP3Encoder; AHz: Integer);
 
+{ Window switching: 0 = automatic (default), 1 = long blocks only,
+  2 = short blocks only (testing). }
+procedure EncSetWindowSwitching(var AEnc: TMP3Encoder; AMode: Integer);
+
+var
+  { window switching mode given to every new encoder (EncInit*) }
+  EncDefaultWindowSwitching: Integer = 0;
+
 { Default lowpass frequency (Hz) for a stream bitrate (kbps, LAME table;
   mono streams pass 1.5x their bitrate).  0 = no lowpass. }
 function EncDefaultLowpassHz(AKbpsPerChannel: Integer): Integer;
@@ -151,6 +180,9 @@ procedure PCMToMS(const APCM_L, APCM_R: T1152;
   out APCM_M, APCM_S: T1152);
 
 implementation
+
+uses
+  System.Math;
 
 const
   C_BITRATE_BPS: array[0..14] of Integer = (
@@ -187,6 +219,7 @@ begin
   AEnc.TargBits := dataBits div (ENC_GRANULES * AChannels);
   AEnc.AutoMSThreshold := 0.3;
   AEnc.LastChannelMode := FRAME_CH_MONO;
+  AEnc.SwitchMode := EncDefaultWindowSwitching;
 
   HuffInit;
   QuantInit(AEnc.QState);
@@ -245,6 +278,11 @@ begin
   InitCommon(AEnc, ACfg, 2);
 end;
 
+procedure EncSetWindowSwitching(var AEnc: TMP3Encoder; AMode: Integer);
+begin
+  AEnc.SwitchMode := AMode;
+end;
+
 procedure EncEnableReservoir(var AEnc: TMP3Encoder; AEnable: Boolean);
 begin
   AEnc.Reservoir := AEnable;
@@ -260,13 +298,11 @@ end;
 // Analysis: PCM -> 576 MDCT lines for one granule of one channel
 // ---------------------------------------------------------------------------
 
-procedure AnalyseChannel(var AEnc: TMP3Encoder; const APCM: T1152;
-  AGr, ACh: Integer; out AXr: T576);
+{ Polyphase analysis of one granule (18 x 32 subband samples). }
+procedure SubbandGranule(var AEnc: TMP3Encoder; const APCM: T1152;
+  AGr, ACh: Integer; out ASub: TSubGranule);
 var
-  b, m, j, k: Integer;
-  CurrSub : array[0..MDCT_SUBBANDS - 1, 0..MDCT_LONG_COEFS - 1] of Double;
-  MDCTIn  : TMDCTInput;
-  MDCTOut : TMDCTOutput;
+  b, j, k: Integer;
   Block   : TPCMBlock;
   Sub     : TSubbandSamples;
 begin
@@ -276,28 +312,138 @@ begin
       Block[k] := APCM[AGr * 576 + j * 32 + (31 - k)] * (1.0 / 32768.0);
     PolyphaseFilter(AEnc.PolySt[ACh], Block, Sub);
     for b := 0 to MDCT_SUBBANDS - 1 do
-      CurrSub[b][j] := Sub[b];
+      ASub[b][j] := Sub[b];
   end;
-
   { frequency inversion compensation: odd subbands, odd time index }
   for b := 1 to MDCT_SUBBANDS - 1 do
     if Odd(b) then
       for j := 1 to 17 do
         if Odd(j) then
-          CurrSub[b][j] := -CurrSub[b][j];
+          ASub[b][j] := -ASub[b][j];
+end;
 
+const
+  ATTACK_RATIO = 10.0;    { segment energy jump (10 dB) }
+  ATTACK_FLOOR = 1.0e-6;  { ignore jumps below ~ -60 dBFS }
+
+{ Attack detection on a new granule: energies of six segments of 3 subband
+  samples (about 2 ms) above subband 0, each compared with the mean of the
+  three previous segments.  AEarly: attack in samples 0..11 (covered by the
+  short windows of this granule); ALate: attack in samples 12..17 (the start
+  window is zero there, so only the next granule needs short blocks). }
+procedure DetectAttack(var AEnc: TMP3Encoder; ACh: Integer; const ASub: TSubGranule;
+  out AEarly, ALate: Boolean);
+var
+  e: array[0..11] of Double;
+  s, b, j: Integer;
+  ref, v: Double;
+begin
+  AEarly := False; ALate := False;
+  for s := 0 to 5 do e[s] := AEnc.SegPrev[ACh][s];
+  for s := 0 to 5 do begin
+    v := 0.0;
+    for b := 1 to MDCT_SUBBANDS - 1 do
+      for j := 3 * s to 3 * s + 2 do v := v + Sqr(ASub[b][j]);
+    e[6 + s] := v;
+  end;
+  for s := 6 to 11 do begin
+    ref := (e[s - 1] + e[s - 2] + e[s - 3]) / 3.0;
+    if (e[s] > ATTACK_FLOOR) and (e[s] > ATTACK_RATIO * ref) then
+      if s < 10 then AEarly := True else ALate := True;
+  end;
+  for s := 0 to 5 do AEnc.SegPrev[ACh][s] := e[6 + s];
+end;
+
+{ Block type of granule n-1 from its own short flag, the next one's and the
+  previous block type (ISO window sequence rules). }
+function DecideBlockType(var AEnc: TMP3Encoder; AShortCur, AShortNext: Boolean): Integer;
+begin
+  case AEnc.SwitchMode of
+    1: Exit(0);
+    2: Exit(2);
+  end;
+  if AShortCur then Result := 2
+  else if AShortNext then begin
+    { a start window cannot follow a short block }
+    if AEnc.PrevType = 2 then Result := 2 else Result := 1;
+  end
+  else if AEnc.PrevType = 2 then Result := 3
+  else Result := 0;
+end;
+
+{ MDCT of the granule held in SubOld/SubPrev with block type ABlockType.
+  Short blocks are returned in bit-stream order (sfb, window, line). }
+procedure MDCTGranule(var AEnc: TMP3Encoder; ACh, ABlockType: Integer; out AXr: T576);
+var
+  b, m, j, w, f, sfb, lo, wid: Integer;
+  MDCTIn  : TMDCTInput;
+  MDCTOut : TMDCTOutput;
+begin
   for b := 0 to MDCT_SUBBANDS - 1 do
     for j := 0 to 17 do begin
-      MDCTIn[b][j]      := AEnc.PrevSub[ACh][b][j];
-      MDCTIn[b][18 + j] := CurrSub[b][j];
+      MDCTIn[b][j]      := AEnc.SubOld[ACh][b][j];
+      MDCTIn[b][18 + j] := AEnc.SubPrev[ACh][b][j];
     end;
+  MDCTProcessType(AEnc.MDCTSt, MDCTIn, MDCTOut, ABlockType);
+  if ABlockType <> 2 then begin
+    for b := 0 to MDCT_SUBBANDS - 1 do
+      for m := 0 to MDCT_LONG_COEFS - 1 do
+        AXr[b * 18 + m] := MDCTOut[b][m];
+    Exit;
+  end;
+  { short: window w, line f = 6b + m is MDCTOut[b][3m + w] }
+  for sfb := 0 to QUANT_SFB_SMAX - 1 do begin
+    lo  := QuantSfbShort(AEnc.Cfg.SrIdx, sfb);
+    wid := QuantSfbShort(AEnc.Cfg.SrIdx, sfb + 1) - lo;
+    for w := 0 to 2 do
+      for f := lo to lo + wid - 1 do
+        AXr[3 * lo + w * wid + (f - lo)] := MDCTOut[f div 6][3 * (f mod 6) + w];
+  end;
+end;
 
-  MDCTProcess(AEnc.MDCTSt, MDCTIn, MDCTOut);
-  for b := 0 to MDCT_SUBBANDS - 1 do
-    for m := 0 to MDCT_LONG_COEFS - 1 do
-      AXr[b * 18 + m] := MDCTOut[b][m];
+{ Short spectrum in bit-stream order -> [window][line] for the psy model. }
+procedure ShortToSpec(ASrIdx: Integer; const AXr: T576; out ASpec: TPsyShortSpec);
+var
+  sfb, w, f, lo, wid: Integer;
+begin
+  for sfb := 0 to QUANT_SFB_SMAX - 1 do begin
+    lo  := QuantSfbShort(ASrIdx, sfb);
+    wid := QuantSfbShort(ASrIdx, sfb + 1) - lo;
+    for w := 0 to 2 do
+      for f := lo to lo + wid - 1 do
+        ASpec[w][f] := AXr[3 * lo + w * wid + (f - lo)];
+  end;
+end;
 
-  Move(CurrSub[0][0], AEnc.PrevSub[ACh][0][0], SizeOf(CurrSub));
+{ Analysis of one frame: the two new granules enter the look-ahead and the
+  two granules before them are transformed into AXr. }
+procedure AnalyseFrame(var AEnc: TMP3Encoder; const APCM_L, APCM_R: T1152;
+  var AXr: TFrameXr);
+var
+  g, ch: Integer;
+  sub: array[0..1] of TSubGranule;
+  early, late, shortNew: Boolean;
+begin
+  for g := 0 to ENC_GRANULES - 1 do begin
+    shortNew := AEnc.LatePrev;
+    AEnc.LatePrev := False;
+    for ch := 0 to AEnc.Channels - 1 do begin
+      if ch = 0 then SubbandGranule(AEnc, APCM_L, g, 0, sub[0])
+      else SubbandGranule(AEnc, APCM_R, g, 1, sub[1]);
+      DetectAttack(AEnc, ch, sub[ch], early, late);
+      if early then shortNew := True;
+      if late then AEnc.LatePrev := True;
+    end;
+    AEnc.BlockType[g] := DecideBlockType(AEnc, AEnc.ShortPrev, shortNew);
+    for ch := 0 to AEnc.Channels - 1 do begin
+      MDCTGranule(AEnc, ch, AEnc.BlockType[g], AXr[g][ch]);
+      AEnc.SubOld[ch] := AEnc.SubPrev[ch];
+      AEnc.SubPrev[ch] := sub[ch];
+    end;
+    AEnc.PrevType := AEnc.BlockType[g];
+    AEnc.ShortPrev := shortNew;
+    if AEnc.BlockType[g] = 2 then Inc(AEnc.ShortGranules);
+  end;
 end;
 
 // ---------------------------------------------------------------------------
@@ -351,6 +497,117 @@ end;
 // Frame core: psychoacoustics, allocation, loop, reservoir, assembly
 // ---------------------------------------------------------------------------
 
+procedure XrToMS(var AXr: TFrameXr); forward;
+
+type
+  TFramePsy = record
+    Est   : array[0..3] of Double;          { bit demand per granule/channel }
+    Xmin  : array[0..3] of TPsyBandArr;     { allowed noise, long blocks }
+    XminS : array[0..3] of TPsyShortArr;    { allowed noise, short blocks }
+  end;
+
+{ Lowpass and psychoacoustic analysis of a frame (index k = granule *
+  channels + channel).  AXr holds L/R (or mono) spectra; with AMS it is
+  converted to mid/side and the thresholds are combined as explained below. }
+procedure FramePsy(var AEnc: TMP3Encoder; var AXr: TFrameXr; AMS: Boolean;
+  out AP: TFramePsy);
+var
+  n, k, g, c, j, w, ss: Integer;
+  psyR  : array[0..3] of TPsyResult;
+  psyS  : array[0..3] of TPsyShortResult;
+  spec  : TPsyShortSpec;
+  tmpL  : TPsyBandArr;
+  tmpS  : TPsyShortArr;
+  v     : Double;
+begin
+  AP := Default(TFramePsy);
+  n := ENC_GRANULES * AEnc.Channels;
+  { lowpass: drop the lines above the cutoff }
+  if AEnc.LowpassLine < QUANT_GRANULE then
+    for k := 0 to n - 1 do begin
+      g := k div AEnc.Channels; c := k mod AEnc.Channels;
+      if AEnc.BlockType[g] = 2 then begin
+        { short blocks: one third of the lines per window }
+        ShortToSpec(AEnc.Cfg.SrIdx, AXr[g][c], spec);
+        for w := 0 to 2 do
+          for j := AEnc.LowpassLine div 3 to 191 do spec[w][j] := 0.0;
+        for ss := 0 to QUANT_SFB_SMAX - 1 do
+          for w := 0 to 2 do
+            for j := QuantSfbShort(AEnc.Cfg.SrIdx, ss) to QuantSfbShort(AEnc.Cfg.SrIdx, ss + 1) - 1 do
+              AXr[g][c][3 * QuantSfbShort(AEnc.Cfg.SrIdx, ss) +
+                w * (QuantSfbShort(AEnc.Cfg.SrIdx, ss + 1) - QuantSfbShort(AEnc.Cfg.SrIdx, ss)) +
+                (j - QuantSfbShort(AEnc.Cfg.SrIdx, ss))] := spec[w][j];
+      end else
+        for j := AEnc.LowpassLine to QUANT_GRANULE - 1 do AXr[g][c][j] := 0.0;
+    end;
+
+  { psychoacoustic analysis of every granule / channel }
+  for k := 0 to n - 1 do begin
+    g := k div AEnc.Channels; c := k mod AEnc.Channels;
+    if AEnc.BlockType[g] = 2 then begin
+      ShortToSpec(AEnc.Cfg.SrIdx, AXr[g][c], spec);
+      PsyAnalyseShort(AEnc.Psy, spec, psyS[k]);
+    end else
+      PsyAnalyse(AEnc.Psy, AXr[g][c], psyR[k]);
+  end;
+  if AMS and (AEnc.Channels = 2) then begin
+    { L = (M + S)/sqrt2 and R = (M - S)/sqrt2: the noise energies of M and S
+      add up in both L and R (halved), so with the same allowed noise t in M
+      and S the noise in L and R is t.  t must stay under both the L and
+      the R threshold.  The thresholds come from the L/R analysis above.
+      Each of M and S must also stay under the threshold of its own
+      spectrum: a weak S below the L/R threshold would otherwise be dropped,
+      and noise in S (opposite phase in L and R) is easier to hear than the
+      L/R model predicts (binaural unmasking). }
+    XrToMS(AXr);
+    for g := 0 to ENC_GRANULES - 1 do
+      if AEnc.BlockType[g] = 2 then begin
+        for j := 0 to QUANT_SFB_SMAX - 1 do
+          for w := 0 to 2 do begin
+            v := Min(psyS[g * 2].Xmin[j][w], psyS[g * 2 + 1].Xmin[j][w]);
+            psyS[g * 2].Xmin[j][w] := v;
+            psyS[g * 2 + 1].Xmin[j][w] := v;
+          end;
+        for c := 0 to 1 do begin
+          ShortToSpec(AEnc.Cfg.SrIdx, AXr[g][c], spec);
+          tmpS := psyS[g * 2 + c].Xmin;
+          PsyAnalyseShort(AEnc.Psy, spec, psyS[g * 2 + c]);
+          for j := 0 to QUANT_SFB_SMAX - 1 do
+            for w := 0 to 2 do
+              psyS[g * 2 + c].Xmin[j][w] := Min(psyS[g * 2 + c].Xmin[j][w], tmpS[j][w]);
+          psyS[g * 2 + c].EstBits := PsyEstimateBitsShort(AEnc.Psy, psyS[g * 2 + c].Energy, psyS[g * 2 + c].Xmin);
+        end;
+      end else begin
+        for j := 0 to PSY_BANDS - 1 do begin
+          v := Min(psyR[g * 2].Xmin[j], psyR[g * 2 + 1].Xmin[j]);
+          psyR[g * 2].Xmin[j]     := v;
+          psyR[g * 2 + 1].Xmin[j] := v;
+        end;
+        for c := 0 to 1 do begin
+          tmpL := psyR[g * 2 + c].Xmin;
+          PsyAnalyse(AEnc.Psy, AXr[g][c], psyR[g * 2 + c]);
+          for j := 0 to PSY_BANDS - 1 do
+            psyR[g * 2 + c].Xmin[j] := Min(psyR[g * 2 + c].Xmin[j], tmpL[j]);
+          psyR[g * 2 + c].EstBits := PsyEstimateBits(AEnc.Psy, psyR[g * 2 + c].Energy, psyR[g * 2 + c].Xmin);
+        end;
+      end;
+  end;
+  for k := 0 to n - 1 do begin
+    g := k div AEnc.Channels;
+    if AEnc.BlockType[g] = 2 then begin
+      AP.Est[k] := psyS[k].EstBits;
+      AP.XminS[k] := psyS[k].Xmin;
+    end else begin
+      AP.Est[k]  := psyR[k].EstBits;
+      AP.Xmin[k] := psyR[k].Xmin;
+    end;
+  end;
+
+end;
+
+
+{ AXr holds L/R (or mono) spectra; with FRAME_CH_JOINT the core converts
+  them to mid/side after the psychoacoustic analysis. }
 function EncodeFrameCore(var AEnc: TMP3Encoder; var AXr: TFrameXr;
   AChannelMode, AModeExt: Byte): TBytes;
 var
@@ -360,8 +617,9 @@ var
   est   : array[0..3] of Double;
   targ  : array[0..3] of Double;
   xmin  : array[0..3] of TPsyBandArr;
-  psyR  : array[0..3] of TPsyResult;
-  sumEst, sumT, mean, v: Double;
+  xminS : array[0..3] of TPsyShortArr;
+  FP    : TFramePsy;
+  sumEst, sumT, mean: Double;
   SI    : TFrameSideInfo;
   FCfg  : TFrameConfig;
   BW    : TMP3BitWriter;
@@ -374,34 +632,11 @@ begin
   regionBytes := AEnc.FrameBytes - 4 - siBits div 8;
   mainBits    := regionBytes * 8;
 
-  { lowpass: drop the lines above the cutoff }
-  if AEnc.LowpassLine < QUANT_GRANULE then
-    for k := 0 to n - 1 do begin
-      g := k div AEnc.Channels; c := k mod AEnc.Channels;
-      for j := AEnc.LowpassLine to QUANT_GRANULE - 1 do AXr[g][c][j] := 0.0;
-    end;
-
-  { psychoacoustic analysis of every granule / channel }
+  FramePsy(AEnc, AXr, (AChannelMode = FRAME_CH_JOINT) and (AEnc.Channels = 2), FP);
   for k := 0 to n - 1 do begin
-    g := k div AEnc.Channels; c := k mod AEnc.Channels;
-    PsyAnalyse(AEnc.Psy, AXr[g][c], psyR[k]);
-  end;
-  if (AChannelMode = FRAME_CH_JOINT) and (AEnc.Channels = 2) then
-    { the noise of M and S is heard in both L and R: use the larger of the
-      two thresholds for both channels }
-    for g := 0 to ENC_GRANULES - 1 do begin
-      for j := 0 to PSY_BANDS - 1 do begin
-        v := psyR[g * 2].Xmin[j];
-        if psyR[g * 2 + 1].Xmin[j] > v then v := psyR[g * 2 + 1].Xmin[j];
-        psyR[g * 2].Xmin[j]     := v;
-        psyR[g * 2 + 1].Xmin[j] := v;
-      end;
-      psyR[g * 2].EstBits     := PsyEstimateBits(AEnc.Psy, psyR[g * 2].Energy, psyR[g * 2].Xmin);
-      psyR[g * 2 + 1].EstBits := PsyEstimateBits(AEnc.Psy, psyR[g * 2 + 1].Energy, psyR[g * 2 + 1].Xmin);
-    end;
-  for k := 0 to n - 1 do begin
-    est[k]  := psyR[k].EstBits;
-    xmin[k] := psyR[k].Xmin;
+    est[k] := FP.Est[k];
+    xmin[k] := FP.Xmin[k];
+    xminS[k] := FP.XminS[k];
   end;
 
   { nominal bit targets proportional to the estimated demand }
@@ -451,8 +686,12 @@ begin
     if minb < 0 then minb := 0;
     if minb > maxb then minb := maxb;
 
-    used := LoopEncodeGranule(AEnc.Loop, AEnc.QState, AXr[g][c], xmin[k],
-      maxb, minb, AEnc.Cfg.SrIdx, SI.Gr[g][c], AEnc.LastStats[g][c]);
+    if AEnc.BlockType[g] = 2 then
+      used := LoopEncodeGranuleShort(AEnc.Loop, AEnc.QState, AXr[g][c], xminS[k],
+        maxb, minb, AEnc.Cfg.SrIdx, SI.Gr[g][c], AEnc.LastStats[g][c])
+    else
+      used := LoopEncodeGranule(AEnc.Loop, AEnc.QState, AXr[g][c], xmin[k],
+        maxb, minb, AEnc.Cfg.SrIdx, SI.Gr[g][c], AEnc.LastStats[g][c], AEnc.BlockType[g]);
     Dec(pool, used);
     Inc(usedTotal, used);
     carry := nominal - used;
@@ -538,10 +777,8 @@ end;
 function EncodeFrame(var AEnc: TMP3Encoder; const APCM: T1152): TBytes;
 var
   Xr: TFrameXr;
-  g: Integer;
 begin
-  for g := 0 to ENC_GRANULES - 1 do
-    AnalyseChannel(AEnc, APCM, g, 0, Xr[g][0]);
+  AnalyseFrame(AEnc, APCM, APCM, Xr);
   Result := EncodeFrameCore(AEnc, Xr, FRAME_CH_MONO, 0);
 end;
 
@@ -549,12 +786,8 @@ function EncodeFrameStereo(var AEnc: TMP3Encoder;
   const APCM_L, APCM_R: T1152): TBytes;
 var
   Xr: TFrameXr;
-  g: Integer;
 begin
-  for g := 0 to ENC_GRANULES - 1 do begin
-    AnalyseChannel(AEnc, APCM_L, g, 0, Xr[g][0]);
-    AnalyseChannel(AEnc, APCM_R, g, 1, Xr[g][1]);
-  end;
+  AnalyseFrame(AEnc, APCM_L, APCM_R, Xr);
   Result := EncodeFrameCore(AEnc, Xr, FRAME_CH_STEREO, 0);
 end;
 
@@ -575,35 +808,44 @@ function EncodeFrameMS(var AEnc: TMP3Encoder;
   const APCM_L, APCM_R: T1152): TBytes;
 var
   Xr: TFrameXr;
-  g: Integer;
 begin
-  for g := 0 to ENC_GRANULES - 1 do begin
-    AnalyseChannel(AEnc, APCM_L, g, 0, Xr[g][0]);
-    AnalyseChannel(AEnc, APCM_R, g, 1, Xr[g][1]);
-  end;
-  XrToMS(Xr);
+  AnalyseFrame(AEnc, APCM_L, APCM_R, Xr);
   Result := EncodeFrameCore(AEnc, Xr, FRAME_CH_JOINT, 2);
 end;
 
 function EncodeFrameAuto(var AEnc: TMP3Encoder;
   const APCM_L, APCM_R: T1152): TBytes;
 var
-  Xr: TFrameXr;
+  Xr, X1, X2: TFrameXr;
   g, i: Integer;
-  eM, eS, l, r: Double;
+  eM, eS, l, r, estLR, estMS: Double;
+  P1, P2: TFramePsy;
+  useMS: Boolean;
 begin
   eM := 0.0; eS := 0.0;
+  AnalyseFrame(AEnc, APCM_L, APCM_R, Xr);
   for g := 0 to ENC_GRANULES - 1 do begin
-    AnalyseChannel(AEnc, APCM_L, g, 0, Xr[g][0]);
-    AnalyseChannel(AEnc, APCM_R, g, 1, Xr[g][1]);
     for i := 0 to QUANT_GRANULE - 1 do begin
       l := Xr[g][0][i]; r := Xr[g][1][i];
       eM := eM + Sqr(l + r);
       eS := eS + Sqr(l - r);
     end;
   end;
-  if eS <= AEnc.AutoMSThreshold * eM then begin
-    XrToMS(Xr);
+  { MS only when the side signal is clearly weaker, and then only if the
+    psychoacoustic model expects fewer bits for M/S than for L/R }
+  useMS := eS <= AEnc.AutoMSThreshold * eM;
+  if useMS then begin
+    X1 := Xr; X2 := Xr;
+    FramePsy(AEnc, X1, False, P1);
+    FramePsy(AEnc, X2, True, P2);
+    estLR := 0.0; estMS := 0.0;
+    for i := 0 to ENC_GRANULES * 2 - 1 do begin
+      estLR := estLR + P1.Est[i];
+      estMS := estMS + P2.Est[i];
+    end;
+    useMS := estMS < estLR;
+  end;
+  if useMS then begin
     Result := EncodeFrameCore(AEnc, Xr, FRAME_CH_JOINT, 2);
   end else
     Result := EncodeFrameCore(AEnc, Xr, FRAME_CH_STEREO, 0);

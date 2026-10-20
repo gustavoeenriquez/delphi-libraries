@@ -45,10 +45,22 @@ delay 528 + padding y la duración queda exacta).
   reservorio, MS, round trips con `mp3-decoder`). Las 19 fases pasan
   (843 checks). `mp3-roundtrip` reescrito sobre `audio-codec`.
 
+## 2026-10-20
+
+- Conmutación de ventana: bloques cortos, ventanas start/stop, detector de
+  ataques, gránulo de anticipación (ENC_DELAY 528 → 1104). Pre-eco al nivel de
+  LAME o mejor (ver README).
+- Joint stereo: umbrales M/S = mínimo de L, R y el propio (antes el máximo, que
+  descartaba el canal S); decisión M/S por estimación de bits.
+- Bucles: si ni con global_gain 255 caben los bits, el intento se descarta
+  (antes devolvía más bits que el presupuesto → "main data overflow").
+- Fase 20 de tests (13 checks); fases 13, 18 y 19 actualizadas al nuevo retardo.
+
 ## Pendiente / ideas
 
-- Conmutación de ventana (bloques cortos) para transitorios (pre-eco).
 - VBR/ABR (el bucle ya ahorra bits; faltaría la lógica de tasa).
+- La decisión automática M/S por bits estimados no siempre elige el modo de
+  mejor SNR (en ruido sintético ancho elige L/R aunque M/S conserva mejor S).
 - Modelo psicoacústico con FFT y particiones más finas que las 22 bandas.
 - Intensity stereo; MPEG-2/2.5 (tasas bajas de muestreo).
 - Evaluación perceptual (PEAQ) además de la SNR.

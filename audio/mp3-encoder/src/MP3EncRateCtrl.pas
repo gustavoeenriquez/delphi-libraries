@@ -41,6 +41,7 @@ type
     Region0Count      : Byte;     { = RC_REGION0_COUNT }
     Region1Count      : Byte;     { = RC_REGION1_COUNT }
     SrIdx             : Byte;     { sample rate index 0/1/2 }
+    BlockType         : Byte;     { 0..3: region layout (window switching) }
   end;
 
 { Return the number of big-values pairs: the last non-zero pair index + 1.
@@ -69,7 +70,10 @@ function RateCtrlBestTableFast(const AIx: T576Int; AStart, AEnd: Integer): Integ
   Uses RC_REGION0_COUNT / RC_REGION1_COUNT for the region layout.
   Count1 is determined by trailing [-1,0,+1] quads beyond big_values. }
 procedure RateCtrlFillParams(const AIx: T576Int; ASrIdx: Byte;
-  out AParams: TRCtrlParams);
+  out AParams: TRCtrlParams; ABlockType: Byte = 0);
+
+{ First line of Huffman regions 1 and 2 for a parameter set. }
+procedure RateCtrlRegionStarts(const AParams: TRCtrlParams; out AR1Start, AR2Start: Integer);
 
 { Total Huffman bits for a granule: big-values regions + count1 quads. }
 function RateCtrlHuffBits(const AIx: T576Int;
@@ -214,8 +218,19 @@ end;
 
 // ---------------------------------------------------------------------------
 
+procedure RateCtrlRegionStarts(const AParams: TRCtrlParams; out AR1Start, AR2Start: Integer);
+begin
+  case AParams.BlockType of
+    2:    begin AR1Start := 36; AR2Start := QUANT_GRANULE; end;
+    1, 3: begin AR1Start := QuantSfbBand(AParams.SrIdx, 8); AR2Start := QUANT_GRANULE; end;
+  else
+    AR1Start := QuantSfbBand(AParams.SrIdx, AParams.Region0Count + 1);
+    AR2Start := QuantSfbBand(AParams.SrIdx, AParams.Region0Count + AParams.Region1Count + 2);
+  end;
+end;
+
 procedure RateCtrlFillParams(const AIx: T576Int; ASrIdx: Byte;
-  out AParams: TRCtrlParams);
+  out AParams: TRCtrlParams; ABlockType: Byte);
 var
   bigEnd, r1Start, r2Start, i: Integer;
 begin
@@ -223,6 +238,7 @@ begin
   AParams.Region0Count := RC_REGION0_COUNT;
   AParams.Region1Count := RC_REGION1_COUNT;
   AParams.SrIdx        := ASrIdx;
+  AParams.BlockType    := ABlockType;
 
   { Region layout as in Shine calc_runlen: rzero = trailing all-zero pairs,
     count1 = quads of |v| <= 1 walked backwards from rzero, big_values = rest.
@@ -246,9 +262,8 @@ begin
   bigEnd := i;
   AParams.Count1TableSelect := RateCtrlCount1Table(AIx, bigEnd, AParams.Count1);
 
-  { Region boundaries from scalefactor band table }
-  r1Start := QuantSfbBand(ASrIdx, RC_REGION0_COUNT + 1);
-  r2Start := QuantSfbBand(ASrIdx, RC_REGION0_COUNT + RC_REGION1_COUNT + 2);
+  { Region boundaries (scalefactor band table, or fixed with window switching) }
+  RateCtrlRegionStarts(AParams, r1Start, r2Start);
   if r1Start > bigEnd then r1Start := bigEnd;
   if r2Start > bigEnd then r2Start := bigEnd;
 
@@ -268,9 +283,7 @@ begin
   Result  := 0;
   bigEnd  := AParams.BigValues * 2;
 
-  r1Start := QuantSfbBand(AParams.SrIdx, AParams.Region0Count + 1);
-  r2Start := QuantSfbBand(AParams.SrIdx,
-    AParams.Region0Count + AParams.Region1Count + 2);
+  RateCtrlRegionStarts(AParams, r1Start, r2Start);
   if r1Start > bigEnd then r1Start := bigEnd;
   if r2Start > bigEnd then r2Start := bigEnd;
 

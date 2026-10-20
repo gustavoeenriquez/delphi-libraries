@@ -171,7 +171,8 @@ begin
   Check('MF09 non-trivial size = 417',  Length(Frame) = 417);
   Check('MF10 non-trivial header ok',   FrameParseHeader(Frame, 0, FCfgP));
   FrameParseSideInfo(Frame, 4, FCfgP, SIOut);
-  Check('MF11 M-ch gr0 P23 > 0',        SIOut.Gr[0][0].Part2_3_Length > 0);
+  { granule 0 of the first frame is the look-ahead granule (silence) }
+  Check('MF11 M-ch gr1 P23 > 0',        SIOut.Gr[1][0].Part2_3_Length > 0);
 
   { EncInitJointStereo == EncInitStereo for state (same FrameBytes and TargBits) }
   Check('MF12 FrameBytes = 417',  Enc.FrameBytes = 417);

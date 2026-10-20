@@ -1,271 +1,124 @@
-unit OpusEncPacket;
+﻿unit OpusEncPacket;
 
 {
-  OpusEncPacket.pas - Opus CELT packet assembler and Ogg Opus stream writer
+  OpusEncPacket.pas - Capa de compatibilidad con la API anterior (OBSOLETA)
 
-  Assembles complete Opus packets (TOC byte + range-coded CELT frame) and
-  writes Ogg Opus streams (.opus files).
+  TOpusCeltEncoder y TOpusWriter eran la API del encoder CELT experimental
+  previo (no compatible con libopus). Se conservan con la misma firma, pero
+  ahora delegan en el port fiel de libopus:
+    - TOpusCeltEncoder -> TOpusEncoder (OPUS_APPLICATION_RESTRICTED_LOWDELAY,
+      CELT siempre, CBR que usa los MaxLen bytes disponibles, como antes).
+    - TOpusWriter      -> TOggOpusWriter.
+  Código nuevo: usar TOpusEncoder (unit OpusEncoder) y TOggOpusWriter.
 
-  Packet structure (RFC 6716 §3.1):
-    Byte 0:    TOC  (config[5] | stereo[1] | code[2])
-    Bytes 1..: range-coded CELT frame data
-
-  Ogg Opus stream (RFC 7845):
-    Page 0: BOS + OpusHead identification header
-    Page 1: OpusTags comment header
-    Pages 2+: Audio packets, one Opus packet per Ogg packet
-
-  License: CC0 1.0 Universal (Public Domain)
-  https://creativecommons.org/publicdomain/zero/1.0/
+  Derived from libopus; distributed under the libopus BSD 3-clause license
+  (full text in README.md).
 }
-
-{$POINTERMATH ON}
 
 interface
 
 uses
-  SysUtils, Classes, Math,
-  AudioTypes,
-  OggTypes,
-  OggPageWriter,
-  OpusTypes,
+  SysUtils, Classes,
   OpusEncTypes,
-  OpusRangeEncoder,
-  OpusEncCelt;
+  OpusEncoder,
+  OggOpusWriter;
 
 const
-  OPUS_MAX_PACKET = 1276;  // max Opus packet size per RFC 6716
-
-// ---------------------------------------------------------------------------
-// TOpusCeltEncoder: single-frame Opus/CELT encoder
-// ---------------------------------------------------------------------------
+  OPUS_MAX_PACKET = 1276;
 
 type
   TOpusCeltEncoder = class
   private
-    FState     : TCeltEncState;
+    FEnc       : TOpusEncoder;
     FChannels  : Integer;
-    FSampleRate: Integer;    // input sample rate (for resampling, future use)
-    FConfig    : Integer;    // TOC config index (16-31 for CELT)
-    FLM        : Integer;    // frame size index
-    FFrameSize : Integer;    // samples per frame
-
+    FFrameSize : Integer;
+    FLM        : Integer;
+    FConfig    : Integer;
   public
+    // FrameSizeMs: 5, 10 o 20 (cualquier otro valor: 20 ms, como antes).
+    // SampleRate: 8000, 12000, 16000, 24000 o 48000.
     constructor Create(Channels, SampleRate, FrameSizeMs: Integer);
-
-    // Encode one frame of int16 PCM → Opus packet bytes.
-    // PCM: Channels × FrameSize samples (interleaved for stereo).
-    // PacketBuf: output buffer (must be at least OPUS_MAX_PACKET bytes).
-    // Returns number of bytes written (>= 1), or 0 on error.
+    destructor Destroy; override;
+    // Codifica FrameSize muestras int16 intercaladas. Devuelve la longitud
+    // del paquete (>= 1) o 0 si hay error.
     function EncodeFrame(PCM: PSmallInt; PacketBuf: PByte; MaxLen: Integer): Integer;
-
     property Channels  : Integer read FChannels;
     property FrameSize : Integer read FFrameSize;
     property LM        : Integer read FLM;
-    property Config    : Integer read FConfig;
-  end;
+    property Config    : Integer read FConfig;   // config del TOC del último paquete
+    property Encoder   : TOpusEncoder read FEnc;
+  end deprecated 'Use TOpusEncoder (unit OpusEncoder)';
 
-// ---------------------------------------------------------------------------
-// TOpusWriter: writes an Ogg Opus stream to a TStream
-// ---------------------------------------------------------------------------
-
-type
   TOpusWriter = class
   private
-    FStream   : TStream;
-    FOwns     : Boolean;
-    FWriter   : TOggPageWriter;
-    FEncoder  : TOpusCeltEncoder;
-    FGranule  : Int64;
-    FPreSkip  : Integer;
-    FSampleRate: Integer;
-
-    procedure WriteOpusHead;
-    procedure WriteOpusTags;
-
+    FWriter   : TOggOpusWriter;
+    FFrameSize: Integer;
   public
     constructor Create(AStream: TStream; Channels, SampleRate, FrameSizeMs: Integer;
       OwnsStream: Boolean = False);
     destructor Destroy; override;
-
-    // Encode one frame of int16 PCM and write to the Ogg stream.
-    // PCM: Channels × FrameSize samples interleaved.
-    procedure WriteFrame(PCM: PSmallInt);
-
-    // Finalize the stream (writes EOS page).
+    procedure WriteFrame(PCM: PSmallInt);   // FrameSize muestras intercaladas
     procedure Finish;
-
-    property Encoder: TOpusCeltEncoder read FEncoder;
-  end;
+    property Writer: TOggOpusWriter read FWriter;
+  end deprecated 'Use TOggOpusWriter (unit OggOpusWriter)';
 
 implementation
 
-// ---------------------------------------------------------------------------
-// TOpusCeltEncoder
-// ---------------------------------------------------------------------------
-
 constructor TOpusCeltEncoder.Create(Channels, SampleRate, FrameSizeMs: Integer);
-const
-  // LM index → frame size in ms: 0=2.5, 1=5, 2=10, 3=20
-  LMTable: array[0..3] of Integer = (25, 5, 10, 20);  // × 0.1ms
-  FrameMs:  array[0..3] of Integer = (3, 5, 10, 20);   // round ms
 begin
-  FChannels   := Channels;
-  FSampleRate := SampleRate;
-
-  // Choose LM based on requested frame size
+  inherited Create;
+  FChannels := Channels;
   case FrameSizeMs of
-    20: FLM := 3;
+    5 : FLM := 1;
     10: FLM := 2;
-     5: FLM := 1;
-  else  FLM := 3;  // default 20ms (2.5 ms / LM 0 no es seleccionable: FrameSizeMs es entero)
+  else
+    FLM := 3;
   end;
-
-  // TOC config CELT (RFC 6716 §3.1): config = 16 + 4*bw + LM, con
-  // bw 0=NB 1=WB 2=SWB 3=FB (16-19, 20-23, 24-27, 28-31) y LM 0..3 =
-  // 2.5/5/10/20 ms. CeltEncodeFrame codifica siempre las 21 bandas
-  // (end band 21 = fullband), así que el config es 28 + LM:
-  //   28 = CELT FB 2.5 ms, 29 = FB 5 ms, 30 = FB 10 ms, 31 = FB 20 ms.
-  // (Antes: 29/25/16 para 10/5/2.5 ms, que el decoder leía como 5/5/2.5 ms.)
+  FFrameSize := (SampleRate div 400) shl FLM;
+  FEnc := TOpusEncoder.Create(SampleRate, Channels, oaRestrictedLowDelay);
+  FEnc.Bitrate := OPUS_BITRATE_MAX;
+  FEnc.Vbr := False;
   FConfig := 28 + FLM;
+end;
 
-  CeltEncStateInit(FState, Channels, FLM);
-  FFrameSize := FState.FrameSize;
+destructor TOpusCeltEncoder.Destroy;
+begin
+  FEnc.Free;
+  inherited;
 end;
 
 function TOpusCeltEncoder.EncodeFrame(PCM: PSmallInt; PacketBuf: PByte; MaxLen: Integer): Integer;
-var
-  Re     : TOpusRangeEncoder;
-  Budget : Integer;
-  Len    : Integer;
 begin
-  Result := 0;
-  if MaxLen < 2 then Exit;
-
-  // Build TOC byte: config[7:3] | stereo[2] | code[1:0]
-  PacketBuf[0] := Byte((FConfig shl 3) or (Ord(FChannels > 1) shl 2) or 0);
-
-  // Range-encode CELT frame into bytes 1..MaxLen-1
-  ReInit(Re, PacketBuf + 1, Cardinal(MaxLen - 1));
-  Budget := (MaxLen - 1) * 8;  // all available bits
-
-  if not CeltEncodeFrame(FState, PCM, Re, Budget) then Exit;
-
-  Len := ReFlush(Re);
-  if Re.Error then Exit;
-
-  Result := 1 + Len;  // TOC + payload
+  Result := FEnc.Encode(PCM, FFrameSize, PacketBuf, MaxLen);
+  if Result <= 0 then
+    Exit(0);
+  FConfig := PacketBuf[0] shr 3;
 end;
-
-// ---------------------------------------------------------------------------
-// TOpusWriter
-// ---------------------------------------------------------------------------
 
 constructor TOpusWriter.Create(AStream: TStream; Channels, SampleRate, FrameSizeMs: Integer;
   OwnsStream: Boolean);
 begin
-  FStream    := AStream;
-  FOwns      := OwnsStream;
-  FSampleRate := SampleRate;
-  FPreSkip   := 312;  // standard CELT pre-skip (about 6.5ms at 48kHz)
-  FGranule   := -FPreSkip;  // starts negative (pre-skip counts down)
-
-  FEncoder := TOpusCeltEncoder.Create(Channels, SampleRate, FrameSizeMs);
-  FWriter  := TOggPageWriter.Create(AStream, $01020304);  // random serial
-
-  WriteOpusHead;
-  WriteOpusTags;
+  inherited Create;
+  if not (FrameSizeMs in [5, 10, 20]) then
+    FrameSizeMs := 20;
+  FWriter := TOggOpusWriter.Create(AStream, SampleRate, Channels, oaAudio, FrameSizeMs * 10, OwnsStream);
+  FFrameSize := FWriter.FrameSize;
 end;
 
 destructor TOpusWriter.Destroy;
 begin
-  FEncoder.Free;
   FWriter.Free;
-  if FOwns then FStream.Free;
   inherited;
 end;
 
-procedure TOpusWriter.WriteOpusHead;
-var
-  Head: TBytes;
-begin
-  // RFC 7845 §5.1 OpusHead
-  SetLength(Head, 19);
-  // Magic: 'OpusHead'
-  Head[0] := 79; Head[1] := 112; Head[2] := 117; Head[3] := 115;
-  Head[4] := 72; Head[5] := 101; Head[6] := 97;  Head[7] := 100;
-  Head[8] := 1;                        // version = 1
-  Head[9] := FEncoder.Channels;         // channel count
-  // Pre-skip (little-endian 16-bit)
-  Head[10] := FPreSkip and $FF;
-  Head[11] := (FPreSkip shr 8) and $FF;
-  // Input sample rate (little-endian 32-bit)
-  Head[12] := FSampleRate and $FF;
-  Head[13] := (FSampleRate shr 8) and $FF;
-  Head[14] := (FSampleRate shr 16) and $FF;
-  Head[15] := (FSampleRate shr 24) and $FF;
-  Head[16] := 0; Head[17] := 0;        // output gain = 0
-  Head[18] := 0;                        // channel mapping family = 0 (mono/stereo)
-
-  FWriter.WritePacket(Head, True {BOS}, False, 0);
-end;
-
-procedure TOpusWriter.WriteOpusTags;
-var
-  Tags: TBytes;
-  VendorStr: AnsiString;
-  VL: Integer;
-begin
-  // RFC 7845 §5.2 OpusTags (minimal: vendor string + 0 comments)
-  VendorStr := 'delphi-libraries/opus-encoder';
-  VL := Length(VendorStr);
-
-  SetLength(Tags, 8 + 4 + VL + 4);
-  // Magic: 'OpusTags'
-  Tags[0] := 79; Tags[1] := 112; Tags[2] := 117; Tags[3] := 115;
-  Tags[4] := 84; Tags[5] := 97;  Tags[6] := 103; Tags[7] := 115;
-  // Vendor string length (little-endian 32-bit)
-  Tags[8] := VL and $FF;
-  Tags[9] := (VL shr 8) and $FF;
-  Tags[10] := 0; Tags[11] := 0;
-  // Vendor string
-  var VendorBytes := TEncoding.UTF8.GetBytes(string(VendorStr));
-  Move(VendorBytes[0], Tags[12], Min(VL, Length(VendorBytes)));
-  // User comment list length = 0
-  Tags[12 + VL + 0] := 0;
-  Tags[12 + VL + 1] := 0;
-  Tags[12 + VL + 2] := 0;
-  Tags[12 + VL + 3] := 0;
-
-  FWriter.WritePacket(Tags, False, False, 0);
-end;
-
 procedure TOpusWriter.WriteFrame(PCM: PSmallInt);
-var
-  PacketBuf: array[0..OPUS_MAX_PACKET-1] of Byte;
-  Len       : Integer;
-  Packet    : TBytes;
 begin
-  FillChar(PacketBuf, SizeOf(PacketBuf), 0);
-  Len := FEncoder.EncodeFrame(PCM, @PacketBuf[0], OPUS_MAX_PACKET);
-  if Len <= 0 then Exit;
-
-  SetLength(Packet, Len);
-  Move(PacketBuf[0], Packet[0], Len);
-
-  // Update granule position (samples at 48kHz)
-  Inc(FGranule, FEncoder.FrameSize);
-  var GPos: Int64 := Max(0, FGranule);
-
-  FWriter.WritePacket(Packet, False, False, GPos);
+  FWriter.WriteInt16(PCM, FFrameSize);
 end;
 
 procedure TOpusWriter.Finish;
-var
-  Empty: TBytes;
 begin
-  SetLength(Empty, 0);
-  FWriter.WritePacket(Empty, False, True {EOS}, FGranule);
+  FWriter.Finish;
 end;
 
 end.

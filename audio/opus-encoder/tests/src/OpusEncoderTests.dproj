@@ -20,7 +20,7 @@
     <DCC_K>False</DCC_K>
     <DCC_Namespace>System;Xml;Data;Datasnap;Web;Soap;Vcl;$(DCC_Namespace)</DCC_Namespace>
     <Icon_MainIcon>$(BDS)\bin\delphi_PROJECTICON.ico</Icon_MainIcon>
-    <DCC_UnitSearchPath>E:\Copilot\delphi-libraries\audio\audio-common\src;E:\Copilot\delphi-libraries\audio\ogg-container\src;E:\Copilot\delphi-libraries\audio\opus-decoder\src;E:\Copilot\delphi-libraries\audio\opus-encoder\src;$(DCC_UnitSearchPath)</DCC_UnitSearchPath>
+    <DCC_UnitSearchPath>..\..\src;..\..\..\src;..\..\..\ogg-container\src;..\..\..\opus-decoder\src;$(DCC_UnitSearchPath)</DCC_UnitSearchPath>
   </PropertyGroup>
   <PropertyGroup Condition="'$(Config)'=='Debug' and '$(Platform)'=='Win64'">
     <DCC_Define>DEBUG</DCC_Define>
@@ -38,10 +38,7 @@
     <DelphiCompile Include="$(MainSource)">
       <MainSource>MainSource</MainSource>
     </DelphiCompile>
-    <DCCReference Include="..\..\..\opus-decoder\src\OpusTypes.pas"/>
-    <DCCReference Include="..\..\..\opus-decoder\src\OpusRangeDecoder.pas"/>
-    <DCCReference Include="..\..\src\OpusEncTypes.pas"/>
-    <DCCReference Include="..\..\src\OpusRangeEncoder.pas"/>
+    <DCCReference Include="OpusEncTestSignals.pas"/>
   </ItemGroup>
   <ProjectExtensions>
     <Borland.Personality>Delphi.Personality.12</Borland.Personality>

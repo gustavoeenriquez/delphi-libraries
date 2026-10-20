@@ -1,25 +1,46 @@
-program OpusEncoderTests;
+﻿program OpusEncoderTests;
 
 {
-  OpusEncoderTests.dpr - Exhaustive tests for opus-encoder
+  OpusEncoderTests.dpr - Pruebas del encoder Opus (port de libopus 1.5.2)
 
-  Test layers:
-    E01-E08: OpusEncTypes  - config init, TOC config lookup, TOC byte build
-    E09-E25: OpusRangeEncoder - init state, ICDF encode, UInt encode, bit encode,
-                                raw bits, flush output, round-trip vs decoder
+  RC  codificador de rango: ida y vuelta contra el range decoder del port
+      (opus-decoder), incluidos Laplace, ICDF, enteros y bits crudos.
+  PV  PVQ: encode_pulses -> decode_pulses para varios (N, K).
+  GV  vectores de referencia de libopus 1.5.2: señales sintéticas deterministas
+      codificadas con el oráculo (tests/tools/opus_oracle, variante sin
+      análisis para complejidad >= 7) -> número de paquetes, bytes, CRC32 y
+      XOR de final_range deben ser idénticos (byte a byte).
+  DE  todos los paquetes se decodifican con el decoder del port, con la
+      duración correcta.
+  CB  CBR: todos los paquetes del tamaño exacto.
+  VB  VBR/CVBR: bitrate medio dentro de +-5 % del objetivo.
+  IN  tres instancias intercaladas producen los mismos bytes que por separado.
+  OG  Ogg Opus: pre-skip, y el decodificado tiene exactamente las muestras de
+      entrada (recorte del final).
+  CO  capa de compatibilidad TOpusCeltEncoder (TOC y duración).
+  CT  validación de CTLs y argumentos.
 
-  License: CC0 1.0 Universal (Public Domain)
-  https://creativecommons.org/publicdomain/zero/1.0/
+  Licencia de las pruebas: CC0 1.0.
 }
 
 {$APPTYPE CONSOLE}
+{$POINTERMATH ON}
 
 uses
-  SysUtils, Math,
-  OpusTypes,
+  SysUtils, Classes, Math,
+  AudioTypes,
+  OpusEntDec,
+  OpusCeltTables,
+  OpusCeltMath,
+  OpusDecoder,
+  OpusEntEnc,
+  OpusCeltEncMath,
   OpusEncTypes,
-  OpusRangeEncoder,
-  OpusRangeDecoder;
+  OpusEncoder,
+  OpusRepacketizer,
+  OggOpusWriter,
+  OpusEncPacket,
+  OpusEncTestSignals;
 
 var
   Passed, Failed: Integer;
@@ -27,555 +48,587 @@ var
 procedure Check(Cond: Boolean; const Name: string);
 begin
   if Cond then begin WriteLn('  PASS: ', Name); Inc(Passed); end
-  else          begin WriteLn('  FAIL: ', Name); Inc(Failed); end;
+  else         begin WriteLn('  FAIL: ', Name); Inc(Failed); end;
 end;
 
-procedure CheckNear(A, B, Eps: Double; const Name: string);
-begin
-  Check(Abs(A - B) <= Eps, Name + Format(' (%.8f vs %.8f)', [A, B]));
-end;
-
-// ===========================================================================
-// E01: OpusEncConfigInit defaults
-// ===========================================================================
-procedure TestE01_ConfigDefaults;
+// CRC-32 (IEEE, reflejado), igual que zlib.crc32
 var
-  Cfg: TOpusEncConfig;
-begin
-  WriteLn('E01: OpusEncConfigInit defaults');
-  OpusEncConfigInit(Cfg, 2, 48000);
-  Check(Cfg.Channels = 2,                      'Channels = 2');
-  Check(Cfg.SampleRate = 48000,                'SampleRate = 48000');
-  Check(Cfg.Bitrate = OPUS_ENC_BITRATE_DEFAULT,'Bitrate = 96000');
-  Check(Cfg.Complexity = OPUS_ENC_COMPLEXITY_DEFAULT, 'Complexity = 5');
-  CheckNear(Cfg.FrameSizeMs, 20.0, 0.001,      'FrameSizeMs = 20');
-  Check(Cfg.Mode = -1,                         'Mode = auto (-1)');
-  Check(Cfg.Bandwidth = -1,                    'Bandwidth = auto (-1)');
-end;
+  Crc32Table: array[0..255] of Cardinal;
 
-// ===========================================================================
-// E02: OpusEncConfigInit mono 8 kHz
-// ===========================================================================
-procedure TestE02_ConfigMono8k;
+procedure InitCrc32;
 var
-  Cfg: TOpusEncConfig;
+  I, K: Integer;
+  C: Cardinal;
 begin
-  WriteLn('E02: OpusEncConfigInit mono 8 kHz');
-  OpusEncConfigInit(Cfg, 1, 8000);
-  Check(Cfg.Channels = 1,   'Channels = 1');
-  Check(Cfg.SampleRate = 8000, 'SampleRate = 8000');
-end;
-
-// ===========================================================================
-// E03: OpusEncTOCConfig - CELT FB 20ms
-// ===========================================================================
-procedure TestE03_TOCConfigCeltFB20;
-var
-  C: Integer;
-begin
-  WriteLn('E03: TOCConfig CELT FB 20ms');
-  C := OpusEncTOCConfig(OPUS_MODE_CELT, OPUS_BW_FULLBAND, 20.0);
-  Check(C = 31, Format('Config = 31 (got %d)', [C]));
-end;
-
-// ===========================================================================
-// E04: OpusEncTOCConfig - SILK NB 40ms
-// ===========================================================================
-procedure TestE04_TOCConfigSilkNB40;
-var
-  C: Integer;
-begin
-  WriteLn('E04: TOCConfig SILK NB 40ms');
-  C := OpusEncTOCConfig(OPUS_MODE_SILK, OPUS_BW_NARROWBAND, 40.0);
-  Check(C = 2, Format('Config = 2 (got %d)', [C]));
-end;
-
-// ===========================================================================
-// E05: OpusEncTOCConfig - Hybrid SWB 10ms
-// ===========================================================================
-procedure TestE05_TOCConfigHybridSWB10;
-var
-  C: Integer;
-begin
-  WriteLn('E05: TOCConfig Hybrid SWB 10ms');
-  C := OpusEncTOCConfig(OPUS_MODE_HYBRID, OPUS_BW_SUPERWIDEBAND, 10.0);
-  Check(C = 12, Format('Config = 12 (got %d)', [C]));
-end;
-
-// ===========================================================================
-// E06: OpusEncTOCConfig - invalid combination
-// ===========================================================================
-procedure TestE06_TOCConfigInvalid;
-var
-  C: Integer;
-begin
-  WriteLn('E06: TOCConfig invalid combination');
-  // SILK with FULLBAND does not exist in the spec
-  C := OpusEncTOCConfig(OPUS_MODE_SILK, OPUS_BW_FULLBAND, 20.0);
-  Check(C = -1, Format('Config = -1 for invalid (got %d)', [C]));
-end;
-
-// ===========================================================================
-// E07: OpusEncTOCByte - build TOC byte
-// ===========================================================================
-procedure TestE07_TOCByte;
-var
-  B: Byte;
-  TOC: TOpusTOC;
-begin
-  WriteLn('E07: OpusEncTOCByte round-trip');
-  // CELT FB 20ms (config=31), stereo, code=0
-  B := OpusEncTOCByte(31, True, 0);
-  OpusParseTOC(B, TOC);
-  Check(TOC.Config = 31,              'Round-trip Config = 31');
-  Check(TOC.Stereo,                   'Round-trip Stereo = True');
-  Check(TOC.Code = 0,                 'Round-trip Code = 0');
-  Check(TOC.Mode = OPUS_MODE_CELT,    'Round-trip Mode = CELT');
-  Check(TOC.Bandwidth = OPUS_BW_FULLBAND, 'Round-trip BW = FB');
-end;
-
-// ===========================================================================
-// E08: OpusEncTOCByte - SILK NB 10ms stereo code=1
-// ===========================================================================
-procedure TestE08_TOCByteSilk;
-var
-  B: Byte;
-  TOC: TOpusTOC;
-begin
-  WriteLn('E08: OpusEncTOCByte SILK NB 10ms stereo code=1');
-  B := OpusEncTOCByte(0, True, 1);   // config=0: SILK NB 10ms
-  OpusParseTOC(B, TOC);
-  Check(TOC.Config = 0,              'Config = 0');
-  Check(TOC.Stereo,                  'Stereo = True');
-  Check(TOC.Code = 1,                'Code = 1');
-  Check(TOC.Mode = OPUS_MODE_SILK,   'Mode = SILK');
-end;
-
-// ===========================================================================
-// E09: ReInit - initial state invariants
-// ===========================================================================
-procedure TestE09_ReInitState;
-var
-  Re : TOpusRangeEncoder;
-  Buf: array[0..63] of Byte;
-begin
-  WriteLn('E09: ReInit initial state');
-  ReInit(Re, @Buf[0], 64);
-  Check(Re.Rng = $80000000, Format('Rng = $80000000 (got $%x)', [Re.Rng]));
-  Check(Re.Val = 0,         'Val = 0');
-  Check(Re.Rem = -1,        'Rem = -1 (sentinel)');
-  Check(Re.Ext = 0,         'Ext = 0');
-  Check(Re.Offs = 0,        'Offs = 0');
-  Check(Re.EndOffs = 0,     'EndOffs = 0');
-  Check(Re.NBitsTotal = 33, 'NBitsTotal = 33');
-  Check(not Re.Error,       'Error = False');
-end;
-
-// ===========================================================================
-// E10: ReTell after init = 1 (33 - log2($80000000)=31 → 33-32=1)
-// ===========================================================================
-procedure TestE10_TellAfterInit;
-var
-  Re : TOpusRangeEncoder;
-  Buf: array[0..63] of Byte;
-begin
-  WriteLn('E10: ReTell after init = 1');
-  ReInit(Re, @Buf[0], 64);
-  Check(ReTell(Re) = 1, Format('ReTell = 1 (got %d)', [ReTell(Re)]));
-end;
-
-// ===========================================================================
-// E11: ReFlush empty encoder produces 0 bytes or 1 zero byte
-// ===========================================================================
-procedure TestE11_FlushEmpty;
-var
-  Re  : TOpusRangeEncoder;
-  Buf : array[0..63] of Byte;
-  Len : Integer;
-begin
-  WriteLn('E11: ReFlush empty encoder');
-  FillChar(Buf, SizeOf(Buf), $AA);
-  ReInit(Re, @Buf[0], 64);
-  Len := ReFlush(Re);
-  Check(Len >= 0,       Format('Len >= 0 (got %d)', [Len]));
-  Check(not Re.Error,   'No overflow error');
-end;
-
-// ===========================================================================
-// E12: ReEncodeICDF single symbol (only 1 choice) - no bits consumed
-// ===========================================================================
-procedure TestE12_EncodeICDFSingleSymbol;
-var
-  Re  : TOpusRangeEncoder;
-  Buf : array[0..63] of Byte;
-const
-  // Only 1 symbol: ICDF[0]=1<<8=256→stored as 0 because table is byte-scaled
-  // Actually single-symbol ICDF: ICDF = [0] meaning prob[0] = FT = 256.
-  // ICDF[0] must be 0 (FT - FT = 0), representing 100% probability.
-  ICDF1: array[0..0] of Byte = (0);
-begin
-  WriteLn('E12: ReEncodeICDF single-symbol (trivial)');
-  ReInit(Re, @Buf[0], 64);
-  // Sym=0, ICDF[0]=0, FTBits=8: Rng -= (Rng>>8)*0 → Rng unchanged
-  ReEncodeICDF(Re, 0, ICDF1, 8);
-  Check(not Re.Error, 'No error after trivial encode');
-  // Rng should still be $80000000 (no bits consumed)
-  Check(Re.Rng = $80000000, Format('Rng unchanged (got $%x)', [Re.Rng]));
-end;
-
-// ===========================================================================
-// E13: ReEncodeICDF + decoder round-trip — 2-symbol equiprobable
-// ===========================================================================
-procedure TestE13_ICDFRoundTrip2Sym;
-var
-  Re  : TOpusRangeEncoder;
-  Rd  : TOpusRangeDecoder;
-  Buf : array[0..63] of Byte;
-  Len : Integer;
-  Got : Integer;
-const
-  ICDF2: array[0..1] of Byte = (128, 0);  // 50/50 split, FT=256
-begin
-  WriteLn('E13: ICDF 2-symbol round-trip (sym=1)');
-  FillChar(Buf, SizeOf(Buf), 0);
-  ReInit(Re, @Buf[0], 64);
-  ReEncodeICDF(Re, 1, ICDF2, 8);  // encode symbol 1
-  Len := ReFlush(Re);
-  Check(Len > 0, Format('Flushed %d bytes', [Len]));
-  // Decode it back
-  RdInit(Rd, @Buf[0], Len);
-  Got := RdDecodeICDF(Rd, ICDF2, 8);
-  Check(Got = 1, Format('Decoded = 1 (got %d)', [Got]));
-  Check(not Rd.Error, 'Decoder no error');
-end;
-
-// ===========================================================================
-// E14: ICDF round-trip — 4 symbols, encode sym=2
-// ===========================================================================
-procedure TestE14_ICDFRoundTrip4Sym;
-var
-  Re  : TOpusRangeEncoder;
-  Rd  : TOpusRangeDecoder;
-  Buf : array[0..63] of Byte;
-  Len : Integer;
-  Got : Integer;
-const
-  // 4 equiprobable symbols (64 each), FT=256
-  ICDF4: array[0..3] of Byte = (192, 128, 64, 0);
-begin
-  WriteLn('E14: ICDF 4-symbol round-trip (sym=2)');
-  FillChar(Buf, SizeOf(Buf), 0);
-  ReInit(Re, @Buf[0], 64);
-  ReEncodeICDF(Re, 2, ICDF4, 8);
-  Len := ReFlush(Re);
-  RdInit(Rd, @Buf[0], Len);
-  Got := RdDecodeICDF(Rd, ICDF4, 8);
-  Check(Got = 2, Format('Decoded = 2 (got %d)', [Got]));
-end;
-
-// ===========================================================================
-// E15: ICDF round-trip — encode all 4 symbols in sequence
-// ===========================================================================
-procedure TestE15_ICDFMultiSymbol;
-var
-  Re  : TOpusRangeEncoder;
-  Rd  : TOpusRangeDecoder;
-  Buf : array[0..63] of Byte;
-  Len, I: Integer;
-  Syms: array[0..3] of Integer;
-const
-  ICDF4: array[0..3] of Byte = (192, 128, 64, 0);
-begin
-  WriteLn('E15: ICDF encode 4 symbols in sequence, decode all');
-  FillChar(Buf, SizeOf(Buf), 0);
-  ReInit(Re, @Buf[0], 64);
-  for I := 0 to 3 do
-    ReEncodeICDF(Re, I, ICDF4, 8);
-  Len := ReFlush(Re);
-  RdInit(Rd, @Buf[0], Len);
-  for I := 0 to 3 do
-    Syms[I] := RdDecodeICDF(Rd, ICDF4, 8);
-  Check(Syms[0] = 0, Format('Sym[0]=0 (got %d)', [Syms[0]]));
-  Check(Syms[1] = 1, Format('Sym[1]=1 (got %d)', [Syms[1]]));
-  Check(Syms[2] = 2, Format('Sym[2]=2 (got %d)', [Syms[2]]));
-  Check(Syms[3] = 3, Format('Sym[3]=3 (got %d)', [Syms[3]]));
-end;
-
-// ===========================================================================
-// E16: ReEncodeUInt round-trip — small value
-// ===========================================================================
-procedure TestE16_UIntSmall;
-var
-  Re  : TOpusRangeEncoder;
-  Rd  : TOpusRangeDecoder;
-  Buf : array[0..63] of Byte;
-  Len : Integer;
-  Got : Cardinal;
-begin
-  WriteLn('E16: ReEncodeUInt small value round-trip');
-  FillChar(Buf, SizeOf(Buf), 0);
-  ReInit(Re, @Buf[0], 64);
-  ReEncodeUInt(Re, 5, 10);  // val=5 in [0,10)
-  Len := ReFlush(Re);
-  RdInit(Rd, @Buf[0], Len);
-  Got := RdDecodeUInt(Rd, 10);
-  Check(Got = 5, Format('Decoded = 5 (got %d)', [Got]));
-end;
-
-// ===========================================================================
-// E17: ReEncodeUInt round-trip — val=0
-// ===========================================================================
-procedure TestE17_UIntZero;
-var
-  Re  : TOpusRangeEncoder;
-  Rd  : TOpusRangeDecoder;
-  Buf : array[0..63] of Byte;
-  Len : Integer;
-  Got : Cardinal;
-begin
-  WriteLn('E17: ReEncodeUInt val=0 round-trip');
-  FillChar(Buf, SizeOf(Buf), 0);
-  ReInit(Re, @Buf[0], 64);
-  ReEncodeUInt(Re, 0, 16);
-  Len := ReFlush(Re);
-  RdInit(Rd, @Buf[0], Len);
-  Got := RdDecodeUInt(Rd, 16);
-  Check(Got = 0, Format('Decoded = 0 (got %d)', [Got]));
-end;
-
-// ===========================================================================
-// E18: ReEncodeUInt round-trip — val=max-1
-// ===========================================================================
-procedure TestE18_UIntMax;
-var
-  Re  : TOpusRangeEncoder;
-  Rd  : TOpusRangeDecoder;
-  Buf : array[0..63] of Byte;
-  Len : Integer;
-  Got : Cardinal;
-begin
-  WriteLn('E18: ReEncodeUInt val=max-1 round-trip');
-  FillChar(Buf, SizeOf(Buf), 0);
-  ReInit(Re, @Buf[0], 64);
-  ReEncodeUInt(Re, 15, 16);
-  Len := ReFlush(Re);
-  RdInit(Rd, @Buf[0], Len);
-  Got := RdDecodeUInt(Rd, 16);
-  Check(Got = 15, Format('Decoded = 15 (got %d)', [Got]));
-end;
-
-// ===========================================================================
-// E19: ReEncodeUInt large FT (> 256, triggers high/low split)
-// ===========================================================================
-procedure TestE19_UIntLarge;
-var
-  Re  : TOpusRangeEncoder;
-  Rd  : TOpusRangeDecoder;
-  Buf : array[0..127] of Byte;
-  Len : Integer;
-  Got : Cardinal;
-begin
-  WriteLn('E19: ReEncodeUInt large FT=1000, val=777');
-  FillChar(Buf, SizeOf(Buf), 0);
-  ReInit(Re, @Buf[0], 128);
-  ReEncodeUInt(Re, 777, 1000);
-  Len := ReFlush(Re);
-  // Raw bits for the low part land at the end of Storage, so pass full buffer
-  RdInit(Rd, @Buf[0], SizeOf(Buf));
-  Got := RdDecodeUInt(Rd, 1000);
-  Check(Got = 777, Format('Decoded = 777 (got %d)', [Got]));
-end;
-
-// ===========================================================================
-// E20: ReEncodeBit round-trip — bit=False, LogP=1
-// ===========================================================================
-procedure TestE20_BitFalse;
-var
-  Re  : TOpusRangeEncoder;
-  Rd  : TOpusRangeDecoder;
-  Buf : array[0..63] of Byte;
-  Len : Integer;
-begin
-  WriteLn('E20: ReEncodeBit False (logp=1) round-trip');
-  FillChar(Buf, SizeOf(Buf), 0);
-  ReInit(Re, @Buf[0], 64);
-  ReEncodeBit(Re, False, 1);
-  Len := ReFlush(Re);
-  RdInit(Rd, @Buf[0], Len);
-  Check(not RdDecodeBit(Rd), 'Decoded = False');
-end;
-
-// ===========================================================================
-// E21: ReEncodeBit round-trip — bit=True, LogP=1
-// ===========================================================================
-procedure TestE21_BitTrue;
-var
-  Re  : TOpusRangeEncoder;
-  Rd  : TOpusRangeDecoder;
-  Buf : array[0..63] of Byte;
-  Len : Integer;
-begin
-  WriteLn('E21: ReEncodeBit True (logp=1) round-trip');
-  FillChar(Buf, SizeOf(Buf), 0);
-  ReInit(Re, @Buf[0], 64);
-  ReEncodeBit(Re, True, 1);
-  Len := ReFlush(Re);
-  RdInit(Rd, @Buf[0], Len);
-  Check(RdDecodeBit(Rd), 'Decoded = True');
-end;
-
-// ===========================================================================
-// E22: ReEncodeRaw round-trip — 4 raw bits value=9
-// ===========================================================================
-procedure TestE22_RawBits;
-var
-  Re  : TOpusRangeEncoder;
-  Rd  : TOpusRangeDecoder;
-  Buf : array[0..63] of Byte;
-  Len : Integer;
-  Got : Cardinal;
-begin
-  WriteLn('E22: ReEncodeRaw 4 bits val=9 round-trip');
-  FillChar(Buf, SizeOf(Buf), 0);
-  ReInit(Re, @Buf[0], 64);
-  ReEncodeRaw(Re, 9, 4);   // 9 = 1001b
-  Len := ReFlush(Re);
-  // Raw bits sit at end of Storage; pass full buffer so decoder can find them
-  RdInit(Rd, @Buf[0], SizeOf(Buf));
-  Got := RdDecodeRaw(Rd, 4);
-  Check(Got = 9, Format('Raw decoded = 9 (got %d)', [Got]));
-end;
-
-// ===========================================================================
-// E23: Mixed ICDF + raw bits round-trip
-// ===========================================================================
-procedure TestE23_MixedICDFAndRaw;
-var
-  Re   : TOpusRangeEncoder;
-  Rd   : TOpusRangeDecoder;
-  Buf  : array[0..127] of Byte;
-  Len  : Integer;
-  GSym : Integer;
-  GRaw : Cardinal;
-const
-  ICDF4: array[0..3] of Byte = (192, 128, 64, 0);
-begin
-  WriteLn('E23: Mixed ICDF sym=3 + raw 5 bits val=21');
-  FillChar(Buf, SizeOf(Buf), 0);
-  ReInit(Re, @Buf[0], 128);
-  ReEncodeICDF(Re, 3, ICDF4, 8);
-  ReEncodeRaw(Re, 21, 5);
-  Len := ReFlush(Re);
-  // Raw bits at end of Storage; pass full buffer
-  RdInit(Rd, @Buf[0], SizeOf(Buf));
-  GSym := RdDecodeICDF(Rd, ICDF4, 8);
-  GRaw := RdDecodeRaw(Rd, 5);
-  Check(GSym = 3, Format('ICDF sym = 3 (got %d)', [GSym]));
-  Check(GRaw = 21, Format('Raw = 21 (got %d)', [GRaw]));
-end;
-
-// ===========================================================================
-// E24: ReTell grows after each symbol
-// ===========================================================================
-procedure TestE24_TellGrows;
-var
-  Re   : TOpusRangeEncoder;
-  Buf  : array[0..127] of Byte;
-  T0, T1, T2: Integer;
-const
-  ICDF2: array[0..1] of Byte = (128, 0);
-begin
-  WriteLn('E24: ReTell grows after encoding');
-  ReInit(Re, @Buf[0], 128);
-  T0 := ReTell(Re);
-  ReEncodeICDF(Re, 0, ICDF2, 8);
-  T1 := ReTell(Re);
-  ReEncodeICDF(Re, 1, ICDF2, 8);
-  T2 := ReTell(Re);
-  Check(T1 > T0, Format('T1(%d) > T0(%d)', [T1, T0]));
-  Check(T2 > T1, Format('T2(%d) > T1(%d)', [T2, T1]));
-end;
-
-// ===========================================================================
-// E25: Stress — encode 16 uniform values [0,256), decode all back
-// ===========================================================================
-procedure TestE25_StressUInt16;
-var
-  Re   : TOpusRangeEncoder;
-  Rd   : TOpusRangeDecoder;
-  Buf  : array[0..255] of Byte;
-  Len  : Integer;
-  I    : Integer;
-  Vals : array[0..15] of Cardinal;
-  Got  : Cardinal;
-  Ok   : Boolean;
-begin
-  WriteLn('E25: Stress — 16 uniform integers [0,256) round-trip');
-  FillChar(Buf, SizeOf(Buf), 0);
-  // Deterministic sequence
-  Vals[0]:=0; Vals[1]:=1; Vals[2]:=7; Vals[3]:=42;
-  Vals[4]:=64; Vals[5]:=100; Vals[6]:=127; Vals[7]:=128;
-  Vals[8]:=129; Vals[9]:=200; Vals[10]:=210; Vals[11]:=220;
-  Vals[12]:=230; Vals[13]:=240; Vals[14]:=250; Vals[15]:=255;
-  ReInit(Re, @Buf[0], 256);
-  for I := 0 to 15 do
-    ReEncodeUInt(Re, Vals[I], 256);
-  Len := ReFlush(Re);
-  RdInit(Rd, @Buf[0], Len);
-  Ok := True;
-  for I := 0 to 15 do
+  for I := 0 to 255 do
   begin
-    Got := RdDecodeUInt(Rd, 256);
-    if Got <> Vals[I] then
+    C := I;
+    for K := 0 to 7 do
+      if (C and 1) <> 0 then C := $EDB88320 xor (C shr 1) else C := C shr 1;
+    Crc32Table[I] := C;
+  end;
+end;
+
+function Crc32Update(Crc: Cardinal; P: PByte; Len: Integer): Cardinal;
+var
+  I: Integer;
+begin
+  Crc := not Crc;
+  for I := 0 to Len - 1 do
+    Crc := Crc32Table[(Crc xor P[I]) and $FF] xor (Crc shr 8);
+  Result := not Crc;
+end;
+
+// ---------------------------------------------------------------------------
+// Encode helpers
+// ---------------------------------------------------------------------------
+
+type
+  TCase = record
+    Name     : string;
+    Kind     : TTestSignal;
+    Fs, Ch   : Integer;
+    Samples  : Integer;
+    App      : TOpusApplication;
+    Ms10     : Integer;   // frame duration in 0.1 ms
+    Bitrate  : Integer;
+    Vbr, Cvbr: Boolean;
+    Cx       : Integer;
+    // reference (libopus 1.5.2)
+    NPk      : Integer;
+    Bytes    : Integer;
+    Crc      : Cardinal;
+    RngXor   : Cardinal;
+  end;
+
+  TPackets = TArray<TBytes>;
+
+const
+  CASES: array[0..6] of TCase = (
+    (Name: 'A chirp 48k mono lowdelay 20ms CBR 64k cx0'; Kind: tsChirp; Fs: 48000; Ch: 1; Samples: 48000;
+     App: oaRestrictedLowDelay; Ms10: 200; Bitrate: 64000; Vbr: False; Cvbr: True; Cx: 0;
+     NPk: 50; Bytes: 8000; Crc: $430BA29F; RngXor: $6AFD7B7A),
+    (Name: 'B music 48k stereo audio 20ms CVBR 96k cx10'; Kind: tsMusicLike; Fs: 48000; Ch: 2; Samples: 48000;
+     App: oaAudio; Ms10: 200; Bitrate: 96000; Vbr: True; Cvbr: True; Cx: 10;
+     NPk: 50; Bytes: 12050; Crc: $E52DE5D7; RngXor: $4A8D9FAD),
+    (Name: 'C speech 16k mono voip 20ms CVBR 24k cx5'; Kind: tsSpeechLike; Fs: 16000; Ch: 1; Samples: 16000;
+     App: oaVoip; Ms10: 200; Bitrate: 24000; Vbr: True; Cvbr: True; Cx: 5;
+     NPk: 50; Bytes: 3050; Crc: $EEDBF762; RngXor: $7F85C420),
+    (Name: 'D music 48k stereo lowdelay 2.5ms CBR 128k cx10'; Kind: tsMusicLike; Fs: 48000; Ch: 2; Samples: 24000;
+     App: oaRestrictedLowDelay; Ms10: 25; Bitrate: 128000; Vbr: False; Cvbr: True; Cx: 10;
+     NPk: 200; Bytes: 8000; Crc: $988E9B00; RngXor: $13D6BD63),
+    (Name: 'E speech 48k mono audio 60ms VBR 32k cx9'; Kind: tsSpeechLike; Fs: 48000; Ch: 1; Samples: 57600;
+     App: oaAudio; Ms10: 600; Bitrate: 32000; Vbr: True; Cvbr: False; Cx: 9;
+     NPk: 20; Bytes: 4780; Crc: $87AC7650; RngXor: $5A130F00),
+    (Name: 'F speech 8k mono voip 10ms CBR 16k cx10'; Kind: tsSpeechLike; Fs: 8000; Ch: 1; Samples: 8000;
+     App: oaVoip; Ms10: 100; Bitrate: 16000; Vbr: False; Cvbr: True; Cx: 10;
+     NPk: 100; Bytes: 2000; Crc: $B12B557B; RngXor: $0647D209),
+    (Name: 'G music 24k stereo audio 10ms CVBR 48k cx8'; Kind: tsMusicLike; Fs: 24000; Ch: 2; Samples: 24000;
+     App: oaAudio; Ms10: 100; Bitrate: 48000; Vbr: True; Cvbr: True; Cx: 8;
+     NPk: 100; Bytes: 6100; Crc: $0CA3D93A; RngXor: $16C70163));
+
+function NewEncoder(const C: TCase): TOpusEncoder;
+begin
+  Result := TOpusEncoder.Create(C.Fs, C.Ch, C.App);
+  Result.Bitrate := C.Bitrate;
+  Result.Vbr := C.Vbr;
+  Result.VbrConstraint := C.Cvbr;
+  Result.Complexity := C.Cx;
+  Result.ForceMode := MODE_CELT_ONLY;
+end;
+
+// Encodes frame number Index of the case signal; returns the packet
+function EncodeOne(Enc: TOpusEncoder; const C: TCase; const Pcm: TArray<SmallInt>;
+  Index: Integer; out Rng: Cardinal): TBytes;
+var
+  Frame, Len: Integer;
+  Pkt: array[0..1499] of Byte;
+  Tmp: TArray<SmallInt>;
+  Start, Avail: Integer;
+begin
+  Frame := C.Fs * C.Ms10 div 10000;
+  SetLength(Tmp, Frame * C.Ch);
+  Start := Index * Frame;
+  Avail := Min(Frame, C.Samples - Start);
+  if Avail > 0 then
+    Move(Pcm[Start * C.Ch], Tmp[0], Avail * C.Ch * 2);
+  Len := Enc.Encode(@Tmp[0], Frame, @Pkt[0], 1276);
+  if Len < 0 then
+    raise Exception.CreateFmt('encode error %d', [Len]);
+  Rng := Enc.FinalRange;
+  SetLength(Result, Len);
+  Move(Pkt[0], Result[0], Len);
+end;
+
+function EncodeCase(const C: TCase; out Rngs: TArray<Cardinal>): TPackets;
+var
+  Enc: TOpusEncoder;
+  Pcm: TArray<SmallInt>;
+  Frame, N, I: Integer;
+begin
+  Pcm := MakeTestSignal(C.Kind, C.Fs, C.Ch, C.Samples);
+  Frame := C.Fs * C.Ms10 div 10000;
+  N := (C.Samples + Frame - 1) div Frame;
+  SetLength(Result, N);
+  SetLength(Rngs, N);
+  Enc := NewEncoder(C);
+  try
+    for I := 0 to N - 1 do
+      Result[I] := EncodeOne(Enc, C, Pcm, I, Rngs[I]);
+  finally
+    Enc.Free;
+  end;
+end;
+
+procedure Summarize(const P: TPackets; const R: TArray<Cardinal>; out Bytes: Integer;
+  out Crc, RngXor: Cardinal);
+var
+  I: Integer;
+begin
+  Bytes := 0; Crc := 0; RngXor := 0;
+  for I := 0 to High(P) do
+  begin
+    Inc(Bytes, Length(P[I]));
+    if Length(P[I]) > 0 then
+      Crc := Crc32Update(Crc, @P[I][0], Length(P[I]));
+    RngXor := RngXor xor R[I];
+  end;
+end;
+
+// ---------------------------------------------------------------------------
+
+procedure TestRangeCoder;
+const
+  NOPS = 4000;
+  ICDF: array[0..3] of Byte = (200, 120, 30, 0);
+var
+  Buf: array[0..65535] of Byte;
+  E: TEcEnc;
+  D: TEcDec;
+  Ops, Vals, Params: array of Integer;
+  I, V, Len, Bad, Seed: Integer;
+  Lap: Integer;
+  TellsE, TellsD: array of Integer;
+begin
+  WriteLn('--- RC: range coder ---');
+  SetLength(Ops, NOPS); SetLength(Vals, NOPS); SetLength(Params, NOPS);
+  SetLength(TellsE, NOPS); SetLength(TellsD, NOPS);
+  Seed := 1;
+  EcEncInit(E, @Buf[0], SizeOf(Buf));
+  for I := 0 to NOPS - 1 do
+  begin
+    Seed := Seed * 1103515245 + 12345;
+    Ops[I] := (Seed shr 16) mod 6;
+    Seed := Seed * 1103515245 + 12345;
+    V := (Seed shr 8) and $FFFF;
+    case Ops[I] of
+      0: begin Params[I] := 1 + V mod 15; Vals[I] := (V shr 4) and 1; EcEncBitLogp(E, Vals[I], Params[I]); end;
+      1: begin Params[I] := 2 + V mod 3000; Vals[I] := (V * 7) mod Params[I]; EcEncUInt(E, Vals[I], Params[I]); end;
+      2: begin Params[I] := 1 + V mod 24; Vals[I] := (V * 13) and ((1 shl Params[I]) - 1); EcEncBits(E, Vals[I], Params[I]); end;
+      3: begin Vals[I] := V mod 4; EcEncIcdf(E, Vals[I], @ICDF[0], 8); end;
+      4: begin
+           // fs/decay pairs of the real coarse-energy models (e_prob_model)
+           Lap := (V mod 21) - 10; Params[I] := (V shr 5) mod 168;
+           EcLaplaceEncode(E, Lap, Cardinal(CELT_E_PROB_MODEL[2 * Params[I]]) shl 7,
+             Integer(CELT_E_PROB_MODEL[2 * Params[I] + 1]) shl 6);
+           Vals[I] := Lap;
+         end;
+    else
+      begin Params[I] := 2 + V mod 200; Vals[I] := V mod Params[I]; EcEncode(E, Vals[I], Vals[I] + 1, Params[I]); end;
+    end;
+    TellsE[I] := EcTellFrac(E);
+  end;
+  EcEncDone(E);
+  Check(E.Error = 0, 'RC01 encoder sin error');
+  Len := E.Storage;
+  EcDecInit(D, @Buf[0], Len);
+  Bad := 0;
+  for I := 0 to NOPS - 1 do
+  begin
+    case Ops[I] of
+      0: V := EcDecBitLogp(D, Params[I]);
+      1: V := EcDecUInt(D, Params[I]);
+      2: V := EcDecBits(D, Params[I]);
+      3: V := EcDecIcdf(D, @ICDF[0], 8);
+      4: V := EcLaplaceDecode(D, Cardinal(CELT_E_PROB_MODEL[2 * Params[I]]) shl 7,
+           Integer(CELT_E_PROB_MODEL[2 * Params[I] + 1]) shl 6);
+    else
+      begin V := EcDecode(D, Params[I]); EcDecUpdate(D, V, V + 1, Params[I]); end;
+    end;
+    TellsD[I] := OpusEntDec.EcTellFrac(D);
+    if (V <> Vals[I]) or (TellsD[I] <> TellsE[I]) then
     begin
-      WriteLn(Format('    Mismatch at I=%d: expected %d got %d', [I, Vals[I], Got]));
-      Ok := False;
+      if Bad = 0 then
+        WriteLn(Format('    primer error: símbolo %d op %d param %d: %d <> %d, tell %d <> %d',
+          [I, Ops[I], Params[I], V, Vals[I], TellsD[I], TellsE[I]]));
+      Inc(Bad);
     end;
   end;
-  Check(Ok, 'All 16 values decoded correctly');
-  Check(not Rd.Error, 'Decoder no error');
+  Check(Bad = 0, Format('RC02 %d símbolos decodificados igual y ec_tell_frac idéntico (%d errores)', [NOPS, Bad]));
+  Check(D.Rng = E.Rng, 'RC03 rango final del decoder = encoder');
 end;
 
-// ===========================================================================
-// Main
-// ===========================================================================
+// V(N,K) with 64-bit arithmetic: V(N,K) = V(N-1,K) + V(N,K-1) + V(N-1,K-1)
+function PvqV64(N, K: Integer): Int64;
+var
+  V: array of array of Int64;
+  I, J: Integer;
+begin
+  SetLength(V, N + 1, K + 1);
+  for I := 0 to N do V[I][0] := 1;
+  for J := 1 to K do V[0][J] := 0;
+  for I := 1 to N do
+    for J := 1 to K do
+      V[I][J] := V[I - 1][J] + V[I][J - 1] + V[I - 1][J - 1];
+  Result := V[N][K];
+end;
+
+procedure TestPvq;
+var
+  N, K, T, I, J, Bad, Seed, Total: Integer;
+  Y, Y2: array of Integer;
+  Buf: array[0..255] of Byte;
+  E: TEcEnc;
+  D: TEcDec;
+begin
+  WriteLn('--- PV: PVQ (cwrs) ---');
+  Bad := 0;
+  Total := 0;
+  Seed := 7;
+  for N := 2 to 24 do
+    for K := 1 to 12 do
+      for T := 0 to 3 do
+      begin
+        SetLength(Y, N); SetLength(Y2, N);
+        for I := 0 to N - 1 do Y[I] := 0;
+        if PvqV64(N, K) > High(Cardinal) then Continue;
+        for I := 1 to K do
+        begin
+          Seed := Seed * 1103515245 + 12345;
+          J := (Seed shr 16) mod N;
+          if ((Seed shr 8) and 1) <> 0 then
+          begin
+            if Y[J] <= 0 then Dec(Y[J]) else Inc(Y[J]);
+          end
+          else if Y[J] >= 0 then Inc(Y[J]) else Dec(Y[J]);
+        end;
+        if PvqV64(N, K) > High(Cardinal) then Continue;   // CELT keeps V(N,K) < 2^32
+        EcEncInit(E, @Buf[0], SizeOf(Buf));
+        EncodePulses(@Y[0], N, K, E);
+        EcEncDone(E);
+        EcDecInit(D, @Buf[0], E.Storage);
+        DecodePulses(@Y2[0], N, K, D);
+        for I := 0 to N - 1 do
+          if Y[I] <> Y2[I] then begin Inc(Bad); Break; end;
+        Inc(Total);
+      end;
+  Check(Bad = 0, Format('PV01 %d vectores PVQ ida y vuelta (%d errores)', [Total, Bad]));
+end;
+
+procedure TestGoldenVectors;
+var
+  K: Integer;
+  P: TPackets;
+  R: TArray<Cardinal>;
+  Bytes: Integer;
+  Crc, RngX: Cardinal;
+begin
+  WriteLn('--- GV: vectores de referencia libopus 1.5.2 ---');
+  for K := 0 to High(CASES) do
+  begin
+    P := EncodeCase(CASES[K], R);
+    Summarize(P, R, Bytes, Crc, RngX);
+    Check((Length(P) = CASES[K].NPk) and (Bytes = CASES[K].Bytes) and (Crc = CASES[K].Crc) and
+      (RngX = CASES[K].RngXor),
+      Format('GV%.2d %s: %d paquetes, %d bytes, CRC %.8x, rng %.8x', [K + 1, CASES[K].Name,
+        Length(P), Bytes, Crc, RngX]));
+  end;
+end;
+
+procedure TestDecodeAndRates;
+var
+  K, I, N, Bad, Expected, Sz: Integer;
+  P: TPackets;
+  R: TArray<Cardinal>;
+  Dec: TOpusStreamDecoder;
+  Buf: TAudioBuffer;
+  AllSame: Boolean;
+begin
+  WriteLn('--- DE / CB: decodificación y CBR ---');
+  for K := 0 to High(CASES) do
+  begin
+    P := EncodeCase(CASES[K], R);
+    Dec := TOpusStreamDecoder.Create(CASES[K].Ch);
+    try
+      Bad := 0;
+      Expected := 48000 * CASES[K].Ms10 div 10000;
+      for I := 0 to High(P) do
+      begin
+        N := Dec.DecodePacket(@P[I][0], Length(P[I]), Buf);
+        if N <> Expected then Inc(Bad);
+      end;
+      Check(Bad = 0, Format('DE%.2d %s: %d paquetes decodificados con %d muestras', [K + 1,
+        CASES[K].Name, Length(P), Expected]));
+    finally
+      Dec.Free;
+    end;
+    if not CASES[K].Vbr then
+    begin
+      Sz := CASES[K].Bitrate * CASES[K].Ms10 div 80000;
+      AllSame := True;
+      for I := 0 to High(P) do
+        if Length(P[I]) <> Sz then AllSame := False;
+      Check(AllSame, Format('CB%.2d %s: todos los paquetes de %d bytes', [K + 1, CASES[K].Name, Sz]));
+    end;
+  end;
+end;
+
+procedure TestVbrRate;
+const
+  TARGETS: array[0..2] of Integer = (24000, 64000, 128000);
+var
+  T, I, Frame, N, Len, Total: Integer;
+  Pcm: TArray<SmallInt>;
+  Enc: TOpusEncoder;
+  Pkt: array[0..1499] of Byte;
+  Rate, Err: Double;
+begin
+  WriteLn('--- VB: bitrate medio en CVBR ---');
+  Pcm := MakeTestSignal(tsMusicLike, 48000, 2, 48000 * 10);
+  Frame := 960;
+  for T := 0 to High(TARGETS) do
+  begin
+    Enc := TOpusEncoder.Create(48000, 2, oaAudio);
+    try
+      Enc.Bitrate := TARGETS[T];
+      Enc.Complexity := 10;
+      N := Length(Pcm) div (2 * Frame);
+      Total := 0;
+      for I := 0 to N - 1 do
+      begin
+        Len := Enc.Encode(@Pcm[I * Frame * 2], Frame, @Pkt[0], 1276);
+        Inc(Total, Len);
+      end;
+      Rate := Total * 8.0 / (N * 0.02);
+      Err := 100 * (Rate - TARGETS[T]) / TARGETS[T];
+      Check(Abs(Err) <= 5, Format('VB%.2d objetivo %d bps -> %.0f bps (%.2f %%)', [T + 1, TARGETS[T], Rate, Err]));
+    finally
+      Enc.Free;
+    end;
+  end;
+end;
+
+procedure TestInterleaved;
+var
+  K, I, MaxN: Integer;
+  Sep, Int_: array[0..2] of TPackets;
+  R: TArray<Cardinal>;
+  Encs: array[0..2] of TOpusEncoder;
+  Pcms: array[0..2] of TArray<SmallInt>;
+  Rng: Cardinal;
+  Same: Boolean;
+  Idx: array[0..2] of Integer;
+  N: array[0..2] of Integer;
+begin
+  WriteLn('--- IN: instancias intercaladas ---');
+  Idx[0] := 1; Idx[1] := 2; Idx[2] := 5;   // casos B, C, F
+  for K := 0 to 2 do
+    Sep[K] := EncodeCase(CASES[Idx[K]], R);
+  for K := 0 to 2 do
+  begin
+    Encs[K] := NewEncoder(CASES[Idx[K]]);
+    Pcms[K] := MakeTestSignal(CASES[Idx[K]].Kind, CASES[Idx[K]].Fs, CASES[Idx[K]].Ch, CASES[Idx[K]].Samples);
+    N[K] := Length(Sep[K]);
+    SetLength(Int_[K], N[K]);
+  end;
+  try
+    MaxN := Max(N[0], Max(N[1], N[2]));
+    for I := 0 to MaxN - 1 do
+      for K := 0 to 2 do
+        if I < N[K] then
+          Int_[K][I] := EncodeOne(Encs[K], CASES[Idx[K]], Pcms[K], I, Rng);
+  finally
+    for K := 0 to 2 do Encs[K].Free;
+  end;
+  Same := True;
+  for K := 0 to 2 do
+    for I := 0 to N[K] - 1 do
+      if (Length(Sep[K][I]) <> Length(Int_[K][I])) or
+         ((Length(Sep[K][I]) > 0) and not CompareMem(@Sep[K][I][0], @Int_[K][I][0], Length(Sep[K][I]))) then
+        Same := False;
+  Check(Same, 'IN01 3 encoders intercalados = codificados por separado (byte a byte)');
+end;
+
+procedure TestOgg;
+const
+  NIN = 48000 + 1234;
+var
+  Pcm: TArray<SmallInt>;
+  Ms: TMemoryStream;
+  W: TOggOpusWriter;
+  D: TOpusDecoder;
+  Buf: TAudioBuffer;
+  Samples, Total: Integer;
+  Res: TAudioDecodeResult;
+begin
+  WriteLn('--- OG: Ogg Opus ---');
+  Pcm := MakeTestSignal(tsChirp, 48000, 2, NIN);
+  Ms := TMemoryStream.Create;
+  try
+    W := TOggOpusWriter.Create(Ms, 48000, 2, oaAudio, 200);
+    try
+      W.Encoder.Bitrate := 96000;
+      W.AddComment('TITLE=prueba');
+      W.WriteInt16(@Pcm[0], 1000);
+      W.WriteInt16(@Pcm[2000], NIN - 1000);
+      W.Finish;
+      Check(W.PreSkip = 312, Format('OG01 pre-skip = %d (lookahead 2,5 ms + 4 ms)', [W.PreSkip]));
+    finally
+      W.Free;
+    end;
+    Ms.Position := 0;
+    D := TOpusDecoder.Create(Ms);
+    try
+      Total := 0;
+      repeat
+        Res := D.Decode(Buf, Samples);
+        if Res = adrOK then Inc(Total, Samples);
+      until Res <> adrOK;
+      Check(D.PreSkip = 312, 'OG02 el decoder lee el pre-skip del OpusHead');
+      Check(Total = NIN, Format('OG03 muestras decodificadas = entrada (%d / %d)', [Total, NIN]));
+    finally
+      D.Free;
+    end;
+  finally
+    Ms.Free;
+  end;
+end;
+
+{$WARN SYMBOL_DEPRECATED OFF}
+procedure TestCompat;
+const
+  MSV: array[0..2] of Integer = (5, 10, 20);
+var
+  K, Len, N: Integer;
+  E: TOpusCeltEncoder;
+  Pcm: TArray<SmallInt>;
+  Pkt: array[0..1275] of Byte;
+  Dec: TOpusStreamDecoder;
+  Buf: TAudioBuffer;
+begin
+  WriteLn('--- CO: compatibilidad TOpusCeltEncoder ---');
+  for K := 0 to 2 do
+  begin
+    E := TOpusCeltEncoder.Create(1, 48000, MSV[K]);
+    Dec := TOpusStreamDecoder.Create(1);
+    try
+      Pcm := MakeTestSignal(tsChirp, 48000, 1, E.FrameSize);
+      Len := E.EncodeFrame(@Pcm[0], @Pkt[0], 160);
+      N := Dec.DecodePacket(@Pkt[0], Len, Buf);
+      Check((Len = 160) and (E.Config = 28 + E.LM) and (N = E.FrameSize),
+        Format('CO%.2d %d ms: %d bytes, config TOC %d, %d muestras', [K + 1, MSV[K], Len, E.Config, N]));
+    finally
+      E.Free;
+      Dec.Free;
+    end;
+  end;
+end;
+{$WARN SYMBOL_DEPRECATED ON}
+
+procedure TestCtls;
+var
+  Enc: TOpusEncoder;
+  Raised: Boolean;
+  Pcm: array[0..959] of SmallInt;
+  Pkt: array[0..1275] of Byte;
+begin
+  WriteLn('--- CT: CTLs y argumentos ---');
+  Raised := False;
+  try
+    TOpusEncoder.Create(44100, 1, oaAudio).Free;
+  except
+    Raised := True;
+  end;
+  Check(Raised, 'CT01 frecuencia no soportada -> excepción');
+  Enc := TOpusEncoder.Create(48000, 1, oaVoip);
+  try
+    Raised := False;
+    try Enc.Complexity := 11; except Raised := True; end;
+    Check(Raised, 'CT02 complejidad 11 -> excepción');
+    Raised := False;
+    try Enc.Bitrate := 0; except Raised := True; end;
+    Check(Raised, 'CT03 bitrate 0 -> excepción');
+    Enc.Bitrate := 100;
+    Check(Enc.Bitrate = 500, 'CT04 bitrate < 500 se ajusta a 500');
+    Check(Enc.Lookahead = 312, 'CT05 lookahead 48 kHz VoIP = 312');
+    FillChar(Pcm, SizeOf(Pcm), 0);
+    Check(Enc.Encode(@Pcm[0], 100, @Pkt[0], 1276) = OPUS_BAD_ARG, 'CT06 tamaño de trama inválido -> OPUS_BAD_ARG');
+    Check(Enc.Encode(@Pcm[0], 960, @Pkt[0], 1276) > 0, 'CT07 trama válida');
+  finally
+    Enc.Free;
+  end;
+end;
+
+procedure TestPad;
+var
+  Pkt, Pad: array[0..1275] of Byte;
+  Enc: TOpusEncoder;
+  Pcm: TArray<SmallInt>;
+  Len: Integer;
+  D1, D2: TOpusStreamDecoder;
+  B1, B2: TAudioBuffer;
+  N1, N2, I: Integer;
+  Same: Boolean;
+begin
+  WriteLn('--- PA: relleno de paquetes ---');
+  Pcm := MakeTestSignal(tsMusicLike, 48000, 1, 960);
+  Enc := TOpusEncoder.Create(48000, 1, oaAudio);
+  try
+    Len := Enc.Encode(@Pcm[0], 960, @Pkt[0], 1276);
+  finally
+    Enc.Free;
+  end;
+  Move(Pkt, Pad, Len);
+  Check(OpusPacketPad(@Pad[0], Len, Len + 300) = OPUS_OK, 'PA01 opus_packet_pad +300 bytes');
+  D1 := TOpusStreamDecoder.Create(1);
+  D2 := TOpusStreamDecoder.Create(1);
+  try
+    N1 := D1.DecodePacket(@Pkt[0], Len, B1);
+    N2 := D2.DecodePacket(@Pad[0], Len + 300, B2);
+    Same := (N1 = N2) and (N1 = 960);
+    if Same then
+      for I := 0 to N1 - 1 do
+        if B1[0][I] <> B2[0][I] then Same := False;
+    Check(Same, 'PA02 el paquete relleno decodifica igual que el original');
+  finally
+    D1.Free;
+    D2.Free;
+  end;
+end;
 
 begin
-  Passed := 0; Failed := 0;
-  WriteLn('=== Opus Encoder Tests — Phase 1 ===');
+  InitCrc32;
+  Passed := 0;
+  Failed := 0;
+  try
+    TestRangeCoder;
+    TestPvq;
+    TestGoldenVectors;
+    TestDecodeAndRates;
+    TestVbrRate;
+    TestInterleaved;
+    TestOgg;
+    TestCompat;
+    TestCtls;
+    TestPad;
+  except
+    on E: Exception do
+    begin
+      WriteLn('EXCEPCIÓN: ', E.ClassName, ': ', E.Message);
+      Inc(Failed);
+    end;
+  end;
   WriteLn;
-
-  WriteLn('--- OpusEncTypes ---');
-  TestE01_ConfigDefaults;
-  TestE02_ConfigMono8k;
-  TestE03_TOCConfigCeltFB20;
-  TestE04_TOCConfigSilkNB40;
-  TestE05_TOCConfigHybridSWB10;
-  TestE06_TOCConfigInvalid;
-  TestE07_TOCByte;
-  TestE08_TOCByteSilk;
-
-  WriteLn;
-  WriteLn('--- OpusRangeEncoder ---');
-  TestE09_ReInitState;
-  TestE10_TellAfterInit;
-  TestE11_FlushEmpty;
-  TestE12_EncodeICDFSingleSymbol;
-  TestE13_ICDFRoundTrip2Sym;
-  TestE14_ICDFRoundTrip4Sym;
-  TestE15_ICDFMultiSymbol;
-  TestE16_UIntSmall;
-  TestE17_UIntZero;
-  TestE18_UIntMax;
-  TestE19_UIntLarge;
-  TestE20_BitFalse;
-  TestE21_BitTrue;
-  TestE22_RawBits;
-  TestE23_MixedICDFAndRaw;
-  TestE24_TellGrows;
-  TestE25_StressUInt16;
-
-  WriteLn;
-  WriteLn(Format('Results: %d passed, %d failed', [Passed, Failed]));
-  if Failed > 0 then Halt(1);
+  WriteLn(Format('Resultado: %d pasan, %d fallan', [Passed, Failed]));
+  if Failed > 0 then ExitCode := 1;
 end.

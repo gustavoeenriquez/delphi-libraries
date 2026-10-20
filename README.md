@@ -45,6 +45,7 @@ Everything compiles with stock Delphi on Windows, Linux, and any RTL-supported p
 | `audio/vorbis-decoder` | ✅ | — | Ogg Vorbis I — Floor 0/1, all residue types, full VQ |
 | `audio/opus-decoder` | ✅ | — | SILK + CELT + Hybrid, 48 kHz, mono/stereo (RFC 6716) |
 | `audio/mp3-decoder` | ✅ | — | MPEG 1/2/2.5, Layer III, 8–320 kbps, all sample rates |
+| `audio/g722-codec` | ✅ | ✅ | ITU-T G.722 SB-ADPCM, 16 kHz, 64/56/48 kbit/s, bit-exact vs ITU test vectors |
 | `audio/audio-codec` | ✅ | — | Unified `IAudioDecoder` factory (auto-detect format) |
 | `audio/mp3-encoder` | 🚧 | 🚧 | Architecture ready, implementation in progress |
 
@@ -61,7 +62,8 @@ Everything compiles with stock Delphi on Windows, Linux, and any RTL-supported p
 | OpusDecoderTests | 85 ✅ |
 | MP3DecoderTests | 66 ✅ |
 | AudioCodecTests | 30 ✅ |
-| **Total** | **676 ✅** |
+| G722Tests | 27 ✅ |
+| **Total** | **703 ✅** |
 
 ---
 
@@ -276,6 +278,7 @@ delphi-libraries/
 │   ├── vorbis-decoder/    #   Ogg Vorbis I decoder
 │   ├── opus-decoder/      #   Ogg Opus decoder (SILK + CELT)
 │   ├── mp3-decoder/       #   MP3 Layer III decoder (MPEG 1/2/2.5)
+│   ├── g722-codec/        #   ITU-T G.722 encoder + decoder (VoIP wideband)
 │   ├── mp3-encoder/       #   MP3 encoder (work in progress)
 │   └── audio-codec/       #   Unified IAudioDecoder API + factory
 ├── pdf/                   # PDF library

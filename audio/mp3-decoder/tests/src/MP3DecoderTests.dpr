@@ -573,7 +573,7 @@ begin
 
   var SamplePath := ExpandFileName(
     ExtractFilePath(ParamStr(0)) + '..' + PathDelim + '..' + PathDelim + '..' + PathDelim +
-    '..' + PathDelim + 'samples' + PathDelim + 'file_7461.mp3');
+    '..' + PathDelim + 'samples' + PathDelim + 'synth_24k_mono_128k.mp3');
 
   TestBitStream;
   TestHdrValid;

@@ -61,7 +61,6 @@ type
     FRenderH:          Single;
     // Page-flip + scale matrix (PDF → screen)
     FPageFlip:         TMatrix;
-    FOrgX, FOrgY:      Single;   // lower-left corner of the CropBox (PDF points)
     FFormDepth:        Integer;  // nesting of form XObjects being drawn
     // Accumulates glyph outlines (device space) during a BT..ET block for clip modes
     FTextClipBuilder:  ISkPathBuilder;
@@ -282,28 +281,17 @@ begin
   Result.m31 := AM.E;  Result.m32 := AM.F;  Result.m33 := 1;
 end;
 
-// Matrix for placing text glyphs on screen (corrects Y-axis flip):
-//
-//   Result = [[A*sx,  B*sy, 0],
-//              [C*sx,  D*sy, 0],
-//              [E*sx, H-F*sy, 1]]
-//
-// This is equivalent to:  PDFMatrix_skia * TextFlip * PageFlip
-// where TextFlip = [[1,0,0],[0,-1,0],[0,2F,1]]
-//
-// The key property: m22 = D*sy > 0, so Skia text ascenders (-Y local)
-// map to smaller screen Y (toward screen top) = visually "upward". ✓
+// Matrix for placing text glyphs on screen. Skia glyphs grow downward (y
+// down) while glyph space grows upward, so a vertical flip goes first:
+//   Result = TextFlip * GlyphMatrix * PageFlip,  TextFlip = [[1,0],[0,-1]]
+// PageFlip carries the page rotation and the CropBox origin.
 function TPDFSkiaRenderer.TextMatrix(const AGM: TPDFMatrix): TMatrix;
+var
+  Flip: TMatrix;
 begin
-  Result.m11 := AGM.A * FScaleX;
-  Result.m12 := AGM.B * FScaleY;
-  Result.m13 := 0;
-  Result.m21 := AGM.C * FScaleX;
-  Result.m22 := AGM.D * FScaleY;
-  Result.m23 := 0;
-  Result.m31 := (AGM.E - FOrgX) * FScaleX;
-  Result.m32 := FRenderH - (AGM.F - FOrgY) * FScaleY;
-  Result.m33 := 1;
+  Flip := TMatrix.Identity;
+  Flip.m22 := -1;
+  Result := Flip * PDFMatrixToSkia(AGM) * FPageFlip;
 end;
 
 // Matrix for placing image XObjects on screen.
@@ -414,7 +402,8 @@ begin
   end
   else
     APaint.Color := PDFColorToAlpha(AState.StrokeColor, AState.StrokeAlpha);
-  APaint.StrokeWidth := AState.LineWidth * Max(FScaleX, FScaleY);  // scale to pixels
+  // in user space: the canvas matrix (CTM x page) scales it to pixels
+  APaint.StrokeWidth := AState.LineWidth;
   APaint.StrokeCap   := PDFLineCapToSkia(AState.LineCap);
   APaint.StrokeJoin  := PDFLineJoinToSkia(AState.LineJoin);
   APaint.StrokeMiter := AState.MiterLimit;
@@ -425,7 +414,7 @@ begin
   begin
     SetLength(Intervals, Length(AState.Dash.Lengths));
     for I := 0 to High(AState.Dash.Lengths) do
-      Intervals[I] := AState.Dash.Lengths[I] * Max(FScaleX, FScaleY);
+      Intervals[I] := AState.Dash.Lengths[I];
     APaint.PathEffect := TSkPathEffect.MakeDash(Intervals, AState.Dash.Phase);
   end;
 end;
@@ -643,6 +632,9 @@ begin
   // Font size = 1.0 because all scaling is in the GlyphMatrix
   Font     := TSkFont.Create(Typeface, 1.0, 1.0, 0);
   Font.Subpixel := FOptions.SubpixelText;
+  // size 1 with the scale in the matrix: hinting at 1 px distorts the glyphs
+  Font.Hinting := TSkFontHinting.None;
+  Font.LinearMetrics := True;
   if FOptions.Antialias then
     Font.Edging := TSkFontEdging.AntiAlias
   else
@@ -1363,6 +1355,50 @@ end;
 // RenderPage
 // =========================================================================
 
+// PDF user space → render pixels for a page shown with /Rotate ARotation
+// (clockwise, a multiple of 90). With u = x - CropBox.LLX, v = y - CropBox.LLY
+// and cw x ch the CropBox size, the displayed page coordinates are
+//     0: (u, ch - v)    90: (v, u)    180: (cw - u, v)    270: (ch - v, cw - u)
+// scaled by (ASX, ASY) — the render size over the displayed page size.
+function PageMatrix(const ACrop: TPDFRect; ARotation: Integer; ASX, ASY: Single): TMatrix;
+var
+  OX, OY, CW, CH: Single;
+begin
+  OX := ACrop.LLX;
+  OY := ACrop.LLY;
+  CW := ACrop.Width;
+  CH := ACrop.Height;
+  Result := TMatrix.Identity;
+  case ARotation of
+    90:
+    begin
+      Result.m11 := 0;    Result.m12 := ASY;
+      Result.m21 := ASX;  Result.m22 := 0;
+      Result.m31 := -OY * ASX;
+      Result.m32 := -OX * ASY;
+    end;
+    180:
+    begin
+      Result.m11 := -ASX; Result.m12 := 0;
+      Result.m21 := 0;    Result.m22 := ASY;
+      Result.m31 := (CW + OX) * ASX;
+      Result.m32 := -OY * ASY;
+    end;
+    270:
+    begin
+      Result.m11 := 0;    Result.m12 := -ASY;
+      Result.m21 := -ASX; Result.m22 := 0;
+      Result.m31 := (CH + OY) * ASX;
+      Result.m32 := (CW + OX) * ASY;
+    end;
+  else
+    Result.m11 := ASX;  Result.m12 := 0;
+    Result.m21 := 0;    Result.m22 := -ASY;
+    Result.m31 := -OX * ASX;
+    Result.m32 := (CH + OY) * ASY;
+  end;
+end;
+
 procedure TPDFSkiaRenderer.RenderPage(APage: TPDFPage; ACanvas: ISkCanvas;
   ARenderWidth, ARenderHeight: Single);
 var
@@ -1381,16 +1417,8 @@ begin
   FScaleY  := ARenderHeight / Max(FPageH, 1);
   // the CropBox does not always start at (0, 0)
   var Crop := APage.CropBox.Normalize;
-  FOrgX    := Crop.LLX;
-  FOrgY    := Crop.LLY;
 
-  // Page-flip + scale matrix:
-  //   (x,y) PDF → ((x - orgX)*sx, renderH - (y - orgY)*sy) screen
-  FPageFlip.m11 := FScaleX;  FPageFlip.m12 := 0;        FPageFlip.m13 := 0;
-  FPageFlip.m21 := 0;        FPageFlip.m22 := -FScaleY; FPageFlip.m23 := 0;
-  FPageFlip.m31 := -FOrgX * FScaleX;
-  FPageFlip.m32 := FRenderH + FOrgY * FScaleY;
-  FPageFlip.m33 := 1;
+  FPageFlip := PageMatrix(Crop, APage.Rotation, FScaleX, FScaleY);
 
   // Fill background
   ACanvas.DrawColor(FOptions.BackgroundColor, TSkBlendMode.Src);

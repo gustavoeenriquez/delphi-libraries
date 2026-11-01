@@ -333,7 +333,13 @@ begin
     begin
       if not RelsMap.TryGetValue(SE.RId, Target) then Continue;
       if Target = '' then Continue;
-      FullPath := 'xl/' + Target;
+      // Relativa a xl/ ("worksheets/sheet1.xml", Excel) o absoluta en el
+      // paquete ("/xl/worksheets/sheet1.xml", openpyxl): con la segunda
+      // quedaba "xl//xl/..." y el libro salia sin contenido
+      if Target.StartsWith('/') then
+        FullPath := Copy(Target, 2, MaxInt)
+      else
+        FullPath := 'xl/' + Target;
 
       if SB.Length > 0 then SB.AppendLine;
       SB.AppendLine('## ' + SE.Name);

@@ -77,6 +77,19 @@ type
     procedure SetPageContent(APageDict: TPDFDictionary;
                 const AContentBytes: TBytes);
 
+    // ---- Generic object access (used by uPDF.SignatureWriter) ----
+
+    // Add a new indirect object; the updater takes ownership. Returns its number.
+    function  AddObject(AObj: TPDFObject): Integer;
+
+    // Replace an existing indirect object (by number) with AObj in the update.
+    // The updater takes ownership. Typical use: a Clone of the catalog or of a
+    // page with new entries.
+    procedure ReplaceObject(ANumber: Integer; AObj: TPDFObject);
+
+    // The object already queued for ANumber in this update (nil if none).
+    function  ChangedObject(ANumber: Integer): TPDFObject;
+
     // ---- Save ----
 
     // Write the original bytes followed by the incremental update section.
@@ -257,6 +270,29 @@ begin
 end;
 
 // ============================================================================
+// Generic object access
+// ============================================================================
+
+function TPDFIncrementalUpdater.AddObject(AObj: TPDFObject): Integer;
+begin
+  Result := AllocObjNum;
+  FChanged.AddOrSetValue(Result, AObj);
+end;
+
+procedure TPDFIncrementalUpdater.ReplaceObject(ANumber: Integer; AObj: TPDFObject);
+begin
+  if ANumber <= 0 then
+    raise EPDFError.Create('ReplaceObject: invalid object number');
+  FChanged.AddOrSetValue(ANumber, AObj);
+end;
+
+function TPDFIncrementalUpdater.ChangedObject(ANumber: Integer): TPDFObject;
+begin
+  if not FChanged.TryGetValue(ANumber, Result) then
+    Result := nil;
+end;
+
+// ============================================================================
 // SaveToStream / SaveToFile
 // ============================================================================
 
@@ -278,6 +314,10 @@ begin
     raise EPDFError.Create('Cannot save incrementally: startxref offset unknown');
 
   Opts   := TPDFWriteOptions.Default;
+  // same kind of cross-reference as the last section of the source
+  Opts.UseXRefStream := not ((FStartXRef + 4 <= Length(FSourceBytes)) and
+    (FSourceBytes[FStartXRef] = Ord('x')) and (FSourceBytes[FStartXRef + 1] = Ord('r')) and
+    (FSourceBytes[FStartXRef + 2] = Ord('e')) and (FSourceBytes[FStartXRef + 3] = Ord('f')));
   Writer := TPDFWriter.Create(AOut, Opts);
   try
     Writer.WriteIncremental(

@@ -159,6 +159,9 @@ type
     procedure SetContent(const ABytes: TBytes);
 
     property  PageIndex: Integer read FPageIndex;
+    // object number of the page in the source file (0 = created via AddPage);
+    // Dict is a merged copy with inherited attributes, this is the original
+    property  OrigObjNum: Integer read FOrigObjNum;
     property  Document:  TPDFDocument read FDocument;
   end;
 

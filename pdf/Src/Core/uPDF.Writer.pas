@@ -94,6 +94,9 @@ type
     procedure WriteIncremental(AExistingSize: Int64; APrevXRef: Int64;
       AChanged: TDictionary<Integer, TPDFObject>;
       ATrailerBase: TPDFDictionary);
+    // incremental section with an XRef stream (used when UseXRefStream)
+    procedure WriteIncrementalXRefStream(const ANums: TArray<Integer>;
+      APrevXRef: Int64; ATrailerBase: TPDFDictionary);
 
     // Allocate the next object number (for building object trees)
     property  NextObjNum: Integer read FNextObjNum;
@@ -1090,6 +1093,93 @@ begin
   WriteEOF;
 end;
 
+procedure TPDFWriter.WriteIncrementalXRefStream(const ANums: TArray<Integer>;
+  APrevXRef: Int64; ATrailerBase: TPDFDictionary);
+// ISO 32000-1 §7.5.8: an XRef stream for the incremental section only, with
+// one /Index subsection per changed object plus the stream object itself.
+// W = [1 8 2], uncompressed.
+var
+  XRefNum: Integer;
+  Data: TBytes;
+  Pos: Integer;
+  Dict: TPDFDictionary;
+  WArr, IdxArr: TPDFArray;
+
+  procedure Field(V: Int64; Width: Integer);
+  var I: Integer;
+  begin
+    for I := Width - 1 downto 0 do
+    begin
+      Data[Pos + I] := V and $FF;
+      V := V shr 8;
+    end;
+    Inc(Pos, Width);
+  end;
+
+begin
+  XRefNum := ATrailerBase.GetAsInteger('Size');
+  for var N in ANums do
+    if N >= XRefNum then XRefNum := N + 1;
+  FXRefOffset := CurrentOffset;
+  FOffsets.AddOrSetValue(XRefNum, FXRefOffset);
+  SetLength(Data, (Length(ANums) + 1) * 11);
+  Pos := 0;
+  for var N in ANums do
+  begin
+    var Off: Int64;
+    FOffsets.TryGetValue(N, Off);
+    Field(1, 1); Field(Off, 8); Field(0, 2);
+  end;
+  Field(1, 1); Field(FXRefOffset, 8); Field(0, 2);
+
+  Dict := TPDFDictionary.Create;
+  try
+    Dict.SetValue('Type', TPDFName.Create('XRef'));
+    Dict.SetValue('Size', TPDFInteger.Create(XRefNum + 1));
+    WArr := TPDFArray.Create;
+    WArr.Add(TPDFInteger.Create(1));
+    WArr.Add(TPDFInteger.Create(8));
+    WArr.Add(TPDFInteger.Create(2));
+    Dict.SetValue('W', WArr);
+    IdxArr := TPDFArray.Create;
+    for var N in ANums do
+    begin
+      IdxArr.Add(TPDFInteger.Create(N));
+      IdxArr.Add(TPDFInteger.Create(1));
+    end;
+    IdxArr.Add(TPDFInteger.Create(XRefNum));
+    IdxArr.Add(TPDFInteger.Create(1));
+    Dict.SetValue('Index', IdxArr);
+    Dict.SetValue('Prev', TPDFInteger.Create(APrevXRef));
+    for var Key in ['Root', 'Info', 'ID'] do
+    begin
+      var V := ATrailerBase.RawGet(Key);
+      if V <> nil then
+        Dict.SetValue(Key, V.Clone);
+    end;
+    Dict.SetValue('Length', TPDFInteger.Create(Length(Data)));
+    WriteStr(Format('%d 0 obj', [XRefNum]));
+    WriteEOL;
+    TPDFObjectSerializer.WriteDict(Dict, FOut);
+    WriteEOL;
+    WriteStr('stream');
+    WriteEOL;
+    WriteBytes(Data);
+    WriteEOL;
+    WriteStr('endstream');
+    WriteEOL;
+    WriteStr('endobj');
+    WriteEOL;
+  finally
+    Dict.Free;
+  end;
+  WriteStr('startxref');
+  WriteEOL;
+  WriteStr(IntToStr(FXRefOffset));
+  WriteEOL;
+  WriteEOF;
+end;
+
 procedure TPDFWriter.WriteIncremental(AExistingSize: Int64;
   APrevXRef: Int64; AChanged: TDictionary<Integer, TPDFObject>;
   ATrailerBase: TPDFDictionary);
@@ -1106,6 +1196,15 @@ begin
 
   for var N in SortedNums do
     WriteIndirectObject(N, 0, AChanged[N]);
+
+  // the source ends in an XRef stream: the update uses one too (a classic
+  // table after an XRef stream makes a "hybrid" file that strict validators,
+  // like signature validators, refuse)
+  if FOptions.UseXRefStream then
+  begin
+    WriteIncrementalXRefStream(SortedNums, APrevXRef, ATrailerBase);
+    Exit;
+  end;
 
   // New XRef section covering only changed objects
   FXRefOffset := CurrentOffset;
@@ -1138,6 +1237,11 @@ begin
     var InfoObj := ATrailerBase.RawGet('Info');
     if InfoObj <> nil then
       UpdateTrailer.SetValue('Info', InfoObj.Clone);
+    // the file identifier survives the update (PDF/A and signature
+    // validators expect it in the last trailer)
+    var IdObj := ATrailerBase.RawGet('ID');
+    if IdObj <> nil then
+      UpdateTrailer.SetValue('ID', IdObj.Clone);
 
     WriteTrailer(UpdateTrailer, FXRefOffset);
   finally

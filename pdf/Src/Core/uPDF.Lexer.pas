@@ -689,9 +689,13 @@ begin
     Inc(FPosition, Read);
     FBufSize := 0;
     FBufPos  := 0;
+    // Archivo truncado o /Length mayor que lo que queda: se devuelve lo que
+    // hay (como hacen MuPDF y pdf.js) en vez de abortar TODO el documento.
+    // Un PDF con un solo stream cortado al final dejaba sin procesar sus
+    // 82 páginas (lote PGN, 2026-11-11). El decodificador que consuma estos
+    // bytes falla de forma controlada si el contenido quedó incompleto.
     if Read < Remaining then
-      raise EPDFStreamError.CreateFmt(
-        'Unexpected EOF reading %d bytes (got %d)', [ACount, OutPos + Read]);
+      SetLength(Result, OutPos + Read);
   end;
 end;
 

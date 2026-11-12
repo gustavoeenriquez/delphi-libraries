@@ -183,6 +183,39 @@ oye. Solo en VBR: en CBR los gránulos silenciosos ya reciben bits sobrantes y b
 el umbral les quita reservorio a los transitorios (castañuelas −0.39 → −0.77 a
 96 kbps).
 
+## ABR (2026-11-12)
+
+`EncEnableABR(Enc, Kbps)` (32–320) o `EncodeWAVFileABR` / `EncodeWAVStreamABR`:
+bitrate medio. Cada trama toma su propio bitrate, como en VBR, y el archivo promedia
+el objetivo. Se apoya en el modo calidad del VBR, con el ruido permitido (dB sobre el
+umbral) fijado trama a trama por un controlador:
+
+- **Punto de partida**: interpolado de la escala de calidades VBR (128 kbps estéreo
+  = el ruido de V5, 192 = V2...; mono como un estéreo de 4/3 su tasa y 1 dB más
+  estricto, como en VBR). En música estéreo arranca cerca de lo correcto.
+- **Modelo**: medido con ruido fijo, los bits del modo calidad se reducen a la mitad
+  cada ~9 dB de ruido (estéreo y mono). Los bits de cada trama se refieren al punto
+  de partida con ese modelo y se promedian (~40 tramas); la trama siguiente recibe
+  el ruido que lleva esa media al objetivo. Converge en pocas tramas aunque el
+  punto de partida esté 7 dB lejos (pasa con señales sintéticas).
+- **Tramas en el piso** (32 kbps: silencio, pausas): no siguen el modelo y no lo
+  alimentan. Si vienen sueltas dentro de la música, cuentan como fracción de la
+  ventana (hasta 60 %) y las demás tramas llenan lo que queda del objetivo; en
+  rachas de más de 8 tramas (silencio) esa fracción se congela. Sin esto el ruido
+  bajaba durante los silencios hasta 1 dB y la música siguiente salía a 320 kbps.
+- **Deuda**: los bits gastados de más o de menos corrigen el objetivo repartidos en
+  100 tramas, con tope ±50 tramas de bits; así la media del archivo cae en el
+  objetivo, y un silencio largo solo acumula un ahorro limitado para después.
+- Rango de corrección −12…+16 dB alrededor del punto de partida.
+
+Cabecera Xing como en VBR; la extensión LAME declara el método ABR (2) y el
+objetivo en kbps (byte +20; 255 = 255 o más).
+
+Precisión en la fase 22 (señal sintética de 6 s con demanda variable): estéreo 64–256
+kbps entre −2.3 % y +1.5 % del objetivo, mono 64–128 entre −1.6 % y −0.2 %. Falta la
+calidad PEAQ frente a `lame --abr` sobre las ocho piezas: hay que medirla en el PC
+(aquí no hay ffmpeg, LAME ni las piezas).
+
 ## Corrección del joint stereo (2026-10-20)
 
 Los umbrales de M/S se calculaban sobre M y S y se usaba el **mayor** para ambos:
@@ -252,6 +285,11 @@ until Fin;
 Bytes := EncFlush(Enc);             // frames retenidos por el reservorio
 ```
 
+VBR y ABR: `EncEnableVBR(Enc, Calidad)` o `EncEnableABR(Enc, Kbps)` tras el
+`EncInit*` (activan el reservorio; `Cfg.BrIdx` se ignora). Para archivos con
+cabecera Xing: `EncodeWAVFileVBR('in.wav', 'out.mp3', 2)`,
+`EncodeWAVFileABR('in.wav', 'out.mp3', 160)`.
+
 `EncSetLowpass(Enc, Hz)` cambia el paso bajo (0 = ninguno).
 `EncSetWindowSwitching(Enc, Modo)`: 0 = automático (por defecto), 1 = solo bloques
 largos, 2 = solo bloques cortos (pruebas); `EncDefaultWindowSwitching` fija el modo
@@ -262,13 +300,15 @@ así que los decodificadores gapless (ffmpeg, LAME) recuperan la duración exact
 
 ## Tests
 
-`tests/src/TestMP3EncPhase1..21.dpr` (un programa por fase, 864 checks; la 19
+`tests/src/TestMP3EncPhase1..22.dpr` (un programa por fase, 884 checks; la 19
 cubre los modelos psicoacústicos (MDCT y FFT), el bucle (también en modo calidad), el reservorio, MS automático y round trips
 decodificados con `mp3-decoder`; la 20, bloques cortos (round trips solo cortos y
 automáticos, secuencia legal de ventanas, pre-eco frente a solo bloques largos,
 bucle corto, también en modo calidad) y la conservación del canal S en M/S; la 21, VBR (tasas por trama,
 orden de tamaños por calidad, reservorio, round trips y cabecera Xing con tabla de
-búsqueda y datos gapless). `../mp3-roundtrip` decodifica cualquier MP3
+búsqueda y datos gapless); la 22, ABR (punto de partida, bitrate medio en el objetivo
+en mono y estéreo de 64 a 256 kbps, controlador acotado con un tramo silencioso,
+round trip y cabecera con método y objetivo ABR). `../mp3-roundtrip` decodifica cualquier MP3
 con `audio-codec` y lo vuelve a codificar.
 
 ## Historia de los errores corregidos (2026-10-13)

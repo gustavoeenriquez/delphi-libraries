@@ -93,9 +93,18 @@ delay 528 + padding y la duración queda exacta).
   −0.08 (LAME −1.46 / −0.73 / −0.10); VBR recalibrado (mono −1 dB), a la par de
   LAME de V0 a V9. Fase 19: LP24.
 
+## 2026-11-12
+
+- ABR (`EncEnableABR`, `EncodeWAVFileABR` / `EncodeWAVStreamABR`): modo calidad
+  del VBR con el ruido fijado por trama por un controlador (modelo de ~9 dB por
+  mitad de bits, media de ~40 tramas, tramas en el piso de 32 kbps aparte, deuda
+  de bits acotada). Cabecera Xing y extensión LAME con método ABR y objetivo.
+  Fase 22 (20 checks): la media cae a ±2.5 % del objetivo de 64 a 256 kbps.
+  Pendiente: medir con PEAQ frente a `lame --abr` en el PC.
+
 ## Pendiente / ideas
 
-- ABR (bitrate medio objetivo).
+- ABR: validación perceptual (PEAQ) frente a LAME en las ocho piezas.
 - La decisión automática M/S por bits estimados no siempre elige el modo de
   mejor SNR (en ruido sintético ancho elige L/R aunque M/S conserva mejor S).
 - Intensity stereo; MPEG-2/2.5 (tasas bajas de muestreo).

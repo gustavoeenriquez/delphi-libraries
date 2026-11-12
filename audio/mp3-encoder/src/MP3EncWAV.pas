@@ -121,6 +121,11 @@ function EncodeWAVStreamLame(AWavIn, AMP3Out: TStream;
   Returns the number of audio frames or -1 on error. }
 function EncodeWAVStreamVBR(AWavIn, AMP3Out: TStream; AQuality: Integer): Integer;
 
+{ Average bitrate of AKbps (32..320): each frame takes its own bitrate, and
+  the file averages AKbps.  Xing header and LAME extension (method ABR) as
+  in EncodeWAVStreamVBR.  Returns the audio frame count, or -1. }
+function EncodeWAVStreamABR(AWavIn, AMP3Out: TStream; AKbps: Integer): Integer;
+
 implementation
 
 // ---------------------------------------------------------------------------
@@ -390,7 +395,7 @@ end;
 // ---------------------------------------------------------------------------
 
 function EncodeWAVStreamEx(AWavIn, AMP3Out: TStream;
-  ABrIdx, APadding: Byte; AVbrQuality: Integer): Integer; forward;
+  ABrIdx, APadding: Byte; AVbrQuality: Integer; AAbrKbps: Integer = 0): Integer; forward;
 
 function EncodeWAVStream(AWavIn, AMP3Out: TStream;
   ABrIdx, APadding: Byte): Integer;
@@ -398,9 +403,9 @@ begin
   Result := EncodeWAVStreamEx(AWavIn, AMP3Out, ABrIdx, APadding, -1);
 end;
 
-{ AVbrQuality < 0: CBR at ABrIdx; 0..9: VBR }
+{ AVbrQuality < 0: CBR at ABrIdx; 0..9: VBR.  AAbrKbps > 0: ABR (overrides both) }
 function EncodeWAVStreamEx(AWavIn, AMP3Out: TStream;
-  ABrIdx, APadding: Byte; AVbrQuality: Integer): Integer;
+  ABrIdx, APadding: Byte; AVbrQuality: Integer; AAbrKbps: Integer): Integer;
 var
   Reader : TWAVReader;
   Enc    : TMP3Encoder;
@@ -425,7 +430,8 @@ begin
   if Reader.Header.Channels >= 2 then begin
     EncInitStereo(Enc, Cfg);
     EncEnableReservoir(Enc, True);
-    if AVbrQuality >= 0 then EncEnableVBR(Enc, AVbrQuality);
+    if AAbrKbps > 0 then EncEnableABR(Enc, AAbrKbps)
+    else if AVbrQuality >= 0 then EncEnableVBR(Enc, AVbrQuality);
     Result := 0;
     while WAVReaderReadFrameStereo(Reader, PCM_L, PCM_R, cnt) do begin
       Frame := EncodeFrameAuto(Enc, PCM_L, PCM_R);
@@ -442,7 +448,8 @@ begin
   end else begin
     EncInit(Enc, Cfg);
     EncEnableReservoir(Enc, True);
-    if AVbrQuality >= 0 then EncEnableVBR(Enc, AVbrQuality);
+    if AAbrKbps > 0 then EncEnableABR(Enc, AAbrKbps)
+    else if AVbrQuality >= 0 then EncEnableVBR(Enc, AVbrQuality);
     Result := 0;
     while WAVReaderReadFrame(Reader, PCM, cnt) do begin
       Frame := EncodeFrame(Enc, PCM);
@@ -678,7 +685,9 @@ begin
   end;
 end;
 
-function EncodeWAVStreamVBR(AWavIn, AMP3Out: TStream; AQuality: Integer): Integer;
+{ VBR (AAbrKbps = 0, quality AQuality) or ABR (AAbrKbps > 0) file with a
+  Xing header, seek table and LAME extension }
+function EncodeWAVStreamXing(AWavIn, AMP3Out: TStream; AQuality, AAbrKbps: Integer): Integer;
 var
   Reader      : TWAVReader;
   Cfg         : TEncConfig;
@@ -702,7 +711,7 @@ begin
   AWavIn.Position := 0;
   Temp := TMemoryStream.Create;
   try
-    Result := EncodeWAVStreamEx(AWavIn, Temp, 9, 0, AQuality);
+    Result := EncodeWAVStreamEx(AWavIn, Temp, 9, 0, AQuality, AAbrKbps);
     if Result < 0 then Exit;
     encPadding := Result * 1152 - totalSamples - ENC_DELAY;
     if encPadding < 0 then encPadding := 0;
@@ -715,7 +724,7 @@ begin
                      or XING_FLAG_TOC   or XING_FLAG_QUALITY;
     XTag.FrameCount := Length(ofs);
     XTag.FileSize   := Temp.Size;
-    XTag.Quality    := AQuality * 10;
+    if AAbrKbps > 0 then XTag.Quality := 50 else XTag.Quality := AQuality * 10;
     for i := 0 to 99 do
       if Length(ofs) > 0 then begin
         f := (i * Length(ofs)) div 100;
@@ -725,7 +734,11 @@ begin
     LTag                := Default(TLameTag);
     LTag.EncoderDelay   := ENC_DELAY;
     LTag.EncoderPadding := encPadding;
-    LTag.VBRMethod      := LAME_VBR_VBR;
+    if AAbrKbps > 0 then begin
+      LTag.VBRMethod := LAME_VBR_ABR;
+      LTag.AbrKbps   := Min(EnsureRange(AAbrKbps, 32, 320), 255);
+    end else
+      LTag.VBRMethod := LAME_VBR_VBR;
     LTag.MusicLength    := Temp.Size;
 
     if channels > 2 then channels := 2;
@@ -735,6 +748,16 @@ begin
   finally
     Temp.Free;
   end;
+end;
+
+function EncodeWAVStreamVBR(AWavIn, AMP3Out: TStream; AQuality: Integer): Integer;
+begin
+  Result := EncodeWAVStreamXing(AWavIn, AMP3Out, AQuality, 0);
+end;
+
+function EncodeWAVStreamABR(AWavIn, AMP3Out: TStream; AKbps: Integer): Integer;
+begin
+  Result := EncodeWAVStreamXing(AWavIn, AMP3Out, 5, EnsureRange(AKbps, 32, 320));
 end;
 
 end.

@@ -53,6 +53,25 @@
     those bits.  When even 320 kbps is not enough the frame is coded as CBR
     at 320 kbps.
 
+  ABR (EncEnableABR)
+    Average bitrate: the frames are coded in the same quality mode as VBR,
+    with the allowed noise (dB) set per frame.  Measured on synthetic
+    signals, the bits of the quality mode halve every ABR_SLOPE_DB (~9 dB)
+    of noise; with that model each frame's bits are referred to the
+    starting point (interpolated from the VBR quality scale) and averaged
+    over ~ABR_AVG_FRAMES frames, and the next frame gets the noise that
+    brings that average onto the target.  Frames at the lowest bitrate do
+    not follow the model and leave that mean as it was.  Short runs of them
+    inside the music count as a share of the window (at most 60 %), and the
+    other frames fill what is left of the target; in longer runs (silence,
+    more than ABR_FLOOR_RUN frames) that share holds too, so the noise does
+    not fall through a quiet stretch until the music after it lands at
+    320 kbps.  The target is corrected by
+    the bit debt (bits spent over it so far) spread over ABR_DEBT_FRAMES
+    frames and bounded (+-50 %), so the file mean lands on the
+    target and a quiet stretch banks a limited budget for what follows
+    (files with long silences end below the target).
+
   PCM input: 1152 samples per channel per call, oldest first, +-32768 scale.
   Encoder delay: ENC_DELAY (1104) samples (polyphase + MDCT overlap + one
   granule of look-ahead for the window switching).
@@ -130,6 +149,19 @@ type
     AthAdapt  : Boolean;   { absolute threshold lowered in quiet granules (VBR) }
     PrevXmin1, PrevXmin2: array[0..1] of TPsyBandArr; { VBR pre-echo control }
     LastBrIdx : Integer;   { bitrate index of the last encoded frame }
+    { ABR (on top of the VBR quality mode) }
+    Abr       : Boolean;
+    AbrKbps   : Integer;   { target average bitrate }
+    AbrBaseDb : Double;    { starting noise offset for the target (dB) }
+    AbrFrameBits: Double;  { target bits per frame }
+    AbrDebt   : Double;    { bits spent over the target so far (bounded) }
+    AbrAvg    : Double;    { mean frame bits referred to AbrBaseDb (frames above the floor) }
+    AbrAvgN   : Integer;   { frames in AbrAvg so far }
+    AbrFloor  : Double;    { share of recent frames at the lowest bitrate }
+    AbrFloorN : Integer;   { frames in AbrFloor so far }
+    AbrFloorRun: Integer;  { consecutive frames at the lowest bitrate }
+    AbrFrames : Integer;   { frames coded so far }
+    AbrNoiseDb: Double;    { noise offset used by the last frame (dB) }
     BrHist    : array[1..14] of Integer;  { frames per bitrate index }
     TargBits  : Integer;   { mean main-data bits per granule per channel }
     FrameBytes: Integer;   { frame size in bytes }
@@ -196,6 +228,17 @@ var
   9 (smallest).  Enables the bit reservoir and sets a lowpass for the
   quality.  The configured BrIdx is ignored (each frame picks its own). }
 procedure EncEnableVBR(var AEnc: TMP3Encoder; AQuality: Integer);
+
+{ Average bitrate (ABR) of AKbps (32..320) for the whole stream.  Frames
+  take their own bitrate index as in VBR; the allowed noise follows the
+  bits spent so that the mean bitrate lands on AKbps.  The configured
+  BrIdx is ignored.  Short streams (under a few seconds) may end some
+  percent away from the target while the controller settles. }
+procedure EncEnableABR(var AEnc: TMP3Encoder; AKbps: Integer);
+
+{ Starting noise offset (dB) of the quality mode for an average bitrate,
+  interpolated from the VBR quality scale (stereo kbps). }
+function EncAbrBaseDb(AStereoKbps: Double): Double;
 
 { Default lowpass frequency (Hz) for a stream bitrate (kbps, LAME table;
   mono streams pass 1.5x their bitrate).  0 = no lowpass. }
@@ -387,13 +430,23 @@ begin
   AEnc.SwitchMode := AMode;
 end;
 
-procedure EncEnableVBR(var AEnc: TMP3Encoder; AQuality: Integer);
 const
-  { equivalent (stereo) bitrate of each quality, for the lowpass table }
+  { equivalent (stereo) bitrate of each VBR quality, for the lowpass table }
   EQ_KBPS: array[0..9] of Integer = (256, 224, 192, 176, 160, 128, 112, 96, 80, 64);
   { allowed noise relative to the masking threshold (dB); calibrated so that
     stereo music lands near the bitrates of LAME -V0 .. -V9 }
   NOISE_DB: array[0..9] of Double = (-2.2, 0.0, 2.4, 3.5, 5.3, 7.6, 9.1, 9.8, 10.0, 12.2);
+  { ABR controller: dB of noise that halve the bits, averaging window and
+    debt horizon (frames), largest correction around the starting point }
+  ABR_SLOPE_DB    = 9.0;
+  ABR_AVG_FRAMES  = 40;
+  ABR_DEBT_FRAMES = 100;
+  ABR_FLOOR_RUN   = 8;
+  ABR_FLOOR_MAX   = 0.6;
+  ABR_MIN_DB      = -12.0;
+  ABR_MAX_DB      = 16.0;
+
+procedure EncEnableVBR(var AEnc: TMP3Encoder; AQuality: Integer);
 var
   kb: Integer;
 begin
@@ -412,6 +465,50 @@ begin
     SetRateDefaults(AEnc, kb * 3 div 2, True)
   else
     SetRateDefaults(AEnc, kb, True);
+end;
+
+function EncAbrBaseDb(AStereoKbps: Double): Double;
+var
+  i: Integer;
+begin
+  { EQ_KBPS falls with the quality index; extrapolate linearly past the ends }
+  if AStereoKbps >= EQ_KBPS[0] then i := 0
+  else if AStereoKbps <= EQ_KBPS[9] then i := 8
+  else begin
+    i := 0;
+    while (i < 8) and (AStereoKbps < EQ_KBPS[i + 1]) do Inc(i);
+  end;
+  Result := NOISE_DB[i] + (NOISE_DB[i + 1] - NOISE_DB[i])
+          * (AStereoKbps - EQ_KBPS[i]) / (EQ_KBPS[i + 1] - EQ_KBPS[i]);
+  Result := EnsureRange(Result, -8.0, 20.0);
+end;
+
+procedure EncEnableABR(var AEnc: TMP3Encoder; AKbps: Integer);
+begin
+  AKbps := EnsureRange(AKbps, 32, 320);
+  { the quality mode of VBR, with its scale set per frame }
+  EncEnableVBR(AEnc, 5);
+  AEnc.Abr := True;
+  AEnc.AbrKbps := AKbps;
+  AEnc.AbrFrameBits := AKbps * 1000.0 * ENC_PCM_PER_FRAME / C_SAMPLERATE_HZ[AEnc.Cfg.SrIdx];
+  AEnc.AbrDebt := 0.0;
+  AEnc.AbrAvg := AEnc.AbrFrameBits;
+  AEnc.AbrAvgN := 0;
+  AEnc.AbrFloor := 0.0;
+  AEnc.AbrFloorN := 0;
+  AEnc.AbrFloorRun := 0;
+  AEnc.AbrFrames := 0;
+  { mono: the VBR scale treats a mono stream like a stereo one of 4/3 its
+    rate, and its noise sits VBR_MONO_DB lower }
+  if AEnc.Channels = 1 then begin
+    AEnc.AbrBaseDb := EncAbrBaseDb(AKbps * 4.0 / 3.0) + VBR_MONO_DB;
+    SetRateDefaults(AEnc, AKbps * 3 div 2, True);
+  end else begin
+    AEnc.AbrBaseDb := EncAbrBaseDb(AKbps);
+    SetRateDefaults(AEnc, AKbps, True);
+  end;
+  AEnc.AbrNoiseDb := AEnc.AbrBaseDb;
+  AEnc.VbrNoiseScale := Power(10.0, AEnc.AbrBaseDb / 10.0);
 end;
 
 procedure EncEnableReservoir(var AEnc: TMP3Encoder; AEnable: Boolean);
@@ -818,6 +915,17 @@ begin
   brIdx   := AEnc.Cfg.BrIdx;
   padding := AEnc.Cfg.Padding;
 
+  if AEnc.Abr then begin
+    { the noise that brings the mean (referred to the start point) onto what
+      the frames above the floor may use, less the debt }
+    mean := EncFrameBytes(1, AEnc.Cfg.SrIdx, 0) * 8;
+    v := (AEnc.AbrFrameBits - AEnc.AbrFloor * mean) / (1.0 - AEnc.AbrFloor);
+    v := Max(v - AEnc.AbrDebt / ABR_DEBT_FRAMES, mean);
+    AEnc.AbrNoiseDb := AEnc.AbrBaseDb + EnsureRange(
+      ABR_SLOPE_DB * Log2(AEnc.AbrAvg / v), ABR_MIN_DB, ABR_MAX_DB);
+    AEnc.VbrNoiseScale := Power(10.0, AEnc.AbrNoiseDb / 10.0);
+  end;
+
   FramePsy(AEnc, AXr, (AChannelMode = FRAME_CH_JOINT) and (AModeExt and 2 <> 0) and (AEnc.Channels = 2), FP);
   for k := 0 to n - 1 do begin
     { the psychoacoustic estimate (0.5 log2(E/xmin) per line) leaves out
@@ -957,6 +1065,27 @@ begin
   FCfg.Padding         := padding;
   AEnc.LastBrIdx := brIdx;
   Inc(AEnc.BrHist[brIdx]);
+  if AEnc.Abr then begin
+    b := EncFrameBytes(brIdx, AEnc.Cfg.SrIdx, padding) * 8;
+    AEnc.AbrDebt := EnsureRange(AEnc.AbrDebt + b - AEnc.AbrFrameBits,
+      -0.5 * ABR_DEBT_FRAMES * AEnc.AbrFrameBits, 0.5 * ABR_DEBT_FRAMES * AEnc.AbrFrameBits);
+    { running means (plain averages over the first frames): the share of
+      frames at the floor (not inside long runs), and the bits of the
+      others at the start point }
+    Inc(AEnc.AbrFrames);
+    if brIdx = 1 then Inc(AEnc.AbrFloorRun) else AEnc.AbrFloorRun := 0;
+    if AEnc.AbrFloorRun <= ABR_FLOOR_RUN then begin
+      Inc(AEnc.AbrFloorN);
+      if brIdx = 1 then v := 1.0 else v := 0.0;
+      AEnc.AbrFloor := Min(ABR_FLOOR_MAX,
+        AEnc.AbrFloor + (v - AEnc.AbrFloor) / Min(AEnc.AbrFloorN, ABR_AVG_FRAMES));
+    end;
+    if brIdx > 1 then begin
+      Inc(AEnc.AbrAvgN);
+      v := b * Power(2.0, (AEnc.AbrNoiseDb - AEnc.AbrBaseDb) / ABR_SLOPE_DB);
+      AEnc.AbrAvg := AEnc.AbrAvg + (v - AEnc.AbrAvg) / Min(AEnc.AbrAvgN, ABR_AVG_FRAMES);
+    end;
+  end;
   FCfg.ChannelMode     := AChannelMode;
   FCfg.ModeExt         := AModeExt;
   FCfg.Original        := 1;

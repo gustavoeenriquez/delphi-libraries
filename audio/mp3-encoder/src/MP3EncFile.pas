@@ -34,6 +34,10 @@ function EncodeWAVFile(const AWavPath, AMP3Path: string;
 function EncodeWAVFileTagged(const AWavPath, AMP3Path: string;
   ABrIdx, APadding: Byte; const ATag: TID3v1Tag): Integer;
 
+{ WAV file -> ABR MP3 (average AKbps, 32..320) with a Xing/LAME header.
+  Returns the audio frame count, or -1. }
+function EncodeWAVFileABR(const AWavPath, AMP3Path: string; AKbps: Integer): Integer;
+
 { WAV file -> VBR MP3 with a Xing/LAME header.  AQuality 0 (best) .. 9.
   Returns the number of audio frames or -1 on error. }
 function EncodeWAVFileVBR(const AWavPath, AMP3Path: string; AQuality: Integer): Integer;
@@ -94,6 +98,36 @@ begin
     MP3Out.Free;
   end;
 end;
+
+// ---------------------------------------------------------------------------
+
+function EncodeWAVFileABR(const AWavPath, AMP3Path: string; AKbps: Integer): Integer;
+var
+  WavIn  : TMemoryStream;
+  MP3Out : TMemoryStream;
+begin
+  Result := -1;
+  WavIn  := TMemoryStream.Create;
+  MP3Out := TMemoryStream.Create;
+  try
+    try
+      WavIn.LoadFromFile(AWavPath);
+    except
+      Exit;
+    end;
+    Result := EncodeWAVStreamABR(WavIn, MP3Out, AKbps);
+    if Result > 0 then
+      try
+        MP3Out.SaveToFile(AMP3Path);
+      except
+        Result := -1;
+      end;
+  finally
+    WavIn.Free;
+    MP3Out.Free;
+  end;
+end;
+
 
 // ---------------------------------------------------------------------------
 

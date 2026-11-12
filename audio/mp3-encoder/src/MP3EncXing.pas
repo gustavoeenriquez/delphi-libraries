@@ -28,7 +28,7 @@
     +15   2 bytes  Radio Replay Gain (set to 0)
     +17   2 bytes  Audiophile Replay Gain (set to 0)
     +19   1 byte   Encoding flags (bits 7-4) + ATH type (bits 3-0)
-    +20   1 byte   ABR / minimum bitrate (set to 0)
+    +20   1 byte   ABR: average bitrate in kbps (255 = 255 or more); else 0
     +21   3 bytes  Encoder delay (12 bits, MSB) | encoder padding (12 bits, LSB)
     +24   1 byte   Misc info (set to 0)
     +25   1 byte   MP3 gain (set to 0)
@@ -65,6 +65,7 @@ const
   XING_FLAG_QUALITY = $08;
 
   LAME_VBR_CBR       = 1;    { CBR encoding }
+  LAME_VBR_ABR       = 2;    { ABR (average bitrate) }
   LAME_VBR_VBR       = 4;    { VBR-new (LAME default) }
   LAME_ENCODER_DELAY = 576;  { standard MPEG1 Layer III MDCT overhead, in samples }
 
@@ -81,7 +82,8 @@ type
   TLameTag = record
     EncoderDelay  : Word;    { 0..4095: silence samples the encoder prepends }
     EncoderPadding: Word;    { 0..4095: zero samples added to the last frame }
-    VBRMethod     : Byte;    { LAME_VBR_CBR = 1, LAME_VBR_VBR = 4 }
+    VBRMethod     : Byte;    { LAME_VBR_CBR = 1, LAME_VBR_ABR = 2, LAME_VBR_VBR = 4 }
+    AbrKbps       : Byte;    { ABR target in kbps (255 = 255 or more), 0 otherwise }
     MusicLength   : Cardinal;  { total byte count of all audio frames }
   end;
 
@@ -362,6 +364,9 @@ begin
 
     { Bytes 10..19 — lowpass, replay gain fields: already zero from BuildXingFrame }
 
+    { ABR target bitrate }
+    Frame[lameOfs+20] := ALame.AbrKbps;
+
     { Encoder delay (12 bits) and padding (12 bits) packed into 3 bytes }
     Frame[lameOfs+21] :=  (ALame.EncoderDelay  shr 4) and $FF;
     Frame[lameOfs+22] := ((ALame.EncoderDelay  and $0F) shl 4)
@@ -449,6 +454,7 @@ begin
 
     { Parse LAME fields }
     ALame.VBRMethod      := Frame[lameOfs+9] and $0F;
+    ALame.AbrKbps        := Frame[lameOfs+20];
     ALame.EncoderDelay   := (Word(Frame[lameOfs+21]) shl 4)
                          or  (Frame[lameOfs+22] shr 4);
     ALame.EncoderPadding := (Word(Frame[lameOfs+22] and $0F) shl 8)

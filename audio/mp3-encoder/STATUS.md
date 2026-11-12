@@ -100,11 +100,14 @@ delay 528 + padding y la duración queda exacta).
   mitad de bits, media de ~40 tramas, tramas en el piso de 32 kbps aparte, deuda
   de bits acotada). Cabecera Xing y extensión LAME con método ABR y objetivo.
   Fase 22 (20 checks): la media cae a ±2.5 % del objetivo de 64 a 256 kbps.
-  Pendiente: medir con PEAQ frente a `lame --abr` en el PC.
+- PEAQ en el servidor (imagen Docker `audio/tools/peaq`, CLI `audio/tools/Mp3Enc`)
+  sobre ocho piezas del EBU SQAM: ABR a la par de LAME a 96 kbps (−1.46 / −1.41),
+  mejor a 128 (−0.66 / −0.74), peor a 192 (−0.16 / −0.01).
 
 ## Pendiente / ideas
 
-- ABR: validación perceptual (PEAQ) frente a LAME en las ocho piezas.
+- ABR a 192 kbps: −0.16 frente a −0.01 de LAME (castañuelas, clave, ABBA), y
+  peor que nuestro CBR 192. Falta medirlo también con las ocho piezas del PC.
 - La decisión automática M/S por bits estimados no siempre elige el modo de
   mejor SNR (en ruido sintético ancho elige L/R aunque M/S conserva mejor S).
 - Intensity stereo; MPEG-2/2.5 (tasas bajas de muestreo).

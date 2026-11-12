@@ -212,9 +212,22 @@ Cabecera Xing como en VBR; la extensión LAME declara el método ABR (2) y el
 objetivo en kbps (byte +20; 255 = 255 o más).
 
 Precisión en la fase 22 (señal sintética de 6 s con demanda variable): estéreo 64–256
-kbps entre −2.3 % y +1.5 % del objetivo, mono 64–128 entre −1.6 % y −0.2 %. Falta la
-calidad PEAQ frente a `lame --abr` sobre las ocho piezas: hay que medirla en el PC
-(aquí no hay ffmpeg, LAME ni las piezas).
+kbps entre −2.3 % y +1.5 % del objetivo, mono 64–128 entre −1.6 % y −0.2 %.
+
+PEAQ básico frente a `lame --abr` (LAME 3.100) sobre ocho piezas del EBU SQAM (30 s:
+castañuelas, glockenspiel, clave, cuarteto vocal, voz femenina mono, piano Schubert,
+orquesta Strauss, ABBA), medido en mkai-c25 con `audio/tools/peaq`. Media de kbps / ODG:
+
+| Objetivo | ABR | CBR (nuestro) | LAME ABR |
+|---|---:|---:|---:|
+| 96 | 89 / −1.46 | 96 / −1.55 | 88 / −1.41 |
+| 128 | 118 / **−0.66** | 128 / −0.74 | 115 / −0.74 |
+| 192 | 177 / −0.16 | 192 / −0.13 | 171 / **−0.01** |
+
+A 96 y 128 kbps, a la par o mejor que LAME y mejor que nuestro CBR con menos bits; a
+192 por detrás de LAME (castañuelas −0.58 frente a +0.07, clave −0.26 frente a −0.03,
+ABBA −0.38 frente a −0.10). Como LAME, queda bajo el objetivo en material con pausas
+(SQAM: −8 % de media; las tramas de silencio no gastan lo ahorrado).
 
 ## Corrección del joint stereo (2026-10-20)
 

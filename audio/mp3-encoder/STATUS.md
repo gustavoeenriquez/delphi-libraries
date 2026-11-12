@@ -103,11 +103,17 @@ delay 528 + padding y la duración queda exacta).
 - PEAQ en el servidor (imagen Docker `audio/tools/peaq`, CLI `audio/tools/Mp3Enc`)
   sobre ocho piezas del EBU SQAM: ABR a la par de LAME a 96 kbps (−1.46 / −1.41),
   mejor a 128 (−0.66 / −0.74), peor a 192 (−0.16 / −0.01).
+- ABR rehecho: archivos con multipasada (un solo ruido para todo el archivo, buscado
+  por secante a ±2 % del objetivo; búsqueda sobre un tercio del audio desde 60 s) y
+  streaming con un controlador de ventana larga (600 tramas, demandas recortadas a
+  32–320 kbps, tramas en el piso aparte). SQAM, media de ODG: 96 kbps −1.04, 128
+  −0.29, 192 +0.01 (LAME ABR −1.41 / −0.74 / −0.01, con ~10 % menos de bits).
 
 ## Pendiente / ideas
 
-- ABR a 192 kbps: −0.16 frente a −0.01 de LAME (castañuelas, clave, ABBA), y
-  peor que nuestro CBR 192. Falta medirlo también con las ocho piezas del PC.
+- ABR: la multipasada cuesta 2–4 codificaciones (el encoder ya es lento en modo
+  calidad). Música densa (ABBA) a 192: −0.22 frente a −0.10 de LAME. Falta medir con
+  las ocho piezas del PC.
 - La decisión automática M/S por bits estimados no siempre elige el modo de
   mejor SNR (en ruido sintético ancho elige L/R aunque M/S conserva mejor S).
 - Intensity stereo; MPEG-2/2.5 (tasas bajas de muestreo).

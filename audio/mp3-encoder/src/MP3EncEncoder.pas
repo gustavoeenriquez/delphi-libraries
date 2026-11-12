@@ -55,22 +55,26 @@
 
   ABR (EncEnableABR)
     Average bitrate: the frames are coded in the same quality mode as VBR,
-    with the allowed noise (dB) set per frame.  Measured on synthetic
-    signals, the bits of the quality mode halve every ABR_SLOPE_DB (~9 dB)
-    of noise; with that model each frame's bits are referred to the
-    starting point (interpolated from the VBR quality scale) and averaged
-    over ~ABR_AVG_FRAMES frames, and the next frame gets the noise that
-    brings that average onto the target.  Frames at the lowest bitrate do
-    not follow the model and leave that mean as it was.  Short runs of them
-    inside the music count as a share of the window (at most 60 %), and the
-    other frames fill what is left of the target; in longer runs (silence,
-    more than ABR_FLOOR_RUN frames) that share holds too, so the noise does
-    not fall through a quiet stretch until the music after it lands at
-    320 kbps.  The target is corrected by
-    the bit debt (bits spent over it so far) spread over ABR_DEBT_FRAMES
-    frames and bounded (+-50 %), so the file mean lands on the
-    target and a quiet stretch banks a limited budget for what follows
-    (files with long silences end below the target).
+    with one allowed noise (dB) for the whole file, found on the way.
+    Measured with fixed noise, the bits of the quality mode halve every
+    ABR_SLOPE_DB (~9 dB).  The bits each active frame asks for in quality
+    mode are kept, referred to the starting point (interpolated from the
+    VBR quality scale), for the last ENC_ABR_WINDOW active frames, plus a
+    prior of ABR_PRIOR frames at the target so the first frames do not
+    swing it.  Each frame gets the noise (bisection) at which the mean of
+    those demands, each moved by the model and clipped to what a frame can
+    hold (32..320 kbps), meets the target.  The clipping matters: the
+    attacks of castanets ask for far more than 320 kbps, and an unclipped
+    mean raised the noise for the whole piece while the frames spent 20 %
+    under the target.  Frames at the lowest bitrate (silence, pauses) stay
+    out of the model, and the active frames share what they leave over
+    the same window (their share is capped at ABR_FLOOR_MAX); a leading
+    silence, before the first active frame, does not count at all.  The
+    rest (the frames round up to a bitrate index, ~10 % over the model)
+    goes to the bit debt, which corrects the target spread over
+    ABR_DEBT_FRAMES frames (bounded to +-50 %).  An earlier short window
+    (~1 s) moved the noise with the music, coarse in loud passages and fine
+    in quiet ones; the long one keeps the quality even, like VBR.
 
   PCM input: 1152 samples per channel per call, oldest first, +-32768 scale.
   Encoder delay: ENC_DELAY (1104) samples (polyphase + MDCT overlap + one
@@ -102,6 +106,8 @@ const
   ENC_RESV_MAX_BITS  = 511 * 8;  { main_data_begin is a 9-bit byte offset }
   ENC_MAX_PART23     = 4095;     { part2_3_length is a 12-bit field }
   ENC_PSY_HIST       = 2048;     { PCM history per channel for the FFT model }
+  ENC_ABR_WINDOW     = 600;      { ABR: active frames (~15 s) in the rate model }
+  ENC_ABR_SLOPE_DB   = 9.0;      { ABR: dB of allowed noise that halve the bits }
   { first history sample of the 1024-point FFT window of the granule being
     transformed: the long MDCT of subband granules n-2 and n-1 is centred
     1391.5 samples before the newest input sample (polyphase delay of
@@ -155,11 +161,16 @@ type
     AbrBaseDb : Double;    { starting noise offset for the target (dB) }
     AbrFrameBits: Double;  { target bits per frame }
     AbrDebt   : Double;    { bits spent over the target so far (bounded) }
-    AbrAvg    : Double;    { mean frame bits referred to AbrBaseDb (frames above the floor) }
-    AbrAvgN   : Integer;   { frames in AbrAvg so far }
-    AbrFloor  : Double;    { share of recent frames at the lowest bitrate }
-    AbrFloorN : Integer;   { frames in AbrFloor so far }
-    AbrFloorRun: Integer;  { consecutive frames at the lowest bitrate }
+    AbrHist   : array[0..ENC_ABR_WINDOW - 1] of Double;  { demands referred to AbrBaseDb }
+    AbrHistN  : Integer;   { entries in AbrHist }
+    AbrHistPos: Integer;   { next entry to overwrite }
+    AbrFlags  : array[0..ENC_ABR_WINDOW - 1] of Boolean;  { last frames: at the floor }
+    AbrFlagN  : Integer;   { entries in AbrFlags }
+    AbrFlagPos: Integer;
+    AbrFloorCnt: Integer;  { floor frames in AbrFlags }
+    AbrStarted: Boolean;   { an active frame was coded (ends the leading silence) }
+    AbrFixed  : Boolean;   { noise fixed at AbrBaseDb + AbrFixedDb (multi-pass ABR) }
+    AbrFixedDb: Double;
     AbrFrames : Integer;   { frames coded so far }
     AbrNoiseDb: Double;    { noise offset used by the last frame (dB) }
     BrHist    : array[1..14] of Integer;  { frames per bitrate index }
@@ -235,6 +246,11 @@ procedure EncEnableVBR(var AEnc: TMP3Encoder; AQuality: Integer);
   BrIdx is ignored.  Short streams (under a few seconds) may end some
   percent away from the target while the controller settles. }
 procedure EncEnableABR(var AEnc: TMP3Encoder; AKbps: Integer);
+
+{ ABR with the noise fixed at AOffsetDb over the starting point: no
+  controller.  The multi-pass ABR of EncodeWAVStreamABR searches the offset
+  that gives the target over the whole file (even quality, like VBR). }
+procedure EncSetABRFixedNoise(var AEnc: TMP3Encoder; AOffsetDb: Double);
 
 { Starting noise offset (dB) of the quality mode for an average bitrate,
   interpolated from the VBR quality scale (stereo kbps). }
@@ -438,10 +454,9 @@ const
   NOISE_DB: array[0..9] of Double = (-2.2, 0.0, 2.4, 3.5, 5.3, 7.6, 9.1, 9.8, 10.0, 12.2);
   { ABR controller: dB of noise that halve the bits, averaging window and
     debt horizon (frames), largest correction around the starting point }
-  ABR_SLOPE_DB    = 9.0;
-  ABR_AVG_FRAMES  = 40;
-  ABR_DEBT_FRAMES = 100;
-  ABR_FLOOR_RUN   = 8;
+  ABR_SLOPE_DB    = ENC_ABR_SLOPE_DB;
+  ABR_PRIOR       = 10;
+  ABR_DEBT_FRAMES = 60;
   ABR_FLOOR_MAX   = 0.6;
   ABR_MIN_DB      = -12.0;
   ABR_MAX_DB      = 16.0;
@@ -492,11 +507,12 @@ begin
   AEnc.AbrKbps := AKbps;
   AEnc.AbrFrameBits := AKbps * 1000.0 * ENC_PCM_PER_FRAME / C_SAMPLERATE_HZ[AEnc.Cfg.SrIdx];
   AEnc.AbrDebt := 0.0;
-  AEnc.AbrAvg := AEnc.AbrFrameBits;
-  AEnc.AbrAvgN := 0;
-  AEnc.AbrFloor := 0.0;
-  AEnc.AbrFloorN := 0;
-  AEnc.AbrFloorRun := 0;
+  AEnc.AbrHistN := 0;
+  AEnc.AbrHistPos := 0;
+  AEnc.AbrFlagN := 0;
+  AEnc.AbrFlagPos := 0;
+  AEnc.AbrFloorCnt := 0;
+  AEnc.AbrStarted := False;
   AEnc.AbrFrames := 0;
   { mono: the VBR scale treats a mono stream like a stereo one of 4/3 its
     rate, and its noise sits VBR_MONO_DB lower }
@@ -509,6 +525,14 @@ begin
   end;
   AEnc.AbrNoiseDb := AEnc.AbrBaseDb;
   AEnc.VbrNoiseScale := Power(10.0, AEnc.AbrBaseDb / 10.0);
+end;
+
+procedure EncSetABRFixedNoise(var AEnc: TMP3Encoder; AOffsetDb: Double);
+begin
+  AEnc.AbrFixed := True;
+  AEnc.AbrFixedDb := EnsureRange(AOffsetDb, ABR_MIN_DB, ABR_MAX_DB);
+  AEnc.AbrNoiseDb := AEnc.AbrBaseDb + AEnc.AbrFixedDb;
+  AEnc.VbrNoiseScale := Power(10.0, AEnc.AbrNoiseDb / 10.0);
 end;
 
 procedure EncEnableReservoir(var AEnc: TMP3Encoder; AEnable: Boolean);
@@ -890,12 +914,42 @@ end;
 { AXr holds L/R (or mono) spectra; with FRAME_CH_JOINT and ms_stereo in
   AModeExt the core converts them to mid/side after the psychoacoustic
   analysis. }
+{ ABR: the noise offset (dB over AbrBaseDb) at which the mean of the kept
+  demands, moved by the model and clipped to ALo..AHi bits, meets ATarget }
+function AbrSolve(const AEnc: TMP3Encoder; ATarget, ALo, AHi: Double): Double;
+var
+  lo, hi, x: Double;
+  it: Integer;
+
+  function MeanAt(AX: Double): Double;
+  var
+    j: Integer;
+    g, sum: Double;
+  begin
+    g := Power(2.0, -AX / ABR_SLOPE_DB);
+    sum := ABR_PRIOR * EnsureRange(AEnc.AbrFrameBits * g, ALo, AHi);
+    for j := 0 to AEnc.AbrHistN - 1 do
+      sum := sum + EnsureRange(AEnc.AbrHist[j] * g, ALo, AHi);
+    Result := sum / (ABR_PRIOR + AEnc.AbrHistN);
+  end;
+
+begin
+  lo := ABR_MIN_DB; hi := ABR_MAX_DB;
+  if MeanAt(lo) <= ATarget then Exit(lo);
+  if MeanAt(hi) >= ATarget then Exit(hi);
+  for it := 1 to 24 do begin
+    x := 0.5 * (lo + hi);
+    if MeanAt(x) > ATarget then lo := x else hi := x;
+  end;
+  Result := 0.5 * (lo + hi);
+end;
+
 function EncodeFrameCore(var AEnc: TMP3Encoder; var AXr: TFrameXr;
   AChannelMode, AModeExt: Byte): TBytes;
 var
   n, k, g, c, siBits, regionBytes, mainBits: Integer;
   pool, nominal, carry, remaining, spare, extra, want, over, maxb, minb, used: Integer;
-  usedTotal, usedBytes, newResv, stuffing, j, brIdx, padding, b, w: Integer;
+  usedTotal, usedBytes, newResv, stuffing, j, brIdx, padding, b, w, demand: Integer;
   vbrDone: Boolean;
   est   : array[0..3] of Double;
   targ  : array[0..3] of Double;
@@ -916,13 +970,17 @@ begin
   padding := AEnc.Cfg.Padding;
 
   if AEnc.Abr then begin
-    { the noise that brings the mean (referred to the start point) onto what
-      the frames above the floor may use, less the debt }
+    { the noise at which the mean of the active frames meets what the
+      floor frames of the window leave them, less the debt }
     mean := EncFrameBytes(1, AEnc.Cfg.SrIdx, 0) * 8;
-    v := (AEnc.AbrFrameBits - AEnc.AbrFloor * mean) / (1.0 - AEnc.AbrFloor);
+    v := Min(ABR_FLOOR_MAX, AEnc.AbrFloorCnt / (AEnc.AbrFlagN + ABR_PRIOR));
+    v := (AEnc.AbrFrameBits - v * mean) / (1.0 - v);
     v := Max(v - AEnc.AbrDebt / ABR_DEBT_FRAMES, mean);
-    AEnc.AbrNoiseDb := AEnc.AbrBaseDb + EnsureRange(
-      ABR_SLOPE_DB * Log2(AEnc.AbrAvg / v), ABR_MIN_DB, ABR_MAX_DB);
+    if AEnc.AbrFixed then
+      AEnc.AbrNoiseDb := AEnc.AbrBaseDb + AEnc.AbrFixedDb
+    else
+      AEnc.AbrNoiseDb := AEnc.AbrBaseDb +
+        AbrSolve(AEnc, v, mean, EncFrameBytes(14, AEnc.Cfg.SrIdx, 0) * 8);
     AEnc.VbrNoiseScale := Power(10.0, AEnc.AbrNoiseDb / 10.0);
   end;
 
@@ -970,6 +1028,7 @@ begin
   SI := Default(TFrameSideInfo);
   vbrDone := False;
   usedTotal := 0;
+  demand := 0;
   if AEnc.Vbr then begin
     { quality mode: the fewest bits that keep the noise under the threshold }
     padding := 0;
@@ -983,6 +1042,7 @@ begin
           ENC_MAX_PART23, 0, AEnc.Cfg.SrIdx, SI.Gr[g][c], AEnc.LastStats[g][c], AEnc.BlockType[g], True);
       Inc(usedTotal, used);
     end;
+    demand := usedTotal + 32 + siBits;
     { lowest bitrate whose frame (plus the reservoir) holds them }
     for b := 1 to 14 do
       if AEnc.ResvBits + (EncFrameBytes(b, AEnc.Cfg.SrIdx, 0) - 4 - siBits div 8) * 8 >= usedTotal then begin
@@ -1065,25 +1125,27 @@ begin
   FCfg.Padding         := padding;
   AEnc.LastBrIdx := brIdx;
   Inc(AEnc.BrHist[brIdx]);
-  if AEnc.Abr then begin
+  if AEnc.Abr and (brIdx > 1) then AEnc.AbrStarted := True;
+  if AEnc.Abr and AEnc.AbrStarted then begin
     b := EncFrameBytes(brIdx, AEnc.Cfg.SrIdx, padding) * 8;
     AEnc.AbrDebt := EnsureRange(AEnc.AbrDebt + b - AEnc.AbrFrameBits,
       -0.5 * ABR_DEBT_FRAMES * AEnc.AbrFrameBits, 0.5 * ABR_DEBT_FRAMES * AEnc.AbrFrameBits);
-    { running means (plain averages over the first frames): the share of
-      frames at the floor (not inside long runs), and the bits of the
-      others at the start point }
+    { the model: what the quality mode asked for (not the frame size: a
+      frame over 320 kbps is coded as CBR and its fixed size would feed the
+      noise back), active frames only, referred to the start point }
     Inc(AEnc.AbrFrames);
-    if brIdx = 1 then Inc(AEnc.AbrFloorRun) else AEnc.AbrFloorRun := 0;
-    if AEnc.AbrFloorRun <= ABR_FLOOR_RUN then begin
-      Inc(AEnc.AbrFloorN);
-      if brIdx = 1 then v := 1.0 else v := 0.0;
-      AEnc.AbrFloor := Min(ABR_FLOOR_MAX,
-        AEnc.AbrFloor + (v - AEnc.AbrFloor) / Min(AEnc.AbrFloorN, ABR_AVG_FRAMES));
-    end;
+    if AEnc.AbrFlagN = ENC_ABR_WINDOW then begin
+      if AEnc.AbrFlags[AEnc.AbrFlagPos] then Dec(AEnc.AbrFloorCnt);
+    end else
+      Inc(AEnc.AbrFlagN);
+    AEnc.AbrFlags[AEnc.AbrFlagPos] := brIdx = 1;
+    if brIdx = 1 then Inc(AEnc.AbrFloorCnt);
+    AEnc.AbrFlagPos := (AEnc.AbrFlagPos + 1) mod ENC_ABR_WINDOW;
     if brIdx > 1 then begin
-      Inc(AEnc.AbrAvgN);
-      v := b * Power(2.0, (AEnc.AbrNoiseDb - AEnc.AbrBaseDb) / ABR_SLOPE_DB);
-      AEnc.AbrAvg := AEnc.AbrAvg + (v - AEnc.AbrAvg) / Min(AEnc.AbrAvgN, ABR_AVG_FRAMES);
+      AEnc.AbrHist[AEnc.AbrHistPos] :=
+        demand * Power(2.0, (AEnc.AbrNoiseDb - AEnc.AbrBaseDb) / ABR_SLOPE_DB);
+      AEnc.AbrHistPos := (AEnc.AbrHistPos + 1) mod ENC_ABR_WINDOW;
+      if AEnc.AbrHistN < ENC_ABR_WINDOW then Inc(AEnc.AbrHistN);
     end;
   end;
   FCfg.ChannelMode     := AChannelMode;

@@ -185,49 +185,55 @@ el umbral les quita reservorio a los transitorios (castañuelas −0.39 → −0
 
 ## ABR (2026-11-12)
 
-`EncEnableABR(Enc, Kbps)` (32–320) o `EncodeWAVFileABR` / `EncodeWAVStreamABR`:
-bitrate medio. Cada trama toma su propio bitrate, como en VBR, y el archivo promedia
-el objetivo. Se apoya en el modo calidad del VBR, con el ruido permitido (dB sobre el
-umbral) fijado trama a trama por un controlador:
+`EncodeWAVFileABR` / `EncodeWAVStreamABR` (archivos) o `EncEnableABR(Enc, Kbps)` (trama
+a trama, una pasada), 32–320 kbps. Cada trama toma su propio bitrate y el archivo
+promedia el objetivo. Se apoya en el modo calidad del VBR: lo que se ajusta es el
+ruido permitido (dB sobre el umbral psicoacústico).
 
-- **Punto de partida**: interpolado de la escala de calidades VBR (128 kbps estéreo
-  = el ruido de V5, 192 = V2...; mono como un estéreo de 4/3 su tasa y 1 dB más
-  estricto, como en VBR). En música estéreo arranca cerca de lo correcto.
-- **Modelo**: medido con ruido fijo, los bits del modo calidad se reducen a la mitad
-  cada ~9 dB de ruido (estéreo y mono). Los bits de cada trama se refieren al punto
-  de partida con ese modelo y se promedian (~40 tramas); la trama siguiente recibe
-  el ruido que lleva esa media al objetivo. Converge en pocas tramas aunque el
-  punto de partida esté 7 dB lejos (pasa con señales sintéticas).
-- **Tramas en el piso** (32 kbps: silencio, pausas): no siguen el modelo y no lo
-  alimentan. Si vienen sueltas dentro de la música, cuentan como fracción de la
-  ventana (hasta 60 %) y las demás tramas llenan lo que queda del objetivo; en
-  rachas de más de 8 tramas (silencio) esa fracción se congela. Sin esto el ruido
-  bajaba durante los silencios hasta 1 dB y la música siguiente salía a 320 kbps.
-- **Deuda**: los bits gastados de más o de menos corrigen el objetivo repartidos en
-  100 tramas, con tope ±50 tramas de bits; así la media del archivo cae en el
-  objetivo, y un silencio largo solo acumula un ahorro limitado para después.
-- Rango de corrección −12…+16 dB alrededor del punto de partida.
+**Archivos: multipasada.** Todo el archivo con un solo nivel de ruido, buscado por
+secante sobre log2 del bitrate hasta quedar a ±2 % del objetivo (2–4 codificaciones;
+pendiente inicial de 13 dB por mitad de bits, medida en música). Con 60 s o más, la
+búsqueda corre sobre un tercio del audio (un bloque de 1 s de cada tres) y solo la
+pasada final, más una corrección si hace falta, codifica el archivo entero. Así la
+calidad es pareja, como en VBR, y el tamaño cae en el objetivo. Cuesta 2–4 veces una
+codificación.
 
-Cabecera Xing como en VBR; la extensión LAME declara el método ABR (2) y el
-objetivo en kbps (byte +20; 255 = 255 o más).
+**Trama a trama (streaming): una pasada.** Un controlador busca un ruido casi
+constante para todo el archivo:
+- Guarda la demanda de bits del modo calidad de las últimas 600 tramas activas
+  (~15 s), referida al punto de partida (interpolado de la escala VBR) con el modelo
+  de ~9 dB por mitad de bits, más un prior de 10 tramas en el objetivo.
+- Cada trama recibe, por bisección, el ruido con el que la media de esas demandas,
+  **recortadas a lo que cabe en una trama (32–320 kbps)**, da el objetivo. Sin el
+  recorte, los golpes de las castañuelas (que piden mucho más de 320) subían el ruido
+  de toda la pieza.
+- Las tramas en el piso de 32 kbps no entran en el modelo; las activas se reparten lo
+  que ellas dejan en la misma ventana (fracción de piso con tope del 60 %). El
+  silencio inicial no cuenta.
+- El resto (redondeo al bitrate, ~10 %) va a una deuda de bits que corrige el
+  objetivo repartida en 60 tramas.
 
-Precisión en la fase 22 (señal sintética de 6 s con demanda variable): estéreo 64–256
-kbps entre −2.3 % y +1.5 % del objetivo, mono 64–128 entre −1.6 % y −0.2 %.
+La primera versión (ventana de ~1 s) movía el ruido con la música: grueso en los
+pasajes cargados y fino en los suaves, y un silencio inicial lo desviaba 10 dB.
+
+Cabecera Xing como en VBR; la extensión LAME declara el método ABR (2) y el objetivo
+en kbps (byte +20; 255 = 255 o más).
 
 PEAQ básico frente a `lame --abr` (LAME 3.100) sobre ocho piezas del EBU SQAM (30 s:
 castañuelas, glockenspiel, clave, cuarteto vocal, voz femenina mono, piano Schubert,
 orquesta Strauss, ABBA), medido en mkai-c25 con `audio/tools/peaq`. Media de kbps / ODG:
 
-| Objetivo | ABR | CBR (nuestro) | LAME ABR |
-|---|---:|---:|---:|
-| 96 | 89 / −1.46 | 96 / −1.55 | 88 / −1.41 |
-| 128 | 118 / **−0.66** | 128 / −0.74 | 115 / −0.74 |
-| 192 | 177 / −0.16 | 192 / −0.13 | 171 / **−0.01** |
+| Objetivo | ABR multipasada | ABR (1.ª versión) | CBR (nuestro) | LAME ABR |
+|---|---:|---:|---:|---:|
+| 96 | 96 / **−1.04** | 89 / −1.46 | 96 / −1.55 | 88 / −1.41 |
+| 128 | 128 / **−0.29** | 118 / −0.66 | 128 / −0.74 | 115 / −0.74 |
+| 192 | 193 / **+0.01** | 177 / −0.16 | 192 / −0.13 | 171 / −0.01 |
 
-A 96 y 128 kbps, a la par o mejor que LAME y mejor que nuestro CBR con menos bits; a
-192 por detrás de LAME (castañuelas −0.58 frente a +0.07, clave −0.26 frente a −0.03,
-ABBA −0.38 frente a −0.10). Como LAME, queda bajo el objetivo en material con pausas
-(SQAM: −8 % de media; las tramas de silencio no gastan lo ahorrado).
+Ojo al comparar con LAME: su ABR queda ~10 % bajo el objetivo en este material (con
+pausas) y el nuestro lo cumple, así que parte de la ventaja son bits. Por pieza a 192
+kbps (kbps / ODG): castañuelas 195 / +0.08 (LAME 165 / +0.07), clave 191 / +0.07 (158 /
+−0.03), ABBA 194 / −0.22 (183 / −0.10). ABBA sigue por detrás de LAME: es la eficiencia
+por bit en música densa, la misma que en CBR.
 
 ## Corrección del joint stereo (2026-10-20)
 

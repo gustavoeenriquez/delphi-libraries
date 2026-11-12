@@ -395,7 +395,8 @@ end;
 // ---------------------------------------------------------------------------
 
 function EncodeWAVStreamEx(AWavIn, AMP3Out: TStream;
-  ABrIdx, APadding: Byte; AVbrQuality: Integer; AAbrKbps: Integer = 0): Integer; forward;
+  ABrIdx, APadding: Byte; AVbrQuality: Integer; AAbrKbps: Integer = 0;
+  AAbrFixed: Boolean = False; AAbrFixedDb: Double = 0): Integer; forward;
 
 function EncodeWAVStream(AWavIn, AMP3Out: TStream;
   ABrIdx, APadding: Byte): Integer;
@@ -403,9 +404,11 @@ begin
   Result := EncodeWAVStreamEx(AWavIn, AMP3Out, ABrIdx, APadding, -1);
 end;
 
-{ AVbrQuality < 0: CBR at ABrIdx; 0..9: VBR.  AAbrKbps > 0: ABR (overrides both) }
+{ AVbrQuality < 0: CBR at ABrIdx; 0..9: VBR.  AAbrKbps > 0: ABR (overrides
+  both), one pass, or with the noise fixed at AAbrFixedDb (AAbrFixed) }
 function EncodeWAVStreamEx(AWavIn, AMP3Out: TStream;
-  ABrIdx, APadding: Byte; AVbrQuality: Integer; AAbrKbps: Integer): Integer;
+  ABrIdx, APadding: Byte; AVbrQuality: Integer; AAbrKbps: Integer;
+  AAbrFixed: Boolean; AAbrFixedDb: Double): Integer;
 var
   Reader : TWAVReader;
   Enc    : TMP3Encoder;
@@ -430,8 +433,10 @@ begin
   if Reader.Header.Channels >= 2 then begin
     EncInitStereo(Enc, Cfg);
     EncEnableReservoir(Enc, True);
-    if AAbrKbps > 0 then EncEnableABR(Enc, AAbrKbps)
-    else if AVbrQuality >= 0 then EncEnableVBR(Enc, AVbrQuality);
+    if AAbrKbps > 0 then begin
+      EncEnableABR(Enc, AAbrKbps);
+      if AAbrFixed then EncSetABRFixedNoise(Enc, AAbrFixedDb);
+    end else if AVbrQuality >= 0 then EncEnableVBR(Enc, AVbrQuality);
     Result := 0;
     while WAVReaderReadFrameStereo(Reader, PCM_L, PCM_R, cnt) do begin
       Frame := EncodeFrameAuto(Enc, PCM_L, PCM_R);
@@ -448,8 +453,10 @@ begin
   end else begin
     EncInit(Enc, Cfg);
     EncEnableReservoir(Enc, True);
-    if AAbrKbps > 0 then EncEnableABR(Enc, AAbrKbps)
-    else if AVbrQuality >= 0 then EncEnableVBR(Enc, AVbrQuality);
+    if AAbrKbps > 0 then begin
+      EncEnableABR(Enc, AAbrKbps);
+      if AAbrFixed then EncSetABRFixedNoise(Enc, AAbrFixedDb);
+    end else if AVbrQuality >= 0 then EncEnableVBR(Enc, AVbrQuality);
     Result := 0;
     while WAVReaderReadFrame(Reader, PCM, cnt) do begin
       Frame := EncodeFrame(Enc, PCM);
@@ -685,6 +692,147 @@ begin
   end;
 end;
 
+{ A shorter WAV with every third 1 s block of AWavIn (from its start), for
+  the search passes of the multi-pass ABR; nil when the file is under 60 s
+  (on 30 s pieces the third left out differed by up to 8 % in bitrate, and
+  the correction pass cost more than the sample saved). }
+function ABRSampleWav(AWavIn: TStream): TMemoryStream;
+const
+  BLOCK_S = 1;
+  MIN_S   = 60;
+var
+  R: TWAVReader;
+  dataPos, dataLen, blk, off: Int64;
+  u32: Cardinal;
+  u16: Word;
+  buf: TBytes;
+  n: Integer;
+begin
+  Result := nil;
+  if not WAVReaderOpen(AWavIn, R) then Exit;
+  if R.Header.SampleCount < MIN_S * Int64(R.Header.SampleRate) then Exit;
+  dataPos := AWavIn.Position;
+  dataLen := R.DataEnd - dataPos;
+  blk := Int64(BLOCK_S) * R.Header.SampleRate * R.Header.BlockAlign;
+  Result := TMemoryStream.Create;
+  Result.WriteBuffer(AnsiString('RIFF')[1], 4);
+  u32 := 0; Result.WriteBuffer(u32, 4);                    { patched below }
+  Result.WriteBuffer(AnsiString('WAVEfmt ')[1], 8);
+  u32 := 16; Result.WriteBuffer(u32, 4);
+  u16 := R.Header.AudioFormat; Result.WriteBuffer(u16, 2);
+  u16 := R.Header.Channels; Result.WriteBuffer(u16, 2);
+  u32 := R.Header.SampleRate; Result.WriteBuffer(u32, 4);
+  u32 := R.Header.SampleRate * R.Header.BlockAlign; Result.WriteBuffer(u32, 4);
+  u16 := R.Header.BlockAlign; Result.WriteBuffer(u16, 2);
+  u16 := R.Header.BitsPerSample; Result.WriteBuffer(u16, 2);
+  Result.WriteBuffer(AnsiString('data')[1], 4);
+  u32 := 0; Result.WriteBuffer(u32, 4);                    { patched below }
+  SetLength(buf, blk);
+  off := 0;
+  while off < dataLen do begin
+    n := Min(blk, dataLen - off);
+    AWavIn.Position := dataPos + off;
+    AWavIn.ReadBuffer(buf[0], n);
+    Result.WriteBuffer(buf[0], n);
+    Inc(off, 3 * blk);
+  end;
+  u32 := Result.Size - 44;
+  Result.Position := 40; Result.WriteBuffer(u32, 4);
+  u32 := Result.Size - 8;
+  Result.Position := 4; Result.WriteBuffer(u32, 4);
+  Result.Position := 0;
+end;
+
+{ Multi-pass ABR: the whole file at one allowed noise.  The noise is
+  searched (secant on log2 of the bitrate, at most ABR_PASSES encodes) until
+  the bitrate is within ABR_TOL of AKbps (2..4 encodes; the first step uses
+  ABR_SEARCH_SLOPE_DB, measured on music, ~13 dB per halving at 128..256
+  kbps).  On files of 60 s or more the search runs on a third of the audio
+  (every third 1 s block) and only the final pass, plus one correction when
+  it lands off, encodes the whole file.  One noise for the whole file gives
+  the even quality of VBR; the one-pass controller has to learn the file as
+  it goes and spends the bits of a short piece where its pauses only show
+  up later (castanets: 150 kbps for 192, ODG -0.58 against +0.08 now). }
+function EncodeABRSearch(AWavIn, AOut: TStream; AKbps: Integer; ASampleRate: Cardinal): Integer;
+const
+  ABR_TOL    = 0.02;
+  ABR_PASSES = 6;
+  ABR_SEARCH_SLOPE_DB = 13.0;
+var
+  Pass, Best, Sub: TMemoryStream;
+  Src: TStream;
+  pos0: Int64;
+  n, frames, bestFrames: Integer;
+  x, k, xPrev, kPrev, slope, bestErr, bestX: Double;
+
+  function Run(ASrc: TStream; AX: Double; out AKb: Double): Integer;
+  begin
+    Pass.Clear;
+    if ASrc = AWavIn then ASrc.Position := pos0 else ASrc.Position := 0;
+    Result := EncodeWAVStreamEx(ASrc, Pass, 9, 0, 5, AKbps, True, AX);
+    if Result > 0 then
+      AKb := Pass.Size * 8.0 * ASampleRate / (Result * 1152.0) / 1000.0
+    else
+      AKb := 0;
+  end;
+
+  procedure Keep(AFrames: Integer; AX, AKb: Double);
+  begin
+    if Abs(Log2(AKb / AKbps)) < bestErr then begin
+      bestErr := Abs(Log2(AKb / AKbps)); bestFrames := AFrames; bestX := AX;
+      Best.Clear; Pass.Position := 0; Best.CopyFrom(Pass, Pass.Size);
+    end;
+  end;
+
+  function NextX: Double;
+  begin
+    Result := EnsureRange(x + (Log2(AKbps) - Log2(k)) / slope, -12.0, 16.0);
+  end;
+
+begin
+  Result := -1;
+  pos0 := AWavIn.Position;
+  Pass := TMemoryStream.Create;
+  Best := TMemoryStream.Create;
+  Sub := ABRSampleWav(AWavIn);
+  try
+    if Sub <> nil then Src := Sub else Src := AWavIn;
+    bestErr := 1e30; bestFrames := -1; bestX := 0;
+    x := 0; xPrev := 0; kPrev := 0; k := 0;
+    slope := -1.0 / ABR_SEARCH_SLOPE_DB;
+    for n := 1 to ABR_PASSES do begin
+      frames := Run(Src, x, k);
+      if (frames <= 0) or (k <= 0) then Exit;
+      if Sub = nil then Keep(frames, x, k);
+      if Abs(Log2(k / AKbps)) < Log2(1 + ABR_TOL) then Break;
+      { the model slope at the first pass, or when the last two do not tell }
+      if (n > 1) and (Abs(x - xPrev) > 0.05) and (kPrev > 0) then begin
+        slope := (Log2(k) - Log2(kPrev)) / (x - xPrev);
+        if slope > -0.01 then slope := -0.01;     { flat (silence, 320 kbps cap) }
+      end;
+      xPrev := x; kPrev := k;
+      x := NextX;
+      if Abs(x - xPrev) < 0.02 then Break;        { at a bound: nothing to gain }
+    end;
+    if Sub <> nil then begin
+      { the whole file at the noise found on the sample, and one correction }
+      frames := Run(AWavIn, x, k);
+      if (frames <= 0) or (k <= 0) then Exit;
+      Keep(frames, x, k);
+      if Abs(Log2(k / AKbps)) >= Log2(1 + ABR_TOL) then begin
+        x := NextX;
+        frames := Run(AWavIn, x, k);
+        if frames > 0 then Keep(frames, x, k);
+      end;
+    end;
+    Best.Position := 0;
+    AOut.CopyFrom(Best, Best.Size);
+    Result := bestFrames;
+  finally
+    Pass.Free; Best.Free; Sub.Free;
+  end;
+end;
+
 { VBR (AAbrKbps = 0, quality AQuality) or ABR (AAbrKbps > 0) file with a
   Xing header, seek table and LAME extension }
 function EncodeWAVStreamXing(AWavIn, AMP3Out: TStream; AQuality, AAbrKbps: Integer): Integer;
@@ -711,7 +859,10 @@ begin
   AWavIn.Position := 0;
   Temp := TMemoryStream.Create;
   try
-    Result := EncodeWAVStreamEx(AWavIn, Temp, 9, 0, AQuality, AAbrKbps);
+    if AAbrKbps > 0 then
+      Result := EncodeABRSearch(AWavIn, Temp, AAbrKbps, Reader.Header.SampleRate)
+    else
+      Result := EncodeWAVStreamEx(AWavIn, Temp, 9, 0, AQuality);
     if Result < 0 then Exit;
     encPadding := Result * 1152 - totalSamples - ENC_DELAY;
     if encPadding < 0 then encPadding := 0;

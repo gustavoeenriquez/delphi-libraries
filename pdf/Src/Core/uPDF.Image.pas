@@ -549,7 +549,23 @@ begin
   // JBIG2: the filter chain decodes it to 1-bit samples; if that fails the
   // image keeps the JBIG2 encoding and is not drawn.
   if Result.FInfo.Encoding = TPDFImageEncoding.JPEG then
-    Result.FSamples := AStream.RawBytes
+  begin
+    Result.FSamples := AStream.RawBytes;
+    // [/FlateDecode /DCTDecode]: the JPEG is itself compressed. The filters
+    // before the DCT one are undone here; before, Skia got Flate bytes it
+    // could not decode and the image was not drawn (scanned MRC pages of a
+    // PGN sample showed blank, 2026-11-20).
+    var Fs: TArray<string>;
+    var Ps: TArray<TObject>;
+    GetImageFilters(AStream.Dict, Fs, Ps);
+    if (Length(Fs) > 1) and (SameText(Fs[High(Fs)], 'DCTDecode') or SameText(Fs[High(Fs)], 'DCT')) then
+      try
+        Result.FSamples := TPDFFilterPipeline.Decode(AStream.RawBytes,
+          Copy(Fs, 0, Length(Fs) - 1), Copy(Ps, 0, Length(Ps) - 1));
+      except
+        Result.FSamples := AStream.RawBytes;
+      end;
+  end
   else if Result.FInfo.Encoding = TPDFImageEncoding.CCITT then
   begin
     if not Result.AcceptBilevel(AStream.DecodedBytes) then
@@ -571,6 +587,48 @@ begin
     begin
       var SMaskImg := TPDFImage.FromXObject(TPDFStream(SMaskObj), AResolver);
       Result.FSMask := SMaskImg;
+    end;
+  end;
+
+  // Explicit masking (/Mask = image mask stream, ISO 32000-1 §8.9.6.3): it is
+  // turned into an 8-bit soft mask (255 where the mask paints, 0 where it
+  // masks out) so every soft-mask path draws it. Scanned MRC pages (JPEG
+  // background + JPEG "text colour" layer with a JBIG2 /Mask holding the
+  // text) came out blank or covered by the colour layer: 284 of 743 pages
+  // of a PGN sample (2026-11-20). A /Mask array (colour-key masking) is not
+  // handled here.
+  if Result.FSMask = nil then
+  begin
+    var MaskObj := AStream.Dict.Get('Mask');
+    if (MaskObj <> nil) and MaskObj.IsStream then
+    begin
+      var M: TPDFImage := nil;
+      try
+        M := TPDFImage.FromXObject(TPDFStream(MaskObj), AResolver);
+        if M <> nil then
+        begin
+          M.FInfo.IsImageMask := True;   // §8.9.6.3: the mask is an image mask
+          M.Decode;
+          var St := M.ToStencilRGBA(0, 0, 0, 255);
+          var N := M.FInfo.Width * M.FInfo.Height;
+          if (N > 0) and (Length(St) = N * 4) then
+          begin
+            var Gray: TBytes;
+            SetLength(Gray, N);
+            for var I := 0 to N - 1 do
+              Gray[I] := St[I * 4 + 3];
+            var SM := TPDFImage.Create;
+            SM.FInfo.Width  := M.FInfo.Width;
+            SM.FInfo.Height := M.FInfo.Height;
+            SM.SetDecodedGray(Gray);
+            Result.FSMask := SM;
+            Result.FInfo.HasSMask := True;
+          end;
+        end;
+      except
+        // máscara ilegible: la imagen se dibuja sin ella, como antes
+      end;
+      M.Free;
     end;
   end;
 end;

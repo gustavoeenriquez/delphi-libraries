@@ -211,16 +211,19 @@ begin
     begin
       Stm    := TPDFStream(AObj);
       NewStm := TPDFStream.Create;
-      // Deep-copy the stream dict into the new stream's own empty dict.
-      // /Length is recalculated by TPDFWriter; /Filter and /DecodeParms are
-      // stripped so the writer can apply fresh compression on the decoded bytes.
+      // The ENCODED bytes are copied with their /Filter and /DecodeParms
+      // (decrypted first; /Length is recalculated by TPDFWriter). Before, the
+      // decoded bytes were stored with the filters stripped, but the filter
+      // pipeline does not decode images (DCT, JPX, JBIG2, CCITT) and returns
+      // their bytes as they are: every JPEG came out as raw-pixel noise
+      // (2026-11-20, ExtractPages of a PGN document).
+      Stm.StripEncryption;
       Stm.Dict.ForEach(procedure(Key: string; Val: TPDFObject)
       begin
-        if (Key <> 'Length') and (Key <> 'Filter') and (Key <> 'DecodeParms') then
+        if Key <> 'Length' then
           NewStm.Dict.SetValue(Key, DeepCopyInline(Val));
       end);
-      // Store decoded (and decrypted) bytes — safe regardless of source encryption.
-      NewStm.SetRawData(Stm.DecodedBytes);
+      NewStm.SetRawData(System.Copy(Stm.RawBytes));
       Result := NewStm;
     end;
 

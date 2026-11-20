@@ -599,6 +599,69 @@ end;
 // the current FPages list (pages may have been modified/added/removed), and
 // write a fresh PDF using TPDFWriter.WriteFull.
 // -------------------------------------------------------------------------
+// Removes from AObjects every indirect object that cannot be reached by
+// following references from ARoots (the catalog and the Info dict). With no
+// catalog it does nothing: better to write a bloated file than a broken one.
+procedure RemoveUnreachableObjects(AObjects: TObjectDictionary<Integer, TPDFObject>;
+  const ARoots: array of TPDFObject);
+var
+  Marked:  TDictionary<Integer, Boolean>;
+  Pending: TStack<TPDFObject>;
+  Obj, Target: TPDFObject;
+  Dead:    TList<Integer>;
+  HasCatalog: Boolean;
+  I, N:    Integer;
+begin
+  HasCatalog := (Length(ARoots) > 0) and (ARoots[0] <> nil);
+  if not HasCatalog then Exit;
+  Marked  := TDictionary<Integer, Boolean>.Create;
+  Pending := TStack<TPDFObject>.Create;
+  Dead    := TList<Integer>.Create;
+  try
+    for Obj in ARoots do
+      if Obj <> nil then Pending.Push(Obj);
+    while Pending.Count > 0 do
+    begin
+      Obj := Pending.Pop;
+      if Obj = nil then Continue;
+      if Obj is TPDFReference then
+      begin
+        N := TPDFReference(Obj).RefID.Number;
+        if Marked.ContainsKey(N) then Continue;
+        Marked.Add(N, True);
+        if AObjects.TryGetValue(N, Target) then Pending.Push(Target);
+      end
+      else if Obj is TPDFStream then
+        Pending.Push(TPDFStream(Obj).Dict)
+      else if Obj is TPDFDictionary then
+        TPDFDictionary(Obj).ForEach(
+          procedure(AKey: string; AValue: TPDFObject)
+          begin
+            Pending.Push(AValue);
+          end)
+      else if Obj is TPDFArray then
+        for I := 0 to TPDFArray(Obj).Count - 1 do
+          Pending.Push(TPDFArray(Obj).Items(I));
+    end;
+    // The roots themselves are stored in AObjects under their own numbers.
+    for N in AObjects.Keys do
+      if not Marked.ContainsKey(N) then
+      begin
+        Obj := AObjects[N];
+        var IsRoot := False;
+        for Target in ARoots do
+          if Target = Obj then IsRoot := True;
+        if not IsRoot then Dead.Add(N);
+      end;
+    for N in Dead do
+      AObjects.Remove(N);
+  finally
+    Dead.Free;
+    Pending.Free;
+    Marked.Free;
+  end;
+end;
+
 procedure TPDFDocument.DoFullRewriteFromParser(AStream: TStream);
 var
   Objects:      TObjectDictionary<Integer, TPDFObject>;
@@ -756,6 +819,15 @@ begin
           InfoDict := TPDFDictionary(InfoObj);
       end;
     end;
+
+    // ---- Step 7b: drop unreachable objects ----
+    // Every object of the source was cloned in step 1, including the page
+    // content streams that SetContent/AppendContent REPLACED. Written as-is,
+    // the original text (e.g. the names a redaction removed) stayed in the
+    // file as orphan objects any parser could read (2026-11-20: 12 of the
+    // digital PDFs anonymized in the PGN J1 sample kept their original
+    // content). Only what the catalog and the Info dict reach is written.
+    RemoveUnreachableObjects(Objects, [CatalogDict, InfoDict]);
 
     // ---- Step 8: write ----
     var Opts := TPDFWriteOptions.Default;

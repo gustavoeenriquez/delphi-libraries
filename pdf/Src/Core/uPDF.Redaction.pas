@@ -43,6 +43,8 @@ uses
   uPDF.GraphicsState, uPDF.ContentStream, uPDF.TextExtractor;
 
 type
+  TPDFRedactBoxSpace = (TextSpace, Page);
+
   TPDFRedactor = class
   public
     // Scrub the page text layer. ABoxes are normalized [0..1], Y-down.
@@ -52,9 +54,17 @@ type
     // was scrubbed). Returns False and leaves the page UNCHANGED if some
     // targeted glyph's font cannot encode AReplacement — caller should then
     // rasterize the page. ACount returns the number of glyphs scrubbed.
+    //
+    // ABoxSpace = TextSpace (default, what TPDFTextSearch reports): the glyph
+    // position WITHOUT the CTM, normalized by the page width/height.
+    // ABoxSpace = Page: the glyph position in default user space (WITH the
+    // CTM), normalized to the CropBox (0,0 = its top-left corner): the space of
+    // the rendered page, i.e. a rectangle drawn by a user over the page image.
+    // Only meaningful for pages without /Rotate.
     class function ScrubPageTextLayer(ADoc: TPDFDocument; APageIndex: Integer;
       const ABoxes: TArray<TRectF>; const AReplacement: string;
-      out ACount: Integer): Boolean; static;
+      out ACount: Integer;
+      ABoxSpace: TPDFRedactBoxSpace = TPDFRedactBoxSpace.TextSpace): Boolean; static;
 
     // Igual que ScrubPageTextLayer, pero QUITA los glifos en vez de cambiarlos
     // por una letra: cada tramo borrado se sustituye por un ajuste de TJ con su
@@ -65,7 +75,13 @@ type
     // Devuelve False y deja la página INTACTA si no puede hacerlo con
     // seguridad (operadores ' y ", tamaño de letra 0): el llamador rasteriza.
     class function RemovePageTextLayer(ADoc: TPDFDocument; APageIndex: Integer;
-      const ABoxes: TArray<TRectF>; out ACount: Integer): Boolean; static;
+      const ABoxes: TArray<TRectF>; out ACount: Integer;
+      ABoxSpace: TPDFRedactBoxSpace = TPDFRedactBoxSpace.TextSpace): Boolean; static;
+
+    // Glyph centre normalized in the given space (see ScrubPageTextLayer).
+    class function GlyphCenter(const AGlyph: TPDFGlyphInfo;
+      const AState: TPDFGraphicsState; APage: TPDFPage;
+      ABoxSpace: TPDFRedactBoxSpace): TPointF; static;
   end;
 
 implementation
@@ -130,9 +146,34 @@ begin
   end;
 end;
 
+class function TPDFRedactor.GlyphCenter(const AGlyph: TPDFGlyphInfo;
+  const AState: TPDFGraphicsState; APage: TPDFPage;
+  ABoxSpace: TPDFRedactBoxSpace): TPointF;
+var
+  FS, W: Single;
+  P: TPointF;
+  Crop: TPDFRect;
+begin
+  if ABoxSpace = TPDFRedactBoxSpace.Page then
+  begin
+    // centro del glifo en el espacio del glifo (1 = 1 em) llevado a la página
+    // con la matriz completa (tamaño, Tm y CTM)
+    P := AGlyph.GlyphMatrix.Transform(TPointF.Create(AGlyph.Width / 2000.0, 0.35));
+    Crop := APage.CropBox;
+    if (Crop.Width <= 0) or (Crop.Height <= 0) then Exit(TPointF.Create(-1, -1));
+    Result.X := (P.X - Crop.LLX) / Crop.Width;
+    Result.Y := (Crop.URY - P.Y) / Crop.Height;
+    Exit;
+  end;
+  FS := AState.Text.FontSize;
+  W  := AGlyph.Width / 1000.0 * FS;
+  Result.X := (AGlyph.X + W * 0.5) / APage.Width;                    // no-CTM user space
+  Result.Y := (APage.Height - (AGlyph.Y + FS * 0.35)) / APage.Height; // Y-up -> Y-down
+end;
+
 class function TPDFRedactor.ScrubPageTextLayer(ADoc: TPDFDocument;
   APageIndex: Integer; const ABoxes: TArray<TRectF>; const AReplacement: string;
-  out ACount: Integer): Boolean;
+  out ACount: Integer; ABoxSpace: TPDFRedactBoxSpace): Boolean;
 var
   Page:    TPDFPage;
   Data:    TBytes;
@@ -171,19 +212,16 @@ begin
       Proc.OnPaintGlyph :=
         procedure(const G: TPDFGlyphInfo; const St: TPDFGraphicsState)
         var
-          FS, W, CX, CY, NX, NY: Single;
+          NX, NY: Single;
           B: TRectF;
           Inside: Boolean;
           Info: TOperandInfo;
         begin
           if (G.StringOffset < 0) or (G.Font = nil) then Exit;
 
-          FS := St.Text.FontSize;
-          W  := G.Width / 1000.0 * FS;
-          CX := G.X + W * 0.5;          // glyph center, no-CTM user space
-          CY := G.Y + FS * 0.35;        // ~vertical center above baseline
-          NX := CX / PageW;
-          NY := (PageH - CY) / PageH;   // Y-up -> Y-down normalized
+          var C := GlyphCenter(G, St, Page, ABoxSpace);
+          NX := C.X;
+          NY := C.Y;
 
           Inside := False;
           for B in ABoxes do
@@ -362,7 +400,8 @@ begin
 end;
 
 class function TPDFRedactor.RemovePageTextLayer(ADoc: TPDFDocument;
-  APageIndex: Integer; const ABoxes: TArray<TRectF>; out ACount: Integer): Boolean;
+  APageIndex: Integer; const ABoxes: TArray<TRectF>; out ACount: Integer;
+  ABoxSpace: TPDFRedactBoxSpace): Boolean;
 var
   Page:    TPDFPage;
   Data:    TBytes;
@@ -397,18 +436,16 @@ begin
       Proc.OnPaintGlyph :=
         procedure(const G: TPDFGlyphInfo; const St: TPDFGraphicsState)
         var
-          FS, W, CX, CY, NX, NY, A: Single;
+          FS, NX, NY, A: Single;
           B: TRectF;
           Inside: Boolean;
           Info: TOperandRemove;
         begin
           if G.StringOffset < 0 then Exit;
           FS := St.Text.FontSize;
-          W  := G.Width / 1000.0 * FS;
-          CX := G.X + W * 0.5;
-          CY := G.Y + FS * 0.35;
-          NX := CX / PageW;
-          NY := (PageH - CY) / PageH;
+          var C := GlyphCenter(G, St, Page, ABoxSpace);
+          NX := C.X;
+          NY := C.Y;
           Inside := False;
           for B in ABoxes do
             if (NX >= B.Left) and (NX <= B.Right) and

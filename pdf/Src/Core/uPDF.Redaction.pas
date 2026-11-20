@@ -512,8 +512,11 @@ begin
                              TPDFTokenKind.LiteralString, TPDFTokenKind.HexString,
                              TPDFTokenKind.ArrayClose] then
         begin
-          // dentro de un arreglo de TJ: los elementos van tal cual
-          NewOp := Items;
+          // dentro de un arreglo de TJ: los elementos van tal cual, CON
+          // espacios alrededor: en [(E)-27(S)56(C)] el operando es (S) y lo
+          // rodean números sin separador; "-556" pegado a "56" se leía
+          // "-55656" y todo lo que seguía en el renglón se corría (2026-11-20).
+          NewOp := ' ' + Items + ' ';
           LastPos := EndOff;
         end
         else

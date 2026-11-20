@@ -19,9 +19,14 @@ type
     FEntries:          TDictionary<Integer, TPDFXRefEntry>;
     FTrailer:          TPDFDictionary;
     FHighestObjNum:    Integer;
+    // objects the classic table being parsed marked free (a hybrid file's
+    // /XRefStm may fill them: ISO 32000-1 §7.5.8.4)
+    FSectionFree:      TDictionary<Integer, Byte>;
 
     procedure ParseClassicXRef(ALexer: TPDFLexer);
-    procedure ParseXRefStream(ARawData: TBytes; ADict: TPDFDictionary);
+    procedure ParseXRefStream(ARawData: TBytes; ADict: TPDFDictionary;
+      AHybrid: Boolean = False);
+    procedure ParseHybridStream(ALexer: TPDFLexer; AOffset: Int64);
     procedure MergeTrailer(ADict: TPDFDictionary);
 
     // Mini object parser (avoids circular dep with uPDF.Parser)
@@ -66,10 +71,12 @@ begin
   FEntries       := TDictionary<Integer, TPDFXRefEntry>.Create;
   FTrailer       := TPDFDictionary.Create;
   FHighestObjNum := 0;
+  FSectionFree := TDictionary<Integer, Byte>.Create;
 end;
 
 destructor TPDFXRef.Destroy;
 begin
+  FSectionFree.Free;
   FTrailer.Free;
   FEntries.Free;
   inherited;
@@ -264,6 +271,7 @@ var
   Line:         string;
   Entry:        TPDFXRefEntry;
 begin
+  FSectionFree.Clear;
   while True do
   begin
     var Tok := ALexer.PeekToken;
@@ -316,6 +324,8 @@ begin
       if not FEntries.ContainsKey(ObjNum) then
       begin
         FEntries.Add(ObjNum, Entry);
+        if Entry.EntryType = TPDFXRefEntryType.Free then
+          FSectionFree.AddOrSetValue(ObjNum, 0);
         if ObjNum > FHighestObjNum then
           FHighestObjNum := ObjNum;
       end;
@@ -328,7 +338,8 @@ end;
 // Parse XRef stream (PDF 1.5+)
 // =========================================================================
 
-procedure TPDFXRef.ParseXRefStream(ARawData: TBytes; ADict: TPDFDictionary);
+procedure TPDFXRef.ParseXRefStream(ARawData: TBytes; ADict: TPDFDictionary;
+  AHybrid: Boolean);
 var
   W:     array[0..2] of Integer;
   Data:  TBytes;
@@ -407,7 +418,11 @@ begin
       var T2 := ReadField(W[1]);
       var T3 := ReadField(W[2]);
 
-      if FEntries.ContainsKey(ObjNum) then Continue;
+      // a hybrid file's stream only fills what its own classic table left
+      // out or marked free; never what a later section says
+      if FEntries.ContainsKey(ObjNum) and
+         not (AHybrid and (T1 <> 0) and FSectionFree.ContainsKey(ObjNum)) then
+        Continue;
 
       var Entry: TPDFXRefEntry;
       case T1 of
@@ -436,10 +451,41 @@ begin
         Entry.IndexInStream := 0;
       end;
 
-      FEntries.Add(ObjNum, Entry);
+      FEntries.AddOrSetValue(ObjNum, Entry);
       if ObjNum > FHighestObjNum then
         FHighestObjNum := ObjNum;
     end;
+  end;
+end;
+
+procedure TPDFXRef.ParseHybridStream(ALexer: TPDFLexer; AOffset: Int64);
+// The /XRefStm of a hybrid-reference file (§7.5.8.4): an XRef stream with the
+// objects that the classic table of the same section does not list (usually
+// the ones inside object streams). Its dict is not a trailer and its /Prev is
+// not followed. A broken one is ignored, like a PDF 1.4 reader would.
+var
+  StreamDict: TPDFDictionary;
+begin
+  StreamDict := nil;
+  try
+    try
+      ALexer.SeekTo(AOffset);
+      if ALexer.NextToken.Kind <> TPDFTokenKind.Integer then Exit;
+      if ALexer.NextToken.Kind <> TPDFTokenKind.Integer then Exit;
+      if ALexer.NextToken.Kind <> TPDFTokenKind.ObjBegin then Exit;
+      if ALexer.NextToken.Kind <> TPDFTokenKind.DictOpen then Exit;
+      StreamDict := ParseDict(ALexer);
+      if StreamDict.GetAsName('Type') <> 'XRef' then Exit;
+      if ALexer.NextToken.Kind <> TPDFTokenKind.StreamBegin then Exit;
+      ALexer.SkipToEOL;
+      var StreamLen := StreamDict.GetAsInteger('Length');
+      if StreamLen <= 0 then Exit;
+      ParseXRefStream(ALexer.ReadRawBytes(StreamLen), StreamDict, True);
+    except
+      on EPDFXRefError do ;
+    end;
+  finally
+    StreamDict.Free;
   end;
 end;
 
@@ -483,6 +529,12 @@ begin
 
         var TrailerDict := ParseDict(ALexer);
         MergeTrailer(TrailerDict);
+
+        // hybrid-reference file (Word, among others): the objects in object
+        // streams are listed only in the /XRefStm of this same section
+        var HybridOffset := TrailerDict.GetAsInteger('XRefStm', -1);
+        if HybridOffset >= 0 then
+          ParseHybridStream(ALexer, HybridOffset);
 
         Offset := TrailerDict.GetAsInteger('Prev', -1);
         TrailerDict.Free;

@@ -6,7 +6,7 @@ interface
 
 uses
   System.SysUtils, System.Classes, System.Generics.Collections,
-  System.Generics.Defaults, System.Math,
+  System.Generics.Defaults, System.Math, System.Types,
   uPDF.Types, uPDF.Errors, uPDF.Objects, uPDF.Document,
   uPDF.GraphicsState, uPDF.ColorSpace, uPDF.Font,
   uPDF.ContentStream;
@@ -241,10 +241,19 @@ begin
   if AGlyph.Unicode = '' then Exit;
 
   Frag.Text     := AGlyph.Unicode;
-  Frag.X        := AGlyph.X;
-  Frag.Y        := AGlyph.Y;
-  Frag.Width    := AGlyph.Width / 1000.0 * AState.Text.FontSize;
-  Frag.FontSize := AState.Text.FontSize;
+  // Posicion, ancho y tamano en el espacio de la pagina: GlyphMatrix = [FS*Th 0 0 FS 0 Rise] x Tm x CTM.
+  // AGlyph.X/Y son solo Tm (sin CTM; la redaccion en espacio de texto cuenta con eso): un PDF que ubica
+  // cada parrafo con 'cm' y repite el mismo Tm (reportlab, SimpleDocTemplate) dejaba todos los glifos en
+  // la misma linea y BuildLines los intercalaba por X ("EOTPSerencirx...").
+  var P0 := AGlyph.GlyphMatrix.Transform(TPointF.Create(0, 0));
+  var PW := AGlyph.GlyphMatrix.Transform(TPointF.Create(AGlyph.Width / 1000.0, 0));
+  var PH := AGlyph.GlyphMatrix.Transform(TPointF.Create(0, 1));
+  Frag.X        := P0.X;
+  Frag.Y        := P0.Y;
+  Frag.Width    := Abs(PW.X - P0.X);
+  Frag.FontSize := Abs(PH.Y - P0.Y);
+  if Frag.FontSize <= 0 then
+    Frag.FontSize := AState.Text.FontSize;
   Frag.FontName := '';
   if AState.Text.Font <> nil then
     Frag.FontName := AState.Text.Font.Name;

@@ -5,7 +5,7 @@
 {$R *.res}
 
 uses
-  System.SysUtils, System.Classes, System.StrUtils, System.Math,
+  System.SysUtils, System.Classes, System.StrUtils, System.Math, System.IOUtils,
   uPDF.Types        in '..\Src\Core\uPDF.Types.pas',
   uPDF.Errors       in '..\Src\Core\uPDF.Errors.pas',
   uPDF.Objects      in '..\Src\Core\uPDF.Objects.pas',
@@ -411,6 +411,88 @@ const
   PDF_WORD = 'D:\Documentos\Cuentas de Cobro\2026\pdf\Cuenta de Cobro 452 - Avance Juridico.pdf';
   PDF_SCAN = 'E:\Copilot\AvanceJuridico\Docs\pdfocr\14DESE_1.PDF';
 
+// =========================================================================
+// T07 — Paragraphs placed with 'cm' and the same Tm (reportlab style)
+// =========================================================================
+
+/// A minimal PDF like the ones reportlab's SimpleDocTemplate writes: each paragraph is moved into place
+/// with "1 0 0 1 x y cm" inside q/Q and every paragraph repeats the same "1 0 0 1 0 14 Tm". The positions
+/// must include the CTM; with only Tm, every glyph landed on one line and the letters were interleaved.
+function BuildCmPdf: TBytes;
+const
+  CONTENT =
+    'q 1 0 0 1 72 700 cm BT 1 0 0 1 0 14 Tm /F1 10 Tf 12 TL (Primera linea del parrafo uno) Tj T* (Segunda linea del parrafo uno) Tj ET Q'#10 +
+    'q 1 0 0 1 72 660 cm BT 1 0 0 1 0 14 Tm /F1 10 Tf 12 TL (Parrafo dos completo) Tj ET Q'#10 +
+    'q 1 0 0 1 72 640 cm BT 1 0 0 1 0 14 Tm /F1 10 Tf 12 TL (Parrafo tres al final) Tj ET Q'#10;
+var
+  Objs: TArray<string>;
+  SB: TStringBuilder;
+  Offsets: TArray<Integer>;
+begin
+  Objs := [
+    '<< /Type /Catalog /Pages 2 0 R >>',
+    '<< /Type /Pages /Kids [3 0 R] /Count 1 >>',
+    '<< /Type /Page /Parent 2 0 R /MediaBox [0 0 612 792] /Resources << /Font << /F1 5 0 R >> >> /Contents 4 0 R >>',
+    '<< /Length ' + IntToStr(Length(CONTENT)) + ' >>'#10'stream'#10 + CONTENT + 'endstream',
+    '<< /Type /Font /Subtype /Type1 /BaseFont /Helvetica /Encoding /WinAnsiEncoding >>'];
+  SB := TStringBuilder.Create;
+  try
+    SB.Append('%PDF-1.4'#10);
+    SetLength(Offsets, Length(Objs));
+    for var I := 0 to High(Objs) do
+    begin
+      Offsets[I] := SB.Length;           // ASCII only: characters = bytes
+      SB.Append(IntToStr(I + 1) + ' 0 obj'#10 + Objs[I] + #10'endobj'#10);
+    end;
+    var XRef := SB.Length;
+    SB.Append('xref'#10'0 ' + IntToStr(Length(Objs) + 1) + #10'0000000000 65535 f '#10);
+    for var O in Offsets do
+      SB.Append(Format('%.10d 00000 n '#10, [O]));
+    SB.Append('trailer'#10'<< /Size ' + IntToStr(Length(Objs) + 1) + ' /Root 1 0 R >>'#10 +
+      'startxref'#10 + IntToStr(XRef) + #10'%%EOF'#10);
+    Result := TEncoding.ASCII.GetBytes(SB.ToString);
+  finally
+    SB.Free;
+  end;
+end;
+
+procedure TestCmParagraphs;
+var
+  Path, Text: string;
+  Doc: TPDFDocument;
+  Ext: TPDFTextExtractor;
+begin
+  Section('T07 — Paragraphs placed with cm (reportlab)');
+  Path := TPath.Combine(TPath.GetTempPath, 'pdf_cm_paragraphs.pdf');
+  TFile.WriteAllBytes(Path, BuildCmPdf);
+  try
+    Doc := TPDFDocument.Create;
+    try
+      Doc.LoadFromFile(Path);
+      Ext := TPDFTextExtractor.Create(Doc);
+      try
+        Text := Ext.ExtractAllText;
+      finally
+        Ext.Free;
+      end;
+    finally
+      Doc.Free;
+    end;
+    WriteLn('  Text: ', Preview(Text, 200));
+    Check(Text.Contains('Primera linea del parrafo uno'), 'line 1 of paragraph 1 is intact', Preview(Text));
+    Check(Text.Contains('Segunda linea del parrafo uno'), 'line 2 (T*) of paragraph 1 is intact', Preview(Text));
+    Check(Text.Contains('Parrafo dos completo') and Text.Contains('Parrafo tres al final'), 'paragraphs 2 and 3 are intact',
+      Preview(Text));
+    var A := Text.IndexOf('Primera linea');
+    var B := Text.IndexOf('Segunda linea');
+    var C := Text.IndexOf('Parrafo dos');
+    var D := Text.IndexOf('Parrafo tres');
+    Check((A >= 0) and (A < B) and (B < C) and (C < D), 'top-to-bottom order', Format('%d %d %d %d', [A, B, C, D]));
+  finally
+    TFile.Delete(Path);
+  end;
+end;
+
 begin
   WriteLn('======================================================');
   WriteLn(' TestTextExtractor — PDF Library Phase 3 Validation');
@@ -422,6 +504,9 @@ begin
   TestLineGrouping(PDF_WORD);
   TestFragmentPositions(PDF_WORD);
   TestMultiPage(PDF_WORD, 1);
+
+  // Self-contained: paragraphs placed with cm and the same Tm (reportlab)
+  TestCmParagraphs;
 
   // Secondary: scanned PDF — should not crash, text may be empty
   TestScannedPDF(PDF_SCAN);

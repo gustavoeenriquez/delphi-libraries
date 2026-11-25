@@ -55,6 +55,9 @@ type
     /// bytes reserved for the CMS (the hex hole is twice this); must hold the
     /// signature, certificates and the timestamp token
     ContentsSize: Integer;
+    /// a document timestamp (ETSI.RFC3161, /Type /DocTimeStamp) instead of a
+    /// signature: ASign returns the RFC 3161 token over the bytes (PAdES-LTA)
+    DocTimeStamp: Boolean;
     class function Defaults: TPDFSignatureOptions; static;
   end;
 
@@ -62,6 +65,11 @@ type
   public
     class function Sign(const ASource: TBytes; const AOptions: TPDFSignatureOptions;
       const ASign: TPDFSignFunc): TBytes; static;
+    /// adds the validation data of the signatures (certificates, OCSP responses,
+    /// CRLs, all DER) to the Document Security Store (/DSS, PAdES-LT) as an
+    /// incremental update; what the file already had in /DSS is kept
+    class function AddDss(const ASource: TBytes; const ACerts, AOcsps,
+      ACrls: TArray<TBytes>): TBytes; static;
   end;
 
   TPDFFoundSignature = record
@@ -225,16 +233,27 @@ begin
 
     // 1. the signature dictionary, with placeholders
     SigDict := TPDFDictionary.Create;
-    SigDict.SetValue('Type', TPDFName.Create('Sig'));
-    SigDict.SetValue('Filter', TPDFName.Create('Adobe.PPKLite'));
-    SigDict.SetValue('SubFilter', TPDFName.Create('ETSI.CAdES.detached'));
+    if Opt.DocTimeStamp then
+    begin
+      SigDict.SetValue('Type', TPDFName.Create('DocTimeStamp'));
+      SigDict.SetValue('Filter', TPDFName.Create('Adobe.PPKLite'));
+      SigDict.SetValue('SubFilter', TPDFName.Create('ETSI.RFC3161'));
+    end
+    else
+    begin
+      SigDict.SetValue('Type', TPDFName.Create('Sig'));
+      SigDict.SetValue('Filter', TPDFName.Create('Adobe.PPKLite'));
+      SigDict.SetValue('SubFilter', TPDFName.Create('ETSI.CAdES.detached'));
+    end;
     BR := TPDFArray.Create;
     for I := 0 to 3 do
       BR.Add(TPDFInteger.Create(BR_PLACEHOLDER));
     SigDict.SetValue('ByteRange', BR);
     SigDict.SetValue('Contents', TPDFString.Create(
       RawByteString(StringOfChar(#0, Opt.ContentsSize)), True));
-    SigDict.SetValue('M', TPDFString.Create(Ascii(PdfDate(Opt.SigningTime, Opt.UtcOffsetMinutes))));
+    // a document timestamp carries its time in the token (ISO 32000-2 §12.8.5)
+    if not Opt.DocTimeStamp then
+      SigDict.SetValue('M', TPDFString.Create(Ascii(PdfDate(Opt.SigningTime, Opt.UtcOffsetMinutes))));
     if Opt.Name <> '' then SigDict.SetValue('Name', TextString(Opt.Name));
     if Opt.Reason <> '' then SigDict.SetValue('Reason', TextString(Opt.Reason));
     if Opt.Location <> '' then SigDict.SetValue('Location', TextString(Opt.Location));
@@ -340,6 +359,90 @@ begin
   for I := 1 to Length(Hex) do
     Buf[CtOpen + I] := Ord(Hex[I]);
   Result := Buf;
+end;
+
+class function TPDFSignatureWriter.AddDss(const ASource: TBytes; const ACerts, AOcsps,
+  ACrls: TArray<TBytes>): TBytes;
+var
+  Upd: TPDFIncrementalUpdater;
+  Doc: TPDFDocument;
+  CatNum: Integer;
+  NewCat, Dss, OldDss: TPDFDictionary;
+  Old: TPDFObject;
+  Out_: TBytesStream;
+
+  // the existing array of /DSS (references) plus a new stream per item
+  function Merge(const AKey: string; const AItems: TArray<TBytes>): TPDFArray;
+  var
+    I, J: Integer;
+    S: TPDFStream;
+    Seen: Boolean;
+  begin
+    Result := TPDFArray.Create;
+    if OldDss <> nil then
+    begin
+      Old := OldDss.RawGet(AKey);
+      if (Old <> nil) and Old.IsArray then
+        for I := 0 to TPDFArray(Old).Count - 1 do
+          Result.Add(TPDFArray(Old).Items(I).Clone);
+    end;
+    for I := 0 to High(AItems) do
+    begin
+      if Length(AItems[I]) = 0 then
+        Continue;
+      Seen := False;
+      for J := 0 to I - 1 do
+        if (Length(AItems[J]) = Length(AItems[I])) and
+           CompareMem(@AItems[J][0], @AItems[I][0], Length(AItems[I])) then
+          Seen := True;
+      if Seen then
+        Continue;
+      S := TPDFStream.Create;
+      S.SetRawData(Copy(AItems[I]));
+      S.Dict.SetValue('Length', TPDFInteger.Create(Length(AItems[I])));
+      Result.Add(TPDFReference.CreateNum(Upd.AddObject(S), 0));
+    end;
+  end;
+
+var
+  A: TPDFArray;
+begin
+  Upd := TPDFIncrementalUpdater.Create(ASource);
+  try
+    Doc := Upd.Document;
+    if Doc.IsEncrypted then
+      raise EPDFError.Create('PDF cifrado: no se agrega el DSS');
+    CatNum := Doc.Catalog.ID.Number;
+    if CatNum <= 0 then
+    begin
+      Old := Doc.Trailer.RawGet('Root');
+      if (Old <> nil) and Old.IsReference then
+        CatNum := TPDFReference(Old).RefID.Number;
+    end;
+    if CatNum <= 0 then
+      raise EPDFError.Create('el catálogo no es un objeto indirecto');
+    OldDss := Doc.Catalog.GetAsDictionary('DSS');
+    Dss := TPDFDictionary.Create;
+    A := Merge('Certs', ACerts);
+    if A.Count > 0 then Dss.SetValue('Certs', A) else A.Free;
+    A := Merge('OCSPs', AOcsps);
+    if A.Count > 0 then Dss.SetValue('OCSPs', A) else A.Free;
+    A := Merge('CRLs', ACrls);
+    if A.Count > 0 then Dss.SetValue('CRLs', A) else A.Free;
+    // the DSS goes as an indirect object, the catalog points to it
+    NewCat := TPDFDictionary(Doc.Catalog.Clone);
+    NewCat.SetValue('DSS', TPDFReference.CreateNum(Upd.AddObject(Dss), 0));
+    Upd.ReplaceObject(CatNum, NewCat);
+    Out_ := TBytesStream.Create;
+    try
+      Upd.SaveToStream(Out_);
+      Result := Copy(Out_.Bytes, 0, Out_.Size);
+    finally
+      Out_.Free;
+    end;
+  finally
+    Upd.Free;
+  end;
 end;
 
 { TPDFSignatureReader }

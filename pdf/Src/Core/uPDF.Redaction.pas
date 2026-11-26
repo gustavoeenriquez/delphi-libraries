@@ -78,6 +78,17 @@ type
       const ABoxes: TArray<TRectF>; out ACount: Integer;
       ABoxSpace: TPDFRedactBoxSpace = TPDFRedactBoxSpace.TextSpace): Boolean; static;
 
+    // Lo mismo sobre cualquier contenido (la página o un formulario XObject):
+    // ABase lleva el espacio del contenido al de la página (para un
+    // formulario, su /Matrix por la CTM con que se pinta). No cambia nada:
+    // devuelve el contenido nuevo en ANewData (vacío si no quitó nada).
+    // Solo tiene sentido con ABoxSpace = Page.
+    class function RemoveTextInContent(APage: TPDFPage; const AData: TBytes;
+      const AResources: IPDFResources; const ABase: TPDFMatrix;
+      const ABoxes: TArray<TRectF>; out ANewData: TBytes; out ACount: Integer;
+      ABoxSpace: TPDFRedactBoxSpace = TPDFRedactBoxSpace.Page): Boolean; static;
+
+
     // Glyph centre normalized in the given space (see ScrubPageTextLayer).
     class function GlyphCenter(const AGlyph: TPDFGlyphInfo;
       const AState: TPDFGraphicsState; APage: TPDFPage;
@@ -403,34 +414,69 @@ class function TPDFRedactor.RemovePageTextLayer(ADoc: TPDFDocument;
   APageIndex: Integer; const ABoxes: TArray<TRectF>; out ACount: Integer;
   ABoxSpace: TPDFRedactBoxSpace): Boolean;
 var
+  Page: TPDFPage;
+  Data, NewData: TBytes;
+  Res:  IPDFResources;
+begin
+  ACount := 0;
+  if (ADoc = nil) or (APageIndex < 0) or (APageIndex >= ADoc.PageCount) then
+    Exit(False);
+  Page := ADoc.Pages[APageIndex];
+  if (Page.Width <= 0) or (Page.Height <= 0) then Exit(True);
+  Data := Page.ContentStreamBytes;
+  if Length(Data) = 0 then Exit(True);
+  Res := TPDFPageResources.Create(Page);
+  Result := RemoveTextInContent(Page, Data, Res, TPDFMatrix.Identity, ABoxes,
+    NewData, ACount, ABoxSpace);
+  if Result and (ACount > 0) then
+    Page.SetContent(NewData);
+end;
+
+class function TPDFRedactor.RemoveTextInContent(APage: TPDFPage;
+  const AData: TBytes; const AResources: IPDFResources; const ABase: TPDFMatrix;
+  const ABoxes: TArray<TRectF>; out ANewData: TBytes; out ACount: Integer;
+  ABoxSpace: TPDFRedactBoxSpace): Boolean;
+var
   Page:    TPDFPage;
   Data:    TBytes;
-  Res:     IPDFResources;
   Proc:    TPDFContentStreamProcessor;
   Targets: TObjectDictionary<Int64, TOperandRemove>;
-  PageW, PageH: Single;
   Offs:    TList<Int64>;
   LexStream: TBytesStream;
   Lexer:   TPDFLexer;
   Outp:    TBytesStream;
   LastPos: Int64;
   Bad:     Boolean;
+  PrefixLen: Integer;
+  Run:     TBytes;
 begin
   ACount := 0;
-  if (ADoc = nil) or (APageIndex < 0) or (APageIndex >= ADoc.PageCount) then
-    Exit(False);
-  Page  := ADoc.Pages[APageIndex];
-  PageW := Page.Width;
-  PageH := Page.Height;
-  if (PageW <= 0) or (PageH <= 0) then Exit(True);
-  Data := Page.ContentStreamBytes;
+  ANewData := nil;
+  Page := APage;
+  Data := AData;
   if Length(Data) = 0 then Exit(True);
+  // un formulario se procesa con su matriz delante ("a b c d e f cm"): así
+  // los glifos salen en el espacio de la página; los desplazamientos se
+  // corrigen después restando el prefijo
+  PrefixLen := 0;
+  Run := Data;
+  if not ABase.IsIdentity then
+  begin
+    var Prefix := TEncoding.ASCII.GetBytes(
+      FormatFloat('0.######', ABase.A, TFormatSettings.Invariant) + ' ' +
+      FormatFloat('0.######', ABase.B, TFormatSettings.Invariant) + ' ' +
+      FormatFloat('0.######', ABase.C, TFormatSettings.Invariant) + ' ' +
+      FormatFloat('0.######', ABase.D, TFormatSettings.Invariant) + ' ' +
+      FormatFloat('0.######', ABase.E, TFormatSettings.Invariant) + ' ' +
+      FormatFloat('0.######', ABase.F, TFormatSettings.Invariant) + ' cm'#10);
+    PrefixLen := Length(Prefix);
+    Run := Prefix + Data;
+  end;
 
   Targets := TObjectDictionary<Int64, TOperandRemove>.Create([doOwnsValues]);
   try
     // -------- Pass 1: glifos a quitar (mismo criterio de centro que Scrub) ----
     Bad := False;
-    Res  := TPDFPageResources.Create(Page);
     Proc := TPDFContentStreamProcessor.Create;
     try
       Proc.OnPaintGlyph :=
@@ -472,7 +518,7 @@ begin
           end;
           Info.Adv.AddOrSetValue(G.GlyphIndex, A);
         end;
-      Proc.Process(Data, Res, Page.Document.Resolver);
+      Proc.Process(Run, AResources, Page.Document.Resolver);
     finally
       Proc.Free;
     end;
@@ -481,7 +527,7 @@ begin
 
     // -------- Pass 2: reescribir; todo o nada --------
     Offs := TList<Int64>.Create;
-    LexStream := TBytesStream.Create(Data);
+    LexStream := TBytesStream.Create(Run);
     Lexer := TPDFLexer.Create(LexStream, False);
     Outp  := TBytesStream.Create;
     try
@@ -493,7 +539,7 @@ begin
       begin
         if O < LastPos then Exit(False);
         if O > LastPos then
-          Outp.Write(Data[LastPos], O - LastPos);
+          Outp.Write(Run[LastPos], O - LastPos);
         Lexer.SeekTo(O);
         var Tok := Lexer.NextToken;
         var EndOff := Lexer.Position;
@@ -526,9 +572,9 @@ begin
           Outp.Write(NB[0], Length(NB));
         Inc(ACount, Info.Adv.Count);
       end;
-      if Length(Data) > LastPos then
-        Outp.Write(Data[LastPos], Length(Data) - LastPos);
-      Page.SetContent(Copy(Outp.Bytes, 0, Outp.Size));
+      if Length(Run) > LastPos then
+        Outp.Write(Run[LastPos], Length(Run) - LastPos);
+      ANewData := Copy(Outp.Bytes, PrefixLen, Outp.Size - PrefixLen);
     finally
       Outp.Free;
       Lexer.Free;

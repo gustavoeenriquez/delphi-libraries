@@ -75,6 +75,10 @@ type
     procedure WriteEOL; inline;
 
   public
+    /// file identifier for the trailer /ID of a full rewrite (two copies of
+    // the same 16 bytes); empty = no /ID. PDF/A requires it (ISO 19005 6.1.3)
+    FileID: TBytes;
+
     constructor Create(AOut: TStream; const AOptions: TPDFWriteOptions);
     destructor  Destroy; override;
 
@@ -701,6 +705,9 @@ begin
   // Decide what bytes to write
   // If CompressStreams and no filter yet, apply FlateDecode
   var AlreadyFiltered := AObj.Dict.Contains('Filter');
+  // XMP metadata streams stay readable as plain text (PDF/A, ISO 32000 §14.3.2)
+  if AObj.Dict.GetAsName('Type') = 'Metadata' then
+    AlreadyFiltered := True;
 
   if ACompress and not AlreadyFiltered then
   begin
@@ -1077,6 +1084,17 @@ begin
         end;
       if InfoNum > 0 then
         TrailerDict.SetValue('Info', TPDFReference.CreateNum(InfoNum, 0));
+    end;
+
+    if Length(FileID) > 0 then
+    begin
+      var IdRaw: RawByteString;
+      SetLength(IdRaw, Length(FileID));
+      Move(FileID[0], IdRaw[1], Length(FileID));
+      var IdArr := TPDFArray.Create;
+      IdArr.Add(TPDFString.Create(IdRaw, True));
+      IdArr.Add(TPDFString.Create(IdRaw, True));
+      TrailerDict.SetValue('ID', IdArr);
     end;
 
     if FOptions.UseXRefStream then

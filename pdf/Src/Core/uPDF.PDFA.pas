@@ -13,7 +13,9 @@
 //              encryption, CMYK images, attachments in 2b, annotations
 //              without appearance...) is returned in Problems and Ok=False.
 //              A file that already declares PDF/A is returned as it is.
-//   FromImages JPEG and PNG, one page per image, at its own resolution.
+//   FromImages JPEG, PNG and TIFF (every page; Group 4 and JPEG strips go as
+//              they are, see uPDF.TIFF), one page per image, at its own
+//              resolution.
 //   FromText   plain text paginated on A4 with an embedded TrueType subset;
 //              with Attach, PDF/A-3b with the original as an associated file
 //              (e-mail: the .eml with AFRelationship /Source).
@@ -70,7 +72,7 @@ implementation
 uses
   System.Math, System.DateUtils, System.ZLib, System.Hash, System.IOUtils,
   uPDF.Types, uPDF.Objects, uPDF.Parser, uPDF.XRef, uPDF.Writer,
-  uPDF.TTFParser, uPDF.TTFSubset, uPDF.EmbeddedFont;
+  uPDF.TTFParser, uPDF.TTFSubset, uPDF.EmbeddedFont, uPDF.TIFF;
 
 { ---- small helpers ---- }
 
@@ -1492,6 +1494,86 @@ begin
   end;
 end;
 
+// the pages of a TIFF; False with the problem in R
+function AddTiffPages(B: TPDFBuilder; const Img: TBytes; var R: TPDFAResult): Boolean;
+var
+  Pages: TArray<TTiffPage>;
+  Why: string;
+  Page: TPDFDictionary;
+  W, H, Sy: Single;
+  Cb: TPDFContentBuilder;
+  Stm: TPDFStream;
+  Parms, Arr: TPDFObject;
+begin
+  Result := ReadTiff(Img, Pages, Why);
+  if not Result then
+  begin
+    AddProblem(R, Why);
+    Exit;
+  end;
+  for var P in Pages do
+  begin
+    // the page at the scan's own resolution (a fax: 204 x 98 dpi)
+    W := P.Width * 72 / P.DpiX;
+    H := P.Height * 72 / P.DpiY;
+    Sy := 72 / P.DpiY;
+    Page := B.AddPage(W, H);
+    Cb := TPDFContentBuilder.Create;
+    try
+      for var Pc in P.Pieces do
+      begin
+        Stm := TPDFStream.Create;
+        Stm.Dict.SetValue('Width', TPDFInteger.Create(Pc.Width));
+        Stm.Dict.SetValue('Height', TPDFInteger.Create(Pc.Rows));
+        Stm.Dict.SetValue('ColorSpace', TPDFName.Create(Pc.ColorSpace));
+        Stm.Dict.SetValue('BitsPerComponent', TPDFInteger.Create(Pc.Bpc));
+        case Pc.Kind of
+          TTiffPieceKind.CCITT:
+            begin
+              Stm.Dict.SetValue('Filter', TPDFName.Create('CCITTFaxDecode'));
+              var D := TPDFDictionary.Create;
+              D.SetValue('K', TPDFInteger.Create(-1));
+              D.SetValue('Columns', TPDFInteger.Create(Pc.Width));
+              D.SetValue('Rows', TPDFInteger.Create(Pc.Rows));
+              if Pc.BlackIs1 then
+                D.SetValue('BlackIs1', TPDFBoolean.Create(True));
+              Parms := D;
+              Stm.Dict.SetValue('DecodeParms', Parms);
+            end;
+          TTiffPieceKind.JPEG:
+            begin
+              Stm.Dict.SetValue('Filter', TPDFName.Create('DCTDecode'));
+              if Pc.NoColorTransform then
+              begin
+                var D := TPDFDictionary.Create;
+                D.SetValue('ColorTransform', TPDFInteger.Create(0));
+                Parms := D;
+                Stm.Dict.SetValue('DecodeParms', Parms);
+              end;
+            end;
+        else
+          if Pc.Invert then
+          begin
+            var A := TPDFArray.Create;
+            A.Add(TPDFInteger.Create(1));
+            A.Add(TPDFInteger.Create(0));
+            Arr := A;
+            Stm.Dict.SetValue('Decode', Arr);
+          end;
+        end;
+        Stm.SetRawData(Pc.Data);
+        Stm.Dict.SetValue('Length', TPDFInteger.Create(Length(Pc.Data)));
+        var Name := B.AddImageXObject(Page, Stm);
+        // strips stacked from the top
+        Cb.DrawXObject(Name, 0, H - (Pc.Top + Pc.Rows) * Sy, W, Pc.Rows * Sy);
+      end;
+      B.SetPageContent(Page, Cb.Build);
+    finally
+      Cb.Free;
+    end;
+  end;
+end;
+
 class function TPDFAConverter.FromImages(const Images: TArray<TBytes>;
   const Opt: TPDFAOptions): TPDFAResult;
 var
@@ -1512,6 +1594,15 @@ begin
   try
     for var Img in Images do
     begin
+      // II or MM (a BigTIFF too: ReadTiff says why it is not read)
+      if (Length(Img) > 3) and (((Img[0] = Ord('I')) and (Img[1] = Ord('I'))) or
+         ((Img[0] = Ord('M')) and (Img[1] = Ord('M')))) then
+      begin
+        // TIFF: every page, G4 and JPEG strips as they are
+        if not AddTiffPages(B, Img, Result) then
+          Exit;
+        Continue;
+      end;
       if (Length(Img) > 3) and (Img[0] = $FF) and (Img[1] = $D8) then
         Info := JpegInfo(Img)
       else

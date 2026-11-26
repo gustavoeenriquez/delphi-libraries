@@ -207,6 +207,12 @@ type
                 AImageWidth, AImageHeight: Integer;
                 const AColorSpace: string = 'DeviceRGB'): string;
 
+    // Register an image XObject the caller built (any /Filter, /DecodeParms,
+    // /Decode, BitsPerComponent...). /Type and /Subtype are set here.
+    // The builder owns AStream afterwards.
+    function  AddImageXObject(APageDict: TPDFDictionary;
+                AStream: TPDFStream): string;
+
     // ---- Annotations ----
     //
     // Add a URI hyperlink annotation (invisible rectangle, no border).
@@ -504,6 +510,11 @@ begin
   else
   begin
     Result := Format('%.6g', [V]);
+    // PDF numbers have no exponent (ISO 32000 7.3.3): %g gives one below
+    // 1e-4 and from 1e6 up ("-2.28882E-005" is not a number in a content
+    // stream, and PDF/A rejects it as an unknown operator)
+    if Result.Contains('E') or Result.Contains('e') then
+      Result := FormatFloat('0.######', V, TFormatSettings.Invariant);
     // Always use '.' as decimal separator regardless of locale
     Result := Result.Replace(',', '.');
     // Remove trailing zeros after decimal point
@@ -1429,6 +1440,14 @@ begin
   Stm.SetRawData(APixels);
   Stm.Dict.SetValue('Length', TPDFInteger.Create(Length(APixels)));
   Result := RegisterImageStream(APageDict, Stm);
+end;
+
+function TPDFBuilder.AddImageXObject(APageDict: TPDFDictionary;
+  AStream: TPDFStream): string;
+begin
+  AStream.Dict.SetValue('Type',    TPDFName.Create('XObject'));
+  AStream.Dict.SetValue('Subtype', TPDFName.Create('Image'));
+  Result := RegisterImageStream(APageDict, AStream);
 end;
 
 procedure TPDFBuilder.AddLinkURI(APageDict: TPDFDictionary;

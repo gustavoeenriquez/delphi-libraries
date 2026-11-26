@@ -37,6 +37,10 @@ type
     Title, Author, Subject, Producer: string;
     /// TrueType font for new text (FromText); e.g. DejaVuSans.ttf
     FontFile: string;
+    /// where the substitutes for standard fonts without their program are
+    /// (Liberation Sans, Serif and Mono, metric-compatible with Arial, Times and
+    /// Courier); empty = no substitution
+    SubstituteFontDir: string;
     class function Defaults: TPDFAOptions; static;
   end;
 
@@ -75,6 +79,9 @@ begin
   Result := Default(TPDFAOptions);
   Result.Part := TPDFAPart.pdfa2b;
   Result.Producer := 'delphi-libraries PDF/A';
+  {$IFDEF LINUX}
+  Result.SubstituteFontDir := '/usr/share/fonts/truetype/liberation';
+  {$ENDIF}
 end;
 
 function Raw(const B: TBytes): RawByteString;
@@ -378,9 +385,14 @@ type
     function AlreadyPdfA: Boolean;
     procedure FixObject(Num: Integer; O: TPDFObject);
     procedure FixDict(D: TPDFDictionary; IsStream: Boolean);
+    /// embeds a metric-compatible substitute (Liberation) for a standard font
+    // that came without its program; False if there is none
+    function Substitute(D, Fd: TPDFDictionary): Boolean;
     procedure FixCatalog;
     procedure Metadata;
     procedure Attach(const Data: TBytes; const Name, Mime: string);
+    /// equal objects written once (the per-page copies of a font, for example)
+    procedure Dedupe;
     function Save: TBytes;
   public
     constructor Create(const Opt: TPDFAOptions);
@@ -512,6 +524,172 @@ begin
   Result := False;
 end;
 
+// WinAnsiEncoding (cp1252) to Unicode; the rest of 32..255 is Latin-1
+function WinAnsiToUnicode(Code: Integer): Cardinal;
+const
+  HI: array[$80..$9F] of Word = ($20AC, 0, $201A, $0192, $201E, $2026, $2020, $2021, $02C6,
+    $2030, $0160, $2039, $0152, 0, $017D, 0, 0, $2018, $2019, $201C, $201D, $2022, $2013,
+    $2014, $02DC, $2122, $0161, $203A, $0153, 0, $017E, $0178);
+begin
+  if (Code >= $80) and (Code <= $9F) then
+    Result := HI[Code]
+  else
+    Result := Code;
+end;
+
+// the metric-compatible free substitute of a standard font that came without
+// its program: Arial/Helvetica, Times and Courier -> Liberation ('' if none)
+function SubstituteFile(const Dir, BaseFont: string; Bold, Italic: Boolean): string;
+var
+  N, Family, Style: string;
+begin
+  Result := '';
+  if Dir = '' then
+    Exit;
+  N := BaseFont;
+  if (Length(N) > 7) and (N[7] = '+') then
+    Delete(N, 1, 7); // subset tag
+  N := N.ToLower.Replace(' ', '').Replace('-', '').Replace(',', '');
+  if N.Contains('bold') then Bold := True;
+  if N.Contains('italic') or N.Contains('oblique') then Italic := True;
+  if N.StartsWith('arialnarrow') then
+    Family := 'LiberationSansNarrow'
+  else if N.StartsWith('arial') or N.StartsWith('helvetica') then
+    Family := 'LiberationSans'
+  else if N.StartsWith('timesnewroman') or N.StartsWith('times') then
+    Family := 'LiberationSerif'
+  else if N.StartsWith('couriernew') or N.StartsWith('courier') then
+    Family := 'LiberationMono'
+  else
+    Exit;
+  if Bold and Italic then Style := 'BoldItalic'
+  else if Bold then Style := 'Bold'
+  else if Italic then Style := 'Italic'
+  else Style := 'Regular';
+  Result := IncludeTrailingPathDelimiter(Dir) + Family + '-' + Style + '.ttf';
+  if not FileExists(Result) then
+    Result := '';
+end;
+
+function TPdfaJob.Substitute(D, Fd: TPDFDictionary): Boolean;
+var
+  St, Base, Path: string;
+  Enc: TPDFObject;
+  Bold, Italic: Boolean;
+  Fc, Lc, C: Integer;
+  P: TTTFParser;
+  Sub: TTTFSubsetter;
+  Gids: TList<Word>;
+  Prog: TBytes;
+  W: TPDFArray;
+  Ff: TPDFStream;
+  Upm: Double;
+  M: TTTFMetrics;
+begin
+  Result := False;
+  St := D.GetAsName('Subtype');
+  if not InList(St, ['TrueType', 'Type1']) then
+    Exit;
+  // only simple Latin text: WinAnsi or no encoding (no Differences, no symbols)
+  Enc := Res(D.RawGet('Encoding'));
+  if (Enc <> nil) and not (Enc.IsName and InList(Enc.AsName, ['WinAnsiEncoding',
+     'StandardEncoding'])) then
+    Exit;
+  Base := D.GetAsName('BaseFont');
+  Bold := False;
+  Italic := False;
+  if Fd <> nil then
+  begin
+    if Fd.GetAsInteger('Flags', 0) and 4 <> 0 then
+      Exit; // symbolic
+    Bold := (Fd.GetAsInteger('FontWeight', 400) >= 600) or
+      (Fd.GetAsInteger('Flags', 0) and $40000 <> 0);
+    Italic := Fd.GetAsNumber('ItalicAngle', 0) <> 0;
+  end;
+  Path := SubstituteFile(FOpt.SubstituteFontDir, Base, Bold, Italic);
+  if Path = '' then
+    Exit;
+  Fc := D.GetAsInteger('FirstChar', 32);
+  Lc := D.GetAsInteger('LastChar', 255);
+  if (Fc < 0) or (Lc > 255) or (Lc < Fc) then
+  begin
+    Fc := 32;
+    Lc := 255;
+  end;
+  P := TTTFParser.Create(TFile.ReadAllBytes(Path));
+  Gids := TList<Word>.Create;
+  try
+    if not P.Parse or not P.EmbeddingPermitted then
+      Exit;
+    Gids.Add(0);
+    for C := Fc to Lc do
+    begin
+      var G := P.CharToGlyph(WinAnsiToUnicode(C));
+      if (G > 0) and not Gids.Contains(G) then
+        Gids.Add(G);
+    end;
+    Sub := TTTFSubsetter.Create(P, Gids.ToArray);
+    try
+      Prog := Sub.Build;
+    finally
+      Sub.Free;
+    end;
+    M := P.Metrics;
+    Upm := Max(1, M.UnitsPerEm);
+    // the widths of the embedded program (6.2.11.5)
+    W := TPDFArray.Create;
+    for C := Fc to Lc do
+    begin
+      var G := P.CharToGlyph(WinAnsiToUnicode(C));
+      if G > 0 then
+        W.Add(TPDFInteger.Create(Round(P.GlyphAdvanceWidth(G) * 1000 / Upm)))
+      else
+        W.Add(TPDFInteger.Create(0));
+    end;
+    Ff := TPDFStream.Create;
+    Ff.SetRawData(Prog);
+    Ff.Dict.SetValue('Length1', TPDFInteger.Create(Length(Prog)));
+    if Fd = nil then
+    begin
+      Fd := TPDFDictionary.Create;
+      D.SetValue('FontDescriptor', TPDFReference.CreateNum(Add(Fd), 0));
+    end;
+    Fd.SetValue('Type', TPDFName.Create('FontDescriptor'));
+    Fd.SetValue('FontName', TPDFName.Create(Base));
+    var Flags := 32;
+    if M.IsFixedPitch then Flags := Flags or 1;
+    if Path.Contains('Serif') then Flags := Flags or 2;
+    if Italic or M.IsItalic then Flags := Flags or 64;
+    Fd.SetValue('Flags', TPDFInteger.Create(Flags));
+    var Bb := TPDFArray.Create;
+    Bb.Add(TPDFInteger.Create(Round(M.XMin * 1000 / Upm)));
+    Bb.Add(TPDFInteger.Create(Round(M.YMin * 1000 / Upm)));
+    Bb.Add(TPDFInteger.Create(Round(M.XMax * 1000 / Upm)));
+    Bb.Add(TPDFInteger.Create(Round(M.YMax * 1000 / Upm)));
+    Fd.SetValue('FontBBox', Bb);
+    Fd.SetValue('ItalicAngle', TPDFReal.Create(M.ItalicAngle));
+    Fd.SetValue('Ascent', TPDFInteger.Create(Round(M.Ascender * 1000 / Upm)));
+    Fd.SetValue('Descent', TPDFInteger.Create(Round(M.Descender * 1000 / Upm)));
+    Fd.SetValue('CapHeight', TPDFInteger.Create(Round(M.CapHeight * 1000 / Upm)));
+    if not Fd.Contains('StemV') then
+      Fd.SetValue('StemV', TPDFInteger.Create(IfThen(Bold, 150, 80)));
+    Fd.Remove('FontFile');
+    Fd.Remove('FontFile3');
+    Fd.Remove('CharSet');
+    Fd.Remove('CIDSet');
+    Fd.SetValue('FontFile2', TPDFReference.CreateNum(Add(Ff), 0));
+    D.SetValue('Subtype', TPDFName.Create('TrueType'));
+    D.SetValue('FirstChar', TPDFInteger.Create(Fc));
+    D.SetValue('LastChar', TPDFInteger.Create(Lc));
+    D.SetValue('Widths', W);
+    D.SetValue('Encoding', TPDFName.Create('WinAnsiEncoding'));
+    Result := True;
+  finally
+    Gids.Free;
+    P.Free;
+  end;
+end;
+
 procedure TPdfaJob.FixDict(D: TPDFDictionary; IsStream: Boolean);
 var
   A: TPDFDictionary;
@@ -583,8 +761,8 @@ begin
      'CIDFontType2']) then
   begin
     var Fd := ResDict(D.RawGet('FontDescriptor'));
-    if (Fd = nil) or not (Fd.Contains('FontFile') or Fd.Contains('FontFile2') or
-       Fd.Contains('FontFile3')) then
+    if ((Fd = nil) or not (Fd.Contains('FontFile') or Fd.Contains('FontFile2') or
+       Fd.Contains('FontFile3'))) and not Substitute(D, Fd) then
       AddProblem(FResult, 'la fuente ' + D.GetAsName('BaseFont') + ' no está embebida');
   end;
 end;
@@ -831,6 +1009,126 @@ begin
   Names.SetValue('EmbeddedFiles', Tree);
 end;
 
+function ObjKey(O: TPDFObject): string;
+var
+  S: TBytesStream;
+  Md5: THashMD5;
+begin
+  // the serialized object (and the bytes of a stream): equal key, equal object
+  S := TBytesStream.Create;
+  try
+    if O.IsStream then
+    begin
+      TPDFObjectSerializer.WriteValue(TPDFStream(O).Dict, S);
+      Md5 := THashMD5.Create;
+      Md5.Update(TPDFStream(O).RawBytes);
+      Result := 'S' + Md5.HashAsString + TEncoding.ANSI.GetString(S.Bytes, 0, S.Size);
+    end
+    else
+    begin
+      TPDFObjectSerializer.WriteValue(O, S);
+      Result := 'D' + TEncoding.ANSI.GetString(S.Bytes, 0, S.Size);
+    end;
+  finally
+    S.Free;
+  end;
+end;
+
+procedure TPdfaJob.Dedupe;
+var
+  Map: TDictionary<Integer, Integer>;
+  Seen: TDictionary<string, Integer>;
+  Nums: TArray<Integer>;
+  O: TPDFObject;
+  T: string;
+  Pass: Integer;
+
+  procedure Remap(X: TPDFObject);
+  var
+    D: TPDFDictionary;
+    A: TPDFArray;
+    V: TPDFObject;
+    N: Integer;
+  begin
+    if X = nil then
+      Exit;
+    if X.IsStream then
+      X := TPDFStream(X).Dict;
+    if X.IsDictionary then
+    begin
+      D := TPDFDictionary(X);
+      for var K in D.Keys do
+      begin
+        V := D.RawGet(K);
+        if (V <> nil) and V.IsReference and Map.TryGetValue(TPDFReference(V).RefID.Number, N) then
+          D.SetValue(K, TPDFReference.CreateNum(N, 0))
+        else
+          Remap(V);
+      end;
+    end
+    else if X.IsArray then
+    begin
+      A := TPDFArray(X);
+      for var I := 0 to A.Count - 1 do
+      begin
+        V := A.Items(I);
+        if (V <> nil) and V.IsReference and Map.TryGetValue(TPDFReference(V).RefID.Number, N) then
+        begin
+          A.Delete(I);
+          A.Insert(I, TPDFReference.CreateNum(N, 0));
+        end
+        else
+          Remap(V);
+      end;
+    end;
+  end;
+
+begin
+  // equal objects once (fonts repeated per page, the same image twice...):
+  // a few passes, because merging streams makes their dictionaries equal
+  for Pass := 1 to 4 do
+  begin
+    Map := TDictionary<Integer, Integer>.Create;
+    Seen := TDictionary<string, Integer>.Create;
+    try
+      Nums := FObjects.Keys.ToArray;
+      TArray.Sort<Integer>(Nums);
+      for var N in Nums do
+      begin
+        O := FObjects[N];
+        if (N = FCatNum) or (N = FInfoNum) then
+          Continue;
+        if O.IsDictionary then
+        begin
+          T := TPDFDictionary(O).GetAsName('Type');
+          if InList(T, ['Page', 'Pages', 'Catalog', 'Annot', 'StructElem', 'StructTreeRoot',
+             'OBJR', 'MCR', 'Outlines', 'Sig', 'DocTimeStamp']) or
+             TPDFDictionary(O).Contains('Parent') or TPDFDictionary(O).Contains('P') then
+            Continue;
+        end
+        else if not O.IsStream then
+          Continue;
+        var K := ObjKey(O);
+        var First: Integer;
+        if Seen.TryGetValue(K, First) then
+          Map.Add(N, First)
+        else
+          Seen.Add(K, N);
+      end;
+      if Map.Count = 0 then
+        Break;
+      for var N in FObjects.Keys.ToArray do
+        if not Map.ContainsKey(N) then
+          Remap(FObjects[N]);
+      for var N in Map.Keys.ToArray do
+        FObjects.Remove(N);
+    finally
+      Seen.Free;
+      Map.Free;
+    end;
+  end;
+end;
+
 function TPdfaJob.Save: TBytes;
 var
   Out_: TBytesStream;
@@ -886,6 +1184,7 @@ begin
       Job.Metadata;
       if Length(Attach) > 0 then
         Job.Attach(Attach, AttachName, AttachMime);
+      Job.Dedupe;
       Job.FResult.Pdf := Job.Save;
       Job.FResult.Ok := True;
       Result := Job.FResult;
